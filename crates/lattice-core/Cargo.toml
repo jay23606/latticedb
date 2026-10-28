@@ -1,0 +1,27 @@
+[package]
+name = "lattice-core"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Kernel: typestate transactions, WAL format, policy traits, engine traits."
+
+[dependencies]
+lattice-abi = { path = "../lattice-abi" }
+lattice-seams = { path = "../lattice-seams" }
+lattice-lsl = { path = "../lattice-lsl" }
+thiserror = "2.0.21"
+blake3 = "1.8.7"
+tracing = "0.1.44"
+
+[features]
+default = []
+# Test builds only: deliberate defects used to prove the checkers notice them.
+planted-bugs = []
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1.12.0"
