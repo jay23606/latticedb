@@ -1,0 +1,17 @@
+[package]
+name = "lattice-seams"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Clock, Io, Net, Rng, Spawner traits and their real implementations."
+
+[dependencies]
+getrandom = "0.4.3"
+lattice-abi = { path = "../lattice-abi" }
+lattice-sys = { path = "../lattice-sys" }
+thiserror = "2.0.21"
+
+[lints]
+workspace = true
