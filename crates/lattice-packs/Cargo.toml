@@ -1,0 +1,16 @@
+[package]
+name = "lattice-packs"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Pack runtime and bundled pack sources."
+
+[dependencies]
+lattice-abi = { path = "../lattice-abi" }
+lattice-lsl = { path = "../lattice-lsl" }
+lattice-core = { path = "../lattice-core" }
+
+[lints]
+workspace = true

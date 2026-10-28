@@ -1,0 +1,15 @@
+[package]
+name = "lattice-sdk"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Generated and handwritten client SDKs (Rust first)."
+
+[dependencies]
+lattice-abi = { path = "../lattice-abi" }
+lattice-lsl = { path = "../lattice-lsl" }
+
+[lints]
+workspace = true

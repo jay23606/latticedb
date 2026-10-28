@@ -1,0 +1,4 @@
+name = "example"
+cpu = "unspecified"
+memory_gb = 16
+storage = "unspecified"

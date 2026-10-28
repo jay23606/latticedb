@@ -1,0 +1,27 @@
+[package]
+name = "lattice-engines"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Storage engines: log, row, blob, graph, vector, text, temporal."
+
+[dependencies]
+lattice-abi = { path = "../lattice-abi" }
+lattice-seams = { path = "../lattice-seams" }
+lattice-core = { path = "../lattice-core" }
+lattice-lsl = { path = "../lattice-lsl" }
+
+[features]
+default = ["log", "row", "blob", "graph", "vector", "text", "temporal"]
+log = []
+row = []
+blob = []
+graph = []
+vector = []
+text = []
+temporal = []
+
+[lints]
+workspace = true

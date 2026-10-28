@@ -1,0 +1,16 @@
+[package]
+name = "lattice-cli"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Admin and scripting command line tool."
+
+[dependencies]
+lattice-abi = { path = "../lattice-abi" }
+lattice-sdk = { path = "../lattice-sdk" }
+lattice-core = { path = "../lattice-core" }
+
+[lints]
+workspace = true

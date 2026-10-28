@@ -1,0 +1,16 @@
+[package]
+name = "lattice-identity"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "OIDC provider logic, tokens, keys, relationship store."
+
+[dependencies]
+lattice-abi = { path = "../lattice-abi" }
+lattice-seams = { path = "../lattice-seams" }
+lattice-core = { path = "../lattice-core" }
+
+[lints]
+workspace = true

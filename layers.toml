@@ -1,0 +1,74 @@
+# Declared crate layers. `cargo xtask check-layers` fails when a crate depends on anything not listed.
+dev_allow = ["lattice-testkit", "lattice-sim", "lattice-evalkit"]
+
+[crate.lattice-sys]
+layer = 0
+allow = []
+
+[crate.lattice-abi]
+layer = 0
+allow = []
+
+[crate.lattice-seams]
+layer = 1
+allow = ["lattice-abi", "lattice-sys"]
+
+[crate.lattice-lsl]
+layer = 2
+allow = ["lattice-abi"]
+
+[crate.lattice-sim]
+layer = 2
+allow = ["lattice-abi", "lattice-seams"]
+
+[crate.lattice-core]
+layer = 3
+allow = ["lattice-abi", "lattice-seams", "lattice-lsl"]
+
+[crate.lattice-engines]
+layer = 4
+allow = ["lattice-abi", "lattice-seams", "lattice-core", "lattice-lsl"]
+
+[crate.lattice-identity]
+layer = 4
+allow = ["lattice-abi", "lattice-seams", "lattice-core"]
+
+[crate.lattice-service]
+layer = 5
+allow = ["lattice-abi", "lattice-seams", "lattice-core", "lattice-engines", "lattice-identity", "lattice-lsl"]
+
+[crate.lattice-packs]
+layer = 5
+allow = ["lattice-abi", "lattice-lsl", "lattice-core"]
+
+[crate.lattice-intel]
+layer = 5
+allow = ["lattice-abi", "lattice-seams", "lattice-core"]
+
+[crate.lattice-api]
+layer = 6
+allow = ["lattice-abi", "lattice-seams", "lattice-core", "lattice-engines", "lattice-identity", "lattice-service", "lattice-packs", "lattice-lsl"]
+
+[crate.lattice-sdk]
+layer = 6
+allow = ["lattice-abi", "lattice-lsl"]
+
+[crate.lattice-cli]
+layer = 7
+allow = ["lattice-abi", "lattice-sdk", "lattice-core"]
+
+[crate.latticed]
+layer = 7
+allow = ["lattice-intel", "lattice-abi", "lattice-seams", "lattice-sys", "lattice-core", "lattice-engines", "lattice-identity", "lattice-service", "lattice-packs", "lattice-api"]
+
+[crate.lattice-testkit]
+layer = 8
+allow = ["lattice-abi", "lattice-seams", "lattice-sim", "lattice-lsl", "lattice-core"]
+
+[crate.lattice-evalkit]
+layer = 8
+allow = ["lattice-abi"]
+
+[crate.xtask]
+layer = 9
+allow = []

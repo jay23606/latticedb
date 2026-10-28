@@ -1,0 +1,21 @@
+[package]
+name = "lattice-api"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Protocol front doors: PG wire, S3, sync, OIDC endpoints, MCP, gRPC."
+
+[dependencies]
+lattice-abi = { path = "../lattice-abi" }
+lattice-seams = { path = "../lattice-seams" }
+lattice-core = { path = "../lattice-core" }
+lattice-engines = { path = "../lattice-engines" }
+lattice-identity = { path = "../lattice-identity" }
+lattice-service = { path = "../lattice-service" }
+lattice-packs = { path = "../lattice-packs" }
+lattice-lsl = { path = "../lattice-lsl" }
+
+[lints]
+workspace = true

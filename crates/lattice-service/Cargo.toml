@@ -1,0 +1,19 @@
+[package]
+name = "lattice-service"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Scheduler, work queue, drift engine, reconcilers, connector and pack hosts."
+
+[dependencies]
+lattice-abi = { path = "../lattice-abi" }
+lattice-seams = { path = "../lattice-seams" }
+lattice-core = { path = "../lattice-core" }
+lattice-engines = { path = "../lattice-engines" }
+lattice-identity = { path = "../lattice-identity" }
+lattice-lsl = { path = "../lattice-lsl" }
+
+[lints]
+workspace = true

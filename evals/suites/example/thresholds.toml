@@ -1,0 +1,5 @@
+[[metric]]
+name = "f1"
+lower_bound = 0.80
+confidence = 0.95
+tolerance = 0.01

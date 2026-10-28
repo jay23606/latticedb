@@ -1,0 +1,6 @@
+# Quarantined flaky tests (spec P0-27). Each entry needs an owner and an expiry date.
+# [[test]]
+# name = "crate::module::test_name"
+# owner = "github-handle"
+# reason = "why it is flaky and the tracking item"
+# expires = "YYYY-MM-DD"
