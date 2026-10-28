@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lattice</title>
+<link rel="stylesheet" href="styles.css">
+<style>.mnav{display:none}@media (max-width:860px){.mnav{display:block}.crumb{display:none}.presence{display:none}}</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand"><span class="logo" id="logo"></span> Lattice</div>
+    <div class="space"><span class="chip accent">LAT</span><div><b>Export platform</b><small>Space · 6 members · 4 agents</small></div></div>
+    <nav class="nav" id="side-nav" aria-label="Main"></nav>
+    <div class="side-foot"><span class="live-dot" id="live-dot"></span><span>Live agents</span><button class="switch" id="live-sw" data-act="live" aria-label="Toggle live simulation" aria-pressed="true"></button></div>
+  </aside>
+  <div class="main">
+    <header class="top">
+      <select class="sel mnav" id="mnav" aria-label="Navigate"></select>
+      <div class="crumb" id="crumb"></div>
+      <button class="search" data-act="search" aria-label="Search"><span id="search-ic"></span><span>Search text, meaning, time…</span><kbd>⌘K</kbd></button>
+      <div class="presence" id="presence" aria-label="Online now"></div>
+      <button class="btn ghost sm" id="theme-btn" data-act="theme" aria-label="Toggle theme"></button>
+    </header>
+    <main class="content" id="content"></main>
+  </div>
+</div>
+<div class="drawer-wrap" id="drawer"></div>
+<div class="overlay" id="overlay"><div class="modal" id="modal" role="dialog"></div></div>
+<div class="toast" id="toast" hidden role="status"></div>
+<script src="data.js"></script>
+<script src="app.js"></script>
+<script src="plugins/schema.js"></script>
+</body>
+</html>
