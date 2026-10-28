@@ -1,0 +1,61 @@
+[package]
+name = "lattice-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lattice-core = { path = "../crates/lattice-core" }
+lattice-lsl = { path = "../crates/lattice-lsl" }
+lattice-abi = { path = "../crates/lattice-abi" }
+lattice-seams = { path = "../crates/lattice-seams" }
+lattice-sim = { path = "../crates/lattice-sim" }
+
+# Not part of the main workspace: fuzzing needs nightly.
+[workspace]
+
+[[bin]]
+name = "trivial"
+path = "fuzz_targets/trivial.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wal_record"
+path = "fuzz_targets/wal_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "changeset_decode"
+path = "fuzz_targets/changeset_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lsl_parse"
+path = "fuzz_targets/lsl_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "id_parse"
+path = "fuzz_targets/id_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "log_open"
+path = "fuzz_targets/log_open.rs"
+test = false
+doc = false
+bench = false
