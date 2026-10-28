@@ -133,16 +133,21 @@ impl<I: Io, C: Clock, R: Rng> TypedStore<I, C, R> {
                         .catalog()
                         .layout_at(*id, self.snapshot().as_of)
                         .is_none()
-                        && !self.rows.scan_at(self.snapshot(), *id, ..).is_empty()
+                        && self.rows.has_table_history(*id)
                     {
                         return Err(Error::Schema(format!(
-                            "cannot attach a typed layout to populated raw table {id}"
+                            "cannot attach a typed layout to raw table history {id}"
                         )));
                     }
                     *id
                 }
                 None => {
-                    let id = next.clone().map_err(Error::Catalog)?;
+                    let mut id = next.clone().map_err(Error::Catalog)?;
+                    while self.rows.has_table_history(id) {
+                        id = id
+                            .checked_add(1)
+                            .ok_or(Error::Catalog(CatalogError::Exhausted))?;
+                    }
                     next = id.checked_add(1).ok_or(CatalogError::Exhausted);
                     id
                 }

@@ -26,3 +26,7 @@ values in typed tables. Historical values are checked when read at their snapsho
 The committed `formats/corpus` examples are produced by
 `formats/generate_typed_catalog_golden.py`, using only Python's standard library and no Rust encoder.
 The typed-store integration suite decodes and re-encodes them byte-exactly.
+
+Physical table allocation also excludes ids seen in raw row history, even if no catalog entry exists
+or all rows were deleted. Adopting an existing untyped catalog table with any row history is rejected
+before appending a schema record. Recovery rebuilds physical-id reservations from every row write.

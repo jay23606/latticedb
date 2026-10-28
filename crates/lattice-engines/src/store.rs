@@ -17,6 +17,7 @@ use lattice_core::changeset::ChangeSet;
 use lattice_core::record::RecordType;
 use lattice_core::{Config, Kernel, Receipt, TxnError};
 use lattice_seams::{Clock, Io, Rng};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::{Bound, RangeBounds};
 
@@ -79,12 +80,35 @@ impl Classify for RowError {
     }
 }
 
+// Catalog-only validation cannot see uncatalogued physical row ids. The shared row/catalog
+// boundary must reject assigning a typed layout to any id with older untyped row history.
+fn check_schema_history(
+    catalog: &Catalog,
+    row_tables: &BTreeSet<u32>,
+    ops: &[CatalogOp],
+) -> Result<(), CatalogError> {
+    for op in ops {
+        if let CatalogOp::DefineSchema { tables, .. } = op {
+            for table in tables.keys() {
+                if row_tables.contains(table)
+                    && catalog.layout_at(*table, catalog.applied_lsn()).is_none()
+                {
+                    return Err(CatalogError::IdUsed(*table));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Rows over the kernel.
 pub struct RowStore<I: Io, C: Clock, R: Rng> {
     kernel: Kernel<I, C, R>,
     table: Table<RowKey, Vec<u8>>,
     indexes: Indexes,
     catalog: Catalog,
+    /// Physical ids observed in any row write, including deletions and historical versions.
+    row_tables: BTreeSet<u32>,
     stale: bool,
 }
 
@@ -111,6 +135,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         let mut table: Table<RowKey, Vec<u8>> = Table::new();
         let mut indexes = Indexes::new(index_defs);
         let mut catalog = Catalog::new();
+        let mut row_tables = BTreeSet::new();
         let mut failure: Option<RowError> = None;
         let (kernel, _, _) = Kernel::open_streaming(io, clock, rng, config, |r| {
             if failure.is_some() || RecordType::from_u8(r.rtype) != Some(RecordType::ChangeSet) {
@@ -127,7 +152,10 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                 }
             };
             if catalog::is_catalog_payload(&cs.payload) {
-                match catalog::decode(&cs.payload).and_then(|ops| catalog.apply(r.lsn, &ops)) {
+                match catalog::decode(&cs.payload).and_then(|ops| {
+                    check_schema_history(&catalog, &row_tables, &ops)?;
+                    catalog.apply(r.lsn, &ops)
+                }) {
                     Ok(()) => {}
                     Err(e) => {
                         failure = Some(RowError::Corrupt(format!("catalog at lsn {}: {e}", r.lsn)))
@@ -140,6 +168,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
             }
             match rowops::decode(&cs.payload) {
                 Ok(mut writes) => {
+                    row_tables.extend(writes.iter().map(|((table, _), _)| *table));
                     if bugs::active(Bug::RowRecoveryDropsDeletes) {
                         writes.retain(|(_, value)| value.is_some());
                     }
@@ -167,6 +196,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                 table,
                 indexes,
                 catalog,
+                row_tables,
                 stale: false,
             }),
         }
@@ -189,12 +219,21 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         &self.catalog
     }
 
+    /// Whether this physical table id has appeared in any durable row write. Deletions do not
+    /// release ids: tombstones and all historical versions reserve the id even without a catalog.
+    /// Recovery rebuilds this set from the WAL independently of live row visibility.
+    pub fn has_table_history(&self, table: u32) -> bool {
+        self.row_tables.contains(&table)
+    }
+
     /// Commits catalog changes through the same writer as row changes.
     pub fn commit_catalog(&mut self, ops: Vec<CatalogOp>) -> Result<u64, RowError> {
         if self.stale {
             return Err(RowError::Stale);
         }
         self.catalog.check(&ops).map_err(RowError::InvalidCatalog)?;
+        check_schema_history(&self.catalog, &self.row_tables, &ops)
+            .map_err(RowError::InvalidCatalog)?;
         let payload = catalog::encode(&ops).map_err(RowError::InvalidCatalog)?;
         let id = self.kernel.new_id();
         match self.kernel.commit(ChangeSet::new(id, payload)) {
@@ -313,6 +352,8 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                 } else {
                     writes
                 };
+                self.row_tables
+                    .extend(writes.iter().map(|((table, _), _)| *table));
                 let changes = self.indexes.changes_for(&self.table, &writes);
                 self.table
                     .apply(lsn, id, writes)

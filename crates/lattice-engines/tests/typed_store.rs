@@ -394,3 +394,196 @@ fn independent_python_catalog_and_typed_envelope_goldens_are_byte_exact() {
     let raw = RowStore::open(disk, SharedClock(clock), SeededRng::new(92), &config()).unwrap();
     assert_eq!(raw.get_at(snap, 42, b"reencoded").unwrap().as_slice(), ROW);
 }
+
+#[test]
+fn uncatalogued_raw_history_is_never_adopted_by_new_typed_tables() {
+    for deleted in [false, true] {
+        let (disk, clock) = fresh(101 + u64::from(deleted));
+        let mut raw = RowStore::open(
+            disk.clone(),
+            SharedClock(clock.clone()),
+            SeededRng::new(101),
+            &config(),
+        )
+        .unwrap();
+        let mut tx = raw.begin();
+        tx.put((1, b"k".to_vec()), b"raw".to_vec());
+        raw.commit(tx).unwrap();
+        let original = raw.snapshot();
+        if deleted {
+            let mut tx = raw.begin();
+            tx.delete((1, b"k".to_vec()));
+            raw.commit(tx).unwrap();
+        }
+        drop(raw);
+        let mut typed = open(&disk, &clock, 102).unwrap();
+        typed.install_schema("type Ticket { title: text }").unwrap();
+        let table = typed
+            .catalog()
+            .id_of(typed.snapshot().as_of, "Ticket")
+            .unwrap();
+        assert_ne!(table, 1, "raw table history was reused, deleted={deleted}");
+        assert!(
+            typed
+                .get_at(typed.snapshot(), "Ticket", b"k")
+                .unwrap()
+                .is_none()
+        );
+        let value = object(&[("title", Value::Text("typed".into()))]);
+        let mut tx = typed.begin();
+        typed.put(&mut tx, "Ticket", b"k", &value).unwrap();
+        typed.commit(tx).unwrap();
+        drop(typed);
+        let typed = open(&disk, &clock, 103).unwrap();
+        assert_eq!(
+            typed.get_at(typed.snapshot(), "Ticket", b"k").unwrap(),
+            Some(value)
+        );
+        drop(typed);
+        let raw = RowStore::open(disk, SharedClock(clock), SeededRng::new(104), &config()).unwrap();
+        assert_eq!(raw.get_at(original, 1, b"k"), Some(&b"raw".to_vec()));
+        if deleted {
+            assert!(raw.get_at(raw.snapshot(), 1, b"k").is_none());
+        }
+    }
+}
+
+#[test]
+fn catalogued_raw_tombstones_also_prevent_typed_adoption() {
+    for deleted in [false, true] {
+        let (disk, clock) = fresh(110 + u64::from(deleted));
+        let mut raw = RowStore::open(
+            disk.clone(),
+            SharedClock(clock.clone()),
+            SeededRng::new(110),
+            &config(),
+        )
+        .unwrap();
+        raw.commit_catalog(vec![CatalogOp::Create {
+            table: 1,
+            name: "Ticket".into(),
+        }])
+        .unwrap();
+        let mut tx = raw.begin();
+        tx.put((1, b"k".to_vec()), b"raw".to_vec());
+        raw.commit(tx).unwrap();
+        if deleted {
+            let mut tx = raw.begin();
+            tx.delete((1, b"k".to_vec()));
+            raw.commit(tx).unwrap();
+        }
+        drop(raw);
+        let mut typed = open(&disk, &clock, 111).unwrap();
+        let before = typed.snapshot();
+        assert!(
+            matches!(
+                typed.install_schema("type Ticket { title: text }"),
+                Err(Error::Schema(_))
+            ),
+            "raw catalog table was adopted, deleted={deleted}"
+        );
+        assert_eq!(
+            typed.snapshot(),
+            before,
+            "rejection appended a catalog record"
+        );
+        drop(typed);
+        assert!(open(&disk, &clock, 112).is_ok());
+    }
+}
+
+#[test]
+fn delete_only_and_mixed_uncatalogued_ids_remain_reserved_after_replay() {
+    let (disk, clock) = fresh(120);
+    let mut raw = RowStore::open(
+        disk.clone(),
+        SharedClock(clock.clone()),
+        SeededRng::new(120),
+        &config(),
+    )
+    .unwrap();
+    let mut tx = raw.begin();
+    tx.delete((1, Vec::new()));
+    tx.put((2, b"deleted".to_vec()), b"raw".to_vec());
+    tx.put((4, b"live".to_vec()), b"raw".to_vec());
+    raw.commit(tx).unwrap();
+    let mut tx = raw.begin();
+    tx.delete((2, b"deleted".to_vec()));
+    raw.commit(tx).unwrap();
+    for table in [1, 2, 4] {
+        assert!(raw.has_table_history(table));
+    }
+    drop(raw);
+    let mut typed = open(&disk, &clock, 121).unwrap();
+    typed.install_schema(V1).unwrap();
+    let ids: Vec<u32> = typed.catalog().current().into_keys().collect();
+    assert_eq!(ids, vec![3, 5, 6]);
+    drop(typed);
+    let typed = open(&disk, &clock, 122).unwrap();
+    assert_eq!(
+        typed.catalog().current().into_keys().collect::<Vec<_>>(),
+        ids
+    );
+    drop(typed);
+    let raw = RowStore::open(disk, SharedClock(clock), SeededRng::new(123), &config()).unwrap();
+    for table in [1, 2, 4] {
+        assert!(raw.has_table_history(table));
+    }
+    assert!(raw.get_at(raw.snapshot(), 1, &[]).is_none());
+    assert!(raw.get_at(raw.snapshot(), 2, b"deleted").is_none());
+    assert_eq!(
+        raw.get_at(raw.snapshot(), 4, b"live"),
+        Some(&b"raw".to_vec())
+    );
+}
+
+#[test]
+fn schema_catalog_commits_and_replay_reject_prior_raw_history() {
+    use lattice_core::{ChangeSet, Kernel};
+    use lattice_engines::catalog::CatalogError;
+    use lattice_engines::store::RowError;
+    use lattice_lsl::{format, parser};
+    use std::collections::BTreeMap;
+    let (disk, clock) = fresh(130);
+    let mut raw = RowStore::open(
+        disk.clone(),
+        SharedClock(clock.clone()),
+        SeededRng::new(130),
+        &config(),
+    )
+    .unwrap();
+    let mut tx = raw.begin();
+    tx.delete((1, b"gone".to_vec()));
+    raw.commit(tx).unwrap();
+    let before = raw.snapshot();
+    let op = CatalogOp::DefineSchema {
+        version: 1,
+        source: format::format(&parser::parse("type Ticket { title: text }").unwrap()),
+        tables: BTreeMap::from([(1, "Ticket".into())]),
+    };
+    assert!(matches!(
+        raw.commit_catalog(vec![op.clone()]),
+        Err(RowError::InvalidCatalog(CatalogError::IdUsed(1)))
+    ));
+    assert_eq!(raw.snapshot(), before);
+    assert!(raw.catalog().current().is_empty());
+    drop(raw);
+    // A low-level writer can create CRC-valid semantic corruption; the combined reader must refuse it.
+    let mut kernel = Kernel::open(
+        disk.clone(),
+        SharedClock(clock.clone()),
+        SeededRng::new(131),
+        &config(),
+    )
+    .unwrap()
+    .0;
+    let id = kernel.new_id();
+    kernel
+        .commit(ChangeSet::new(id, catalog::encode(&[op]).unwrap()))
+        .unwrap();
+    drop(kernel);
+    assert!(matches!(
+        RowStore::open(disk, SharedClock(clock), SeededRng::new(132), &config()),
+        Err(RowError::Corrupt(_))
+    ));
+}
