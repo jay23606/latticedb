@@ -29,7 +29,8 @@ Rules:
 - A required column must be present; an optional one is simply absent.
 - Fields unknown to the encoding layout are written to the overflow area and read back unchanged.
   Decoding requires the same layout that wrote the row. The codec version is not a schema version;
-  dispatch by persisted layout version and schema migration are not implemented yet.
+  the [typed envelope](typed-envelope-v1.md) supplies persisted writer-schema dispatch in the typed
+  store. Online schema migration remains separate work.
 - Overflow fields and tagged object fields are ordered by name, with no duplicates. An overflow field
   must not repeat a column name. Non-canonical field ordering is rejected. Padding bits in the bitmap must be zero, so one row has
   exactly one encoding. Typed and tagged values both enforce the 16-level nesting limit.

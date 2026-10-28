@@ -5,6 +5,7 @@
 
 #[cfg(feature = "row")]
 pub mod catalog;
+#[cfg(feature = "row")]
 pub mod index;
 #[cfg(feature = "row")]
 pub mod mvcc;
@@ -14,6 +15,8 @@ pub mod rowops;
 pub mod store;
 #[cfg(feature = "row")]
 pub mod typed;
+#[cfg(feature = "row")]
+pub mod typed_store;
 
 /// Layer marker used by the layer check. Do not remove.
 pub const LAYER: u8 = 4;
