@@ -1,0 +1,77 @@
+# Phase 1 status (gate NOT passed)
+
+Date: 2026-10-28. Phase 1 is partly built. This page says exactly what exists, what was measured, what
+an independent review found, and what is missing. The gate in `docs/spec/01-foundations.md` is **not**
+met.
+
+## Independent review and what happened to it
+
+The review of the first Phase 1 build found 31 issues, several of them real correctness bugs that the
+simulator at that time could not see. All were triaged; the harness was strengthened first so the fixes
+are exercised.
+
+| Finding | Outcome |
+|---|---|
+| Typestate let one kernel promote another kernel's transaction; prepared transactions bypassed later fences and id reservations; HLCs could be assigned out of log order | Fixed: transactions carry a kernel-instance owner; duplicate and fence checks and HLC assignment happen at the log append (the linearization point); `sync` verifies durability per transaction |
+| A repeated id in one batch was acknowledged even when the original's fsync failed | Fixed: repeats share the original's fate; planted bug `BatchDuplicateAckedEarly` proves the harness catches the old behaviour |
+| Writer could acknowledge records the decoder rejects (over 16 MiB); `ChangeSet::encode` silently dropped parents above 65,535 | Fixed: size checked before an LSN is taken; `encode` is fallible |
+| Recovery adopted visible-but-unsynced bytes; WAL directory creation lacked parent durability; two writers could share a log | Fixed: recovery fsyncs before returning, parents are synced, an exclusive `Io::lock` is held for the log's lifetime. Planted bugs `SkipRecoverySync` and `NoParentDirSync` are caught |
+| Recovery skipped malformed known records | Fixed: corruption error |
+| Entropy failure silently produced zero ids | Fixed: the process aborts |
+| Torn-tail heuristic can mistake an embedded record for later data; CPU amplification | Bounded (plausibility filter before checksums) and **documented** as a conservative refusal (`formats/wal-v1.md`, ADR 0007). Not eliminated |
+| LSL stack overflow on deep nesting; `..` range edge case; compat verdict ignored new types | Fixed: input size and nesting limits, checked range arithmetic, new types make a change forward-incompatible |
+| HLC exhaustion regressed; drift bound only on `observe` | Fixed: exhaustion is an error; the doc now says only `observe` enforces drift |
+| Harness blind spots: crashes only between steps, 19 percent of runs cut short and uncounted, one rot event disabled checks for the rest of a run, truncate modelled as durable, writes all-or-nothing, trace hash too coarse, oracle checked payloads only, no in-doubt retries | Fixed: power cuts inside durability protocols (including recovery), a terminal recovery on a fault-free disk for every run, censored runs counted and capped by quotas, rot exempts only data that existed when it struck, unsynced truncate and partial appends modelled, trace hashes all data, whole-envelope oracle, in-doubt and in-batch duplicate workloads |
+| Evalkit: interval estimated a different statistic than the point estimate; dataset hash collision; gate accepted NaN, empty or inconsistent evidence; nDCG ignored omitted judgments; report escaping | Fixed (tests for each, including the exact collision found) |
+| `Commit.tla` assumes the disputed guarantees | Not extended. Header now states its limits; TLC has never been run here |
+| Hash chain cannot see suffix deletion | Fixed: `verify_with_head`; the limitation is documented |
+| "Parser never panics" claim | Corrected: input and nesting are bounded and property-tested |
+
+## What exists and is verified (evidence: `cargo xtask ci`, `cargo xtask sim`)
+
+| Area | State |
+|---|---|
+| Ids, HLC, error taxonomy | Done, with property tests |
+| Seams `Clock`, `Rng`, `Io` (now with locks), `Spawner`, `Net` and real `SystemClock`, `OsRng`, `StdIo`, `ThreadSpawner` | Done except a real `Net`. One `Io` conformance suite runs against real and simulated storage |
+| Simulator | `SimIo` with crash, torn writes and garbage tails, unsynced truncates, partial appends, append and fsync errors, disk full, bit rot, lost directory and file entries, **power cuts inside operation sequences**, process-only restarts, locks; `SimNet`; trace hash over all data and outcomes |
+| WAL and kernel | Segmented log, CRC32C, group commit, rotation, recovery with the torn-tail rule, poisoning, idempotency, fencing, typestate with owner binding and a compile-fail test |
+| Format | `formats/wal-v1.md`, `changeset-v1.md`, `hlc.md`; golden file from an **independent Python implementation** decoded and re-encoded byte-exactly in CI |
+| Invariants | I1 (whole envelope), I2 (log level), I4, I6, I12 as `Invariant` implementations; I13 hash chain primitive |
+| CRDTs | LWW register and OR-set, merge laws and convergence property tests |
+| LSL v0 | Parser (bounded), checker, validator, compat checker, formatter |
+| Evalkit | Hash-checked datasets (BLAKE3, framed), P/R/F1 with a same-statistic bootstrap, ECE, nDCG, validated gate, escaped reports, mutation-based drift generator, gate self-test |
+| Testing the tests | **15 planted bugs**, all caught under the expected invariant (most at seed 0); zero violations on the clean build |
+
+Measured on the strengthened harness: `cargo xtask sim --seeds 10000 --steps 150` ran **50,000**
+scenarios (5 profiles x 10,000 seeds) with **0 violations**, 1,899,450 recoveries and **832,021 power cuts
+inside durability protocols**. 159 workloads were cut short by faults (all still verified by the terminal
+check) and 1,767 runs, all in the bit-rot profile, were **incomplete** (recovery refused a rotted log, so
+no verdict): they are reported, capped by a quota test, and not counted as passes.
+
+## Exit criteria against the spec
+
+| # | Criterion | Status |
+|---|---|---|
+| E1-1 | 10,000 seeds reproduce identical trace hashes | Partial: 60 seeds x 5 profiles checked in CI |
+| E1-2 | 1,000,000 seeds per night for 7 nights | Not met: 50,000 runs once; nightly wired, no history |
+| E1-3 | At least 20 planted bugs, 95 percent detected, no false alarms | Partial: 15 bugs, all detected, no false alarms |
+| E1-4 | Recovery correct at every fsync boundary in 100 scenarios | Partial: random power cuts inside protocols, not an exhaustive sweep |
+| E1-5 | CRDT laws at 10,000 cases (PR) and 1,000,000 (nightly) | Partial: default 256 cases; no text CRDT |
+| E1-6 | 24 hours of fuzzing per target | Not met: no fuzz targets (decoders and parser covered by property tests) |
+| E1-7 | Mutation score at least 80 percent | Not met |
+| E1-8 | Eval gate self-test, byte-identical reports, reproducible intervals | Met |
+| E1-9 | Benchmark baselines and regression gate | Not met |
+| E1-10 | Format ADR accepted, corpus read in CI | Met for the WAL and change set |
+| E1-11 | TLC passes four models | Not met: `Commit.tla` unrun and limited; others missing |
+| E1-12 | Runtime ADR with benchmark data | Not met: ADR 0008 defers it |
+| E1-13 | Unsafe discipline, Miri, loom | Partial: zero `unsafe` anywhere; nothing for Miri or loom yet |
+| E1-14 | Traceability matrix complete | Partial |
+| E1-15 | Scorecard from a results ledger | Not met |
+| E1-16 | Gate review package | Not met |
+
+## Not built
+
+Reader API and checkpoints, commit pipeline with bounded queues, text CRDT, simulated convergence,
+migration lenses and the `lsc` CLI, scrubber and `lattice doctor`, observability (`tracing`, metrics,
+`Secret<T>`), fuzz targets, benchmarks, mutation testing, TLA+ models beyond the limited commit model,
+runtime spike, results ledger, scorecard and north-star pending specs.

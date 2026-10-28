@@ -1,0 +1,9 @@
+# ADR NNNN: Title
+
+Status: proposed
+
+## Context
+
+## Decision
+
+## Consequences
