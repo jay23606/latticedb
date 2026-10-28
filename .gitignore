@@ -1,0 +1,8 @@
+/target
+/docs/site
+*.swp
+.DS_Store
+/fuzz/target
+/fuzz/artifacts
+/fuzz/corpus
+/backlog/P*.md
