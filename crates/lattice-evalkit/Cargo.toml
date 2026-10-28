@@ -1,0 +1,20 @@
+[package]
+name = "lattice-evalkit"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Eval runner, metrics, datasets, reports."
+
+[dependencies]
+blake3 = "1.8.7"
+lattice-abi = { path = "../lattice-abi" }
+thiserror = "2.0.21"
+toml.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1.12.0"
