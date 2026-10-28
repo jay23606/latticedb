@@ -1,0 +1,18 @@
+[package]
+name = "lattice-testkit"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Test support: oracles, generators, invariant checkers, workloads."
+
+[dependencies]
+lattice-abi = { path = "../lattice-abi" }
+lattice-seams = { path = "../lattice-seams" }
+lattice-sim = { path = "../lattice-sim" }
+lattice-lsl = { path = "../lattice-lsl" }
+lattice-core = { path = "../lattice-core", features = ["planted-bugs"] }
+
+[lints]
+workspace = true
