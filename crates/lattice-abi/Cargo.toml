@@ -1,0 +1,20 @@
+[package]
+name = "lattice-abi"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Stable ids, error taxonomy, wire and on-disk enums, plugin ABI."
+
+[dependencies]
+subtle = "2.6.1"
+thiserror = "2.0.21"
+zeroize = "1.9.1"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1.12.0"
+tracing = "0.1.44"
