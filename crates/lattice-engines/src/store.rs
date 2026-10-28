@@ -7,6 +7,7 @@
 //! in one call, so every reader sees all of the change set or none of it. Recovery replays the log's
 //! row change sets through the same apply, so a restart reproduces exactly the acknowledged state.
 
+use crate::catalog::{self, Catalog, CatalogError, CatalogOp};
 use crate::index::{IndexDef, Indexes};
 use crate::mvcc::{MvccError, Snapshot, Table, Tx};
 use crate::rowops::{self, RowKey, RowOpsError};
@@ -42,6 +43,8 @@ pub enum RowError {
     Corrupt(String),
     /// The index definitions cannot identify their entries unambiguously.
     InvalidIndexes(String),
+    /// Catalog rules rejected the operation before writing anything.
+    InvalidCatalog(CatalogError),
     /// The writes do not fit the payload format.
     Encode(RowOpsError),
 }
@@ -56,6 +59,7 @@ impl fmt::Display for RowError {
             RowError::InDoubt(e) => write!(f, "commit outcome unknown: {e}"),
             RowError::Stale => write!(f, "store is stale after an ambiguous failure; reopen it"),
             RowError::Corrupt(why) => write!(f, "row data corrupt: {why}"),
+            RowError::InvalidCatalog(why) => write!(f, "invalid catalog operation: {why}"),
             RowError::InvalidIndexes(why) => write!(f, "invalid index definitions: {why}"),
             RowError::Encode(e) => write!(f, "cannot encode writes: {e:?}"),
         }
@@ -68,7 +72,9 @@ impl Classify for RowError {
             RowError::Conflict { .. } | RowError::Stale => ErrorClass::Retryable,
             RowError::Rejected(e) | RowError::InDoubt(e) => e.class(),
             RowError::Corrupt(_) => ErrorClass::Fatal,
-            RowError::Encode(_) | RowError::InvalidIndexes(_) => ErrorClass::Rejected,
+            RowError::Encode(_) | RowError::InvalidIndexes(_) | RowError::InvalidCatalog(_) => {
+                ErrorClass::Rejected
+            }
         }
     }
 }
@@ -78,6 +84,7 @@ pub struct RowStore<I: Io, C: Clock, R: Rng> {
     kernel: Kernel<I, C, R>,
     table: Table<RowKey, Vec<u8>>,
     indexes: Indexes,
+    catalog: Catalog,
     stale: bool,
 }
 
@@ -103,6 +110,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         }
         let mut table: Table<RowKey, Vec<u8>> = Table::new();
         let mut indexes = Indexes::new(index_defs);
+        let mut catalog = Catalog::new();
         let mut failure: Option<RowError> = None;
         let (kernel, _, _) = Kernel::open_streaming(io, clock, rng, config, |r| {
             if failure.is_some() || RecordType::from_u8(r.rtype) != Some(RecordType::ChangeSet) {
@@ -118,6 +126,15 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                     return;
                 }
             };
+            if catalog::is_catalog_payload(&cs.payload) {
+                match catalog::decode(&cs.payload).and_then(|ops| catalog.apply(r.lsn, &ops)) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        failure = Some(RowError::Corrupt(format!("catalog at lsn {}: {e}", r.lsn)))
+                    }
+                }
+                return;
+            }
             if !rowops::is_row_payload(&cs.payload) {
                 return; // another engine's change set
             }
@@ -149,6 +166,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                 kernel,
                 table,
                 indexes,
+                catalog,
                 stale: false,
             }),
         }
@@ -161,7 +179,41 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
 
     /// The newest snapshot: everything committed so far.
     pub fn snapshot(&self) -> Snapshot {
-        self.table.snapshot()
+        Snapshot {
+            as_of: self.kernel.durable_lsn(),
+        }
+    }
+
+    /// The versioned catalog sharing this store's WAL and writer.
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    /// Commits catalog changes through the same writer as row changes.
+    pub fn commit_catalog(&mut self, ops: Vec<CatalogOp>) -> Result<u64, RowError> {
+        if self.stale {
+            return Err(RowError::Stale);
+        }
+        self.catalog.check(&ops).map_err(RowError::InvalidCatalog)?;
+        let payload = catalog::encode(&ops).map_err(RowError::InvalidCatalog)?;
+        let id = self.kernel.new_id();
+        match self.kernel.commit(ChangeSet::new(id, payload)) {
+            Ok(Receipt::Recorded { lsn, .. }) => {
+                self.catalog
+                    .apply(lsn, &ops)
+                    .map_err(|e| RowError::Corrupt(format!("catalog apply after commit: {e}")))?;
+                Ok(lsn)
+            }
+            Ok(Receipt::Duplicate) => {
+                self.stale = true;
+                Err(RowError::Corrupt("fresh catalog id was a duplicate".into()))
+            }
+            Err(e) if e.class() == ErrorClass::Rejected => Err(RowError::Rejected(e)),
+            Err(e) => {
+                self.stale = true;
+                Err(RowError::InDoubt(e))
+            }
+        }
     }
 
     /// Reads a row inside a transaction: its own writes first, then its snapshot.
@@ -234,7 +286,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         self.check_indexes_at(self.snapshot())
     }
 
-    /// The commit LSN of the newest change set applied.
+    /// The newest row change set applied. [`Self::snapshot`] also includes catalog-only commits.
     pub fn applied_lsn(&self) -> u64 {
         self.table.applied_lsn()
     }
