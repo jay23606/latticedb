@@ -1,0 +1,6 @@
+{
+  "name": "lattice",
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+  "postCreateCommand": "rustup toolchain install 1.99.1 --component rustfmt clippy && cargo install cargo-deny typos-cli --locked && cargo xtask setup",
+  "customizations": { "vscode": { "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml"] } }
+}

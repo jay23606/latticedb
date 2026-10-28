@@ -1,0 +1,8 @@
+#!/bin/sh
+# Installed by `cargo xtask setup`. CI is authoritative; this catches the cheap problems early.
+set -e
+cargo fmt --all -- --check
+cargo xtask check-layers
+cargo xtask check-unsafe
+cargo xtask check-allow
+command -v typos >/dev/null 2>&1 && typos || echo "typos not installed (cargo install typos-cli)"

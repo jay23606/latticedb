@@ -1,0 +1,46 @@
+# Determinism and safety bans (spec P0-07). Only crates in tools/allow-banned.toml may allow these.
+# Paths for tokio and rand are added when those dependencies enter the workspace (Phase 1),
+# because clippy rejects paths it cannot resolve.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
+
+disallowed-methods = [
+  # time
+  { path = "std::time::Instant::now", reason = "use the Clock seam" },
+  { path = "std::time::Instant::elapsed", reason = "use the Clock seam" },
+  { path = "std::time::SystemTime::now", reason = "use the Clock seam" },
+  { path = "std::time::SystemTime::elapsed", reason = "use the Clock seam" },
+  { path = "std::thread::sleep", reason = "use the Clock seam" },
+  # threads and processes
+  { path = "std::thread::spawn", reason = "use the Spawner seam" },
+  { path = "std::process::Command::new", reason = "the core spawns no processes" },
+  # environment
+  { path = "std::env::var", reason = "configuration comes from explicit config, not ambient env" },
+  { path = "std::env::var_os", reason = "configuration comes from explicit config, not ambient env" },
+  { path = "std::env::vars", reason = "configuration comes from explicit config, not ambient env" },
+  # filesystem
+  { path = "std::fs::File::open", reason = "use the Io seam" },
+  { path = "std::fs::File::create", reason = "use the Io seam" },
+  { path = "std::fs::read", reason = "use the Io seam" },
+  { path = "std::fs::write", reason = "use the Io seam" },
+  { path = "std::fs::read_to_string", reason = "use the Io seam" },
+  { path = "std::fs::read_dir", reason = "use the Io seam" },
+  { path = "std::fs::remove_file", reason = "use the Io seam" },
+  { path = "std::fs::rename", reason = "use the Io seam" },
+  { path = "std::fs::create_dir_all", reason = "use the Io seam" },
+  { path = "std::fs::OpenOptions::open", reason = "use the Io seam" },
+  # network (the core never dials out; sockets belong to the Net seam)
+  { path = "std::net::TcpStream::connect", reason = "use the Net seam" },
+  { path = "std::net::TcpListener::bind", reason = "use the Net seam" },
+  { path = "std::net::UdpSocket::bind", reason = "use the Net seam" },
+  # randomness
+  { path = "std::hash::RandomState::new", reason = "random hashing breaks determinism" },
+]
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "random iteration order breaks determinism; use BTreeMap or a seeded hasher" },
+  { path = "std::collections::HashSet", reason = "random iteration order breaks determinism; use BTreeSet or a seeded hasher" },
+  { path = "std::hash::RandomState", reason = "random hashing breaks determinism" },
+]

@@ -1,0 +1,22 @@
+name: weekly
+on:
+  schedule: [{ cron: "0 3 * * 0" }]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: echo "Later phases add sqllogictest, driver matrix, s3-tests, OpenID conformance (scaffold)"
+  chaos-soak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: echo "Phase 10 adds chaos and soak runs (scaffold)"
+  upgrade-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: echo "Phase 12 adds the upgrade matrix and freeze-corpus reads across versions (scaffold)"

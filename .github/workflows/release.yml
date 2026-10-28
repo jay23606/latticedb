@@ -1,0 +1,34 @@
+name: release-dry-run
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with: { toolchain: 1.99.1 }
+      - uses: taiki-e/install-action@645d1ab48b3cb8591684a8b730b2ccf4cb3f9568 # v2
+        with:
+          tool: cargo-cyclonedx,git-cliff
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - name: build and package
+        run: |
+          cargo build --workspace --release
+          mkdir -p dist
+          tar -czf dist/latticed-linux-x86_64.tar.gz -C target/release latticed
+          sha256sum dist/latticed-linux-x86_64.tar.gz > dist/SHA256SUMS
+      - name: sbom
+        run: cargo cyclonedx --format json --override-filename sbom && mv sbom.json dist/ || true
+      - name: changelog from conventional commits
+        run: git cliff --output dist/CHANGELOG.md || true
+      - name: sign (keyless, dry run)
+        run: cosign sign-blob --yes dist/latticed-linux-x86_64.tar.gz --output-signature dist/latticed.sig --output-certificate dist/latticed.pem
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-dry-run
+          path: dist/
