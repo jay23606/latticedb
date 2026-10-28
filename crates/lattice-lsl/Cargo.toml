@@ -1,0 +1,18 @@
+[package]
+name = "lattice-lsl"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Lattice Schema Language: parser, checker, validator, codegen."
+
+[dependencies]
+lattice-abi = { path = "../lattice-abi" }
+thiserror = "2.0.21"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest = "1.12.0"
