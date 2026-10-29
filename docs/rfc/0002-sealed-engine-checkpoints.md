@@ -98,5 +98,8 @@ constant total resident state or WAL-content verification is made.
 Independent byte-exact fixtures now come from `formats/generate_checkpoint_golden.py`: Python owns
 the framing/state encoder and delegates only standard BLAKE3 hashing to an external pinned library.
 Rust independently decodes/reencodes and reproduces the files, including full fast/legacy replay
-agreement. The fresh-process RSS/time table remains pending the opt-in manual Linux CI run described
-in `crates/lattice-bench/CHECKPOINT_RECOVERY.md`; no unmeasured memory bound is claimed.
+agreement. The first fresh-process Linux CI run now records 11 datasets and 66 trials with an enforced
+192 MiB per-child cgroup ceiling and actual over-limit OOM calibration. Raw results, exact runner
+provenance and interpretation are in `crates/lattice-bench/CHECKPOINT_RECOVERY.md`. Retained-state
+RSS and prefix metadata costs demonstrably grow; this finite evidence does not bound the separate
+collecting `Kernel::open` API or close #108/#118. No format acceptance is implied.

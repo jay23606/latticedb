@@ -176,6 +176,8 @@ keys, catalog rename/drop/history and a split chunk boundary. Metadata accompani
 chunks/seals with the production writer, and compare fast restoration with legacy replay/full scrub.
 
 Fresh-process RSS and timing data are being collected by the opt-in host measurement harness in
-`crates/lattice-bench/CHECKPOINT_RECOVERY.md`. Actual CI results remain pending; maximum read-request
-sizes alone do not prove allocator peak or resident memory. Format acceptance and the seven-day
+`crates/lattice-bench/CHECKPOINT_RECOVERY.md`. Run 40797913195 records actual fresh-process RSS/time and a calibrated 192 MiB cgroup ceiling
+for the declared 11-dataset matrix. Raw results and exact scope are retained there; maximum read-request
+sizes alone do not prove allocator peak or resident memory, and the separate collecting kernel API
+is not covered by the streaming-engine measurement. Format acceptance and the seven-day
 comment period remain separate from these tests and measurements.

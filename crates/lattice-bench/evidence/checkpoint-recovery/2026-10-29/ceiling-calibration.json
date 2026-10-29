@@ -1,0 +1,17 @@
+{
+  "memory_max_bytes": 33554432,
+  "memory_swap_max_bytes": 0,
+  "memory_peak_bytes": 33554432,
+  "memory_events": {
+    "low": 0,
+    "high": 0,
+    "max": 35,
+    "oom": 1,
+    "oom_kill": 1,
+    "oom_group_kill": 0,
+    "sock_throttled": 0
+  },
+  "child_exit_code": -9,
+  "controller": "linux-cgroup-v2",
+  "limit_enforced": true
+}
