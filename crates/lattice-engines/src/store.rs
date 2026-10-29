@@ -332,6 +332,9 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
 
     /// Commits a transaction as one change set and returns its commit LSN (the snapshot LSN for a
     /// transaction that wrote nothing).
+    ///
+    /// This low-level byte API bypasses typed schema validation. Use `TypedStore` for typed tables;
+    /// raw writes to a typed table can make later typed reads fail.
     pub fn commit(&mut self, tx: RowTx) -> Result<u64, RowError> {
         if self.stale {
             return Err(RowError::Stale);

@@ -28,3 +28,7 @@ The raw-history id-collision found during independent review has a fix and regre
 
 There is no safe automatic downgrade, online backfill, persisted index configuration or completed
 Phase 2 gate. The RFC records the backup/rollback restriction and old row-only client limitation.
+
+Schema validation is provided by `TypedStore`. The public raw `RowStore` byte API remains an escape
+hatch and must not write typed tables after adoption; it is not prevented from storing invalid typed
+bytes. The RFC records this limitation for review rather than promising engine-wide enforcement.
