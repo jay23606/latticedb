@@ -76,6 +76,8 @@ pub enum Bug {
     RowPolicyReadSkipped,
     /// A row transaction appends without authorizing all final transitions.
     RowPolicyWriteSkipped,
+    /// Recovery ignores managed index definitions and therefore omits their rebuilt entries.
+    ManagedIndexesNotRecovered,
 }
 
 impl Bug {
@@ -107,6 +109,8 @@ impl Bug {
 
     /// Authorization defects, detected by the independent public row-policy witness suite.
     pub const POLICY: [Bug; 2] = [Bug::RowPolicyReadSkipped, Bug::RowPolicyWriteSkipped];
+    /// Catalog-managed definition recovery defects, exercised by the focused fault witness.
+    pub const CATALOG_INDEX: [Bug; 1] = [Bug::ManagedIndexesNotRecovered];
 
     /// Log defects, for the log simulation detection suite.
     pub const ALL: [Bug; 21] = [
@@ -188,6 +192,7 @@ mod tests {
             .chain(Bug::STORAGE)
             .chain(Bug::VACUUM)
             .chain(Bug::POLICY)
+            .chain(Bug::CATALOG_INDEX)
     }
 
     #[test]
@@ -197,8 +202,9 @@ mod tests {
             .chain(Bug::STORAGE)
             .chain(Bug::VACUUM)
             .chain(Bug::POLICY)
+            .chain(Bug::CATALOG_INDEX)
             .collect();
-        assert_eq!(all.len(), 34);
+        assert_eq!(all.len(), 35);
         for bug in all {
             assert!((bug as u32) < u64::BITS, "guard mask exhausted: {bug:?}");
             clear();
