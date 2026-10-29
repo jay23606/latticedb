@@ -7,7 +7,8 @@ The existing WAL segment header/version and type-3 consistency checkpoint payloa
 ## Files and bounds
 
 Files live below `<wal>/.checkpoint/`. A generation basename is
-`<seal-lsn:020>-<generation-id:32 lowercase hex>`, exactly 53 ASCII bytes. The generation ID is a
+`<seal-lsn:020>-<generation-id:32 lowercase hex>`, exactly 53 ASCII bytes. Readers require lowercase hex; uppercase generations are ignored as
+noncanonical cache candidates (no normalization), including by source-evidence traversal. The generation ID is a
 fresh ChangeSetId, used only for naming, never installed in the dedupe set. Chunk filenames add
 `.<index:04>.chunk`, starting at index zero. The manifest adds `.manifest`.
 
@@ -166,7 +167,15 @@ the bounded directory traversal claim.
 
 ## Remaining draft validation
 
-The initial draft has structural roundtrip/truncation/arbitrary-input tests and integration crash
-sweeps. An independent byte-exact fixture generator/corpus is still required before format acceptance.
-Fresh-process RSS and recovery timing tables are also pending; instrumented maximum read-request
-sizes alone do not prove allocator peak or process resident memory.
+`generate_checkpoint_golden.py` independently encodes WAL CRC/framing, kernel and engine history,
+chunks, manifests and seals. Its only external primitive is the standard BLAKE3 hash library
+[`blake3==1.0.11`](https://pypi.org/project/blake3/1.0.11/); it never calls production checkpoint code.
+The 21 binary fixtures under `corpus/checkpoint-v1/` cover empty, row history with tombstones/binary
+keys, catalog rename/drop/history and a split chunk boundary. Metadata accompanies each binary.
+`--check` reproduces every byte. Rust tests decode/reencode manifests and engine states, reproduce
+chunks/seals with the production writer, and compare fast restoration with legacy replay/full scrub.
+
+Fresh-process RSS and timing data are being collected by the opt-in host measurement harness in
+`crates/lattice-bench/CHECKPOINT_RECOVERY.md`. Actual CI results remain pending; maximum read-request
+sizes alone do not prove allocator peak or resident memory. Format acceptance and the seven-day
+comment period remain separate from these tests and measurements.

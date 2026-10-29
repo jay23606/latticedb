@@ -1,0 +1,4 @@
+format = "engine-checkpoint-v1-prefix"
+version = 1
+generator = "formats/generate_checkpoint_golden.py"
+case = "split"

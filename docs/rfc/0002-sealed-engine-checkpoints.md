@@ -95,6 +95,8 @@ processes, not a process that constructed the database. WAL buffers are bounded 
 actual segment, which may exceed the soft rotation target after a large group commit. No claim of
 constant total resident state or WAL-content verification is made.
 
-Independent byte-exact golden fixtures and a separate generator are still a draft acceptance gap.
-The initial corpus tests cover structural encode/decode and malformed bytes, not independent format
-interoperability. Neither those fixtures nor the RSS/time table are claimed complete by this draft.
+Independent byte-exact fixtures now come from `formats/generate_checkpoint_golden.py`: Python owns
+the framing/state encoder and delegates only standard BLAKE3 hashing to an external pinned library.
+Rust independently decodes/reencodes and reproduces the files, including full fast/legacy replay
+agreement. The fresh-process RSS/time table remains pending the opt-in manual Linux CI run described
+in `crates/lattice-bench/CHECKPOINT_RECOVERY.md`; no unmeasured memory bound is claimed.

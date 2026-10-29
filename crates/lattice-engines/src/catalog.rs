@@ -508,6 +508,33 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    #[test]
+    fn independently_encoded_catalog_history_reencodes_exactly() {
+        struct Bytes<'a>(&'a [u8]);
+        impl StateRead for Bytes<'_> {
+            fn remaining(&self) -> u64 {
+                self.0.len() as u64
+            }
+            fn raw(&mut self, out: &mut [u8]) -> Result<(), LogError> {
+                let (a, b) = self
+                    .0
+                    .split_at_checked(out.len())
+                    .ok_or_else(|| catalog_checkpoint_bad("short golden"))?;
+                out.copy_from_slice(a);
+                self.0 = b;
+                Ok(())
+            }
+        }
+        let expected =
+            include_bytes!("../../../formats/corpus/checkpoint-v1/catalog/engine-state.golden");
+        let mut reader = Bytes(expected);
+        let catalog = Catalog::restore_checkpoint(&mut reader, 4).unwrap();
+        assert_eq!(reader.remaining(), 0);
+        let mut actual = Vec::new();
+        catalog.encode_checkpoint(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+    }
+
     fn create(table: u32, name: &str) -> CatalogOp {
         CatalogOp::Create {
             table,

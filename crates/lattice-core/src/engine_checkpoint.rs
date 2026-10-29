@@ -200,9 +200,10 @@ pub(crate) fn source_lsn_evidence<I: Io>(io: &I, dir: &str) -> Result<u64, LogEr
         if let Some(base) = base
             && base.len() == 53
             && base.get(20..21) == Some("-")
-            && base
-                .get(21..)
-                .is_some_and(|s| s.bytes().all(|b| b.is_ascii_hexdigit()))
+            && base.get(21..).is_some_and(|s| {
+                s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
             && let Some(lsn) = base
                 .get(..20)
                 .filter(|s| s.bytes().all(|b| b.is_ascii_digit()))
@@ -455,9 +456,10 @@ fn try_load<'a, I: Io>(
             && name
                 .get(..20)
                 .is_some_and(|s| s.bytes().all(|b| b.is_ascii_digit()))
-            && name
-                .get(21..53)
-                .is_some_and(|s| s.bytes().all(|b| b.is_ascii_hexdigit()))
+            && name.get(21..53).is_some_and(|s| {
+                s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
             && newest.as_ref().is_none_or(|n| name > n.as_str())
         {
             newest = Some(name.into());
@@ -595,6 +597,73 @@ mod tests {
         #[test]
         fn arbitrary_manifests_never_panic_and_successes_are_canonical(bytes in prop::collection::vec(any::<u8>(),0..2000)) {
             if let Ok(m)=Manifest::decode(&bytes) { prop_assert_eq!(m.encode().unwrap(),bytes); }
+        }
+    }
+}
+
+#[cfg(test)]
+mod independent_golden {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    use super::*;
+    use crate::record::{encode_record, segment_header};
+    use lattice_sim::{FaultProfile, SimIo};
+    struct Fixture {
+        prefix: &'static [u8],
+        manifest: &'static [u8],
+        seal: &'static [u8],
+        chunks: Vec<&'static [u8]>,
+        through: u64,
+    }
+    macro_rules! fixture {
+        ($case:literal, $through:expr, $($chunk:literal),+) => { Fixture {
+            prefix: include_bytes!(concat!("../../../formats/corpus/checkpoint-v1/",$case,"/prefix.golden")),
+            manifest: include_bytes!(concat!("../../../formats/corpus/checkpoint-v1/",$case,"/manifest.golden")),
+            seal: include_bytes!(concat!("../../../formats/corpus/checkpoint-v1/",$case,"/seal-segment.golden")),
+            chunks: vec![$(include_bytes!(concat!("../../../formats/corpus/checkpoint-v1/",$case,"/chunk-",$chunk,".golden")).as_slice()),+], through: $through,
+        } };
+    }
+    #[test]
+    fn python_fixtures_decode_and_production_writer_reproduces_every_byte() {
+        for f in [
+            fixture!("empty", 0, "0000"),
+            fixture!("row", 4, "0000"),
+            fixture!("catalog", 4, "0000"),
+            fixture!("split", 0, "0000", "0001"),
+        ] {
+            let m = Manifest::decode(f.manifest).unwrap();
+            assert_eq!(m.encode().unwrap(), f.manifest);
+            let mut io = SimIo::new(1, FaultProfile::clean());
+            io.create_dir_all("wal").unwrap();
+            if !f.prefix.is_empty() {
+                io.append("wal/00000000000000000001.seg", f.prefix).unwrap();
+            }
+            let anchor = format!("wal/{:020}.seg", f.through + 1);
+            io.append(&anchor, &segment_header()).unwrap();
+            let id = [
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef,
+            ];
+            let mut writer = Writer::new(&mut io, "wal", f.through + 1, &id).unwrap();
+            for chunk in &f.chunks {
+                writer.raw(chunk).unwrap();
+            }
+            let payload = writer.finish("wal", f.through, &m.tag).unwrap();
+            io.append(&anchor, &encode_record(f.through + 1, SEAL_TYPE, &payload))
+                .unwrap();
+            assert_eq!(io.read(&anchor).unwrap(), f.seal);
+            let base = format!(
+                "wal/.checkpoint/{:020}-0123456789abcdef0123456789abcdef",
+                f.through + 1
+            );
+            assert_eq!(io.read(&format!("{base}.manifest")).unwrap(), f.manifest);
+            for (i, chunk) in f.chunks.iter().enumerate() {
+                assert_eq!(io.read(&chunk_path(&base, i)).unwrap(), *chunk);
+            }
+            let mut reader = load(&io, "wal", &m.tag).unwrap().unwrap();
+            let mut actual = vec![0; reader.remaining() as usize];
+            reader.raw(&mut actual).unwrap();
+            assert_eq!(actual, f.chunks.concat());
+            assert_eq!(reader.remaining(), 0);
         }
     }
 }

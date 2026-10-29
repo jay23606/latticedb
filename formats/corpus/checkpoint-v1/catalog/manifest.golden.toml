@@ -1,0 +1,4 @@
+format = "engine-checkpoint-v1-manifest"
+version = 1
+generator = "formats/generate_checkpoint_golden.py"
+case = "catalog"

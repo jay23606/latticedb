@@ -549,3 +549,125 @@ fn refusing_a_partial_header_below_the_source_boundary_preserves_the_damaged_byt
     assert!(Kernel::open(disk.clone(), clock(), SeededRng::new(4), &config()).is_err());
     assert_eq!(disk.read(path).unwrap(), b"LAT");
 }
+
+fn install_golden(case: &str) -> SharedIo {
+    macro_rules! files {
+        ($case:literal) => {
+            [
+                include_bytes!(concat!(
+                    "../../../formats/corpus/checkpoint-v1/",
+                    $case,
+                    "/prefix.golden"
+                ))
+                .as_slice(),
+                include_bytes!(concat!(
+                    "../../../formats/corpus/checkpoint-v1/",
+                    $case,
+                    "/chunk-0000.golden"
+                ))
+                .as_slice(),
+                include_bytes!(concat!(
+                    "../../../formats/corpus/checkpoint-v1/",
+                    $case,
+                    "/manifest.golden"
+                ))
+                .as_slice(),
+                include_bytes!(concat!(
+                    "../../../formats/corpus/checkpoint-v1/",
+                    $case,
+                    "/seal-segment.golden"
+                ))
+                .as_slice(),
+            ]
+        };
+    }
+    let files = match case {
+        "row" => files!("row"),
+        "catalog" => files!("catalog"),
+        _ => panic!("unknown fixture"),
+    };
+    let disk = disk();
+    let mut d = disk.clone();
+    d.create_dir_all("wal/.checkpoint").unwrap();
+    let base = "wal/.checkpoint/00000000000000000005-0123456789abcdef0123456789abcdef";
+    for (path, bytes) in [
+        ("wal/00000000000000000001.seg".into(), files[0]),
+        (format!("{base}.0000.chunk"), files[1]),
+        (format!("{base}.manifest"), files[2]),
+        ("wal/00000000000000000005.seg".into(), files[3]),
+    ] {
+        d.append(&path, bytes).unwrap();
+        d.sync(&path).unwrap();
+    }
+    d.sync_dir("wal/.checkpoint").unwrap();
+    d.sync_dir("wal").unwrap();
+    d.sync_dir("").unwrap();
+    disk
+}
+#[test]
+fn independent_golden_databases_restore_fast_and_full_replay_agrees() {
+    let disk = install_golden("row");
+    let store = RowStore::open_with_indexes(
+        disk.clone(),
+        clock(),
+        SeededRng::new(7),
+        &config(),
+        vec![IndexDef {
+            id: 7,
+            table: 7,
+            extract: |v| Some(v.to_vec()),
+        }],
+    )
+    .unwrap();
+    assert_eq!(store.recovery_report().1.through_lsn, 4);
+    assert_eq!(
+        store.get_at(Snapshot { as_of: 2 }, 7, b"k"),
+        Some(&b"one".to_vec())
+    );
+    assert_eq!(
+        store.get_at(Snapshot { as_of: 3 }, 7, b"k"),
+        Some(&b"two".to_vec())
+    );
+    assert_eq!(store.get_at(Snapshot { as_of: 4 }, 7, b"k"), None);
+    assert_eq!(
+        store.get_at(Snapshot { as_of: 4 }, 7, b""),
+        Some(&b"zero".to_vec())
+    );
+    for as_of in [2, 3, 4] {
+        store.check_indexes_at(Snapshot { as_of }).unwrap();
+    }
+    drop(store);
+    let (k, _) = Kernel::open(disk.clone(), clock(), SeededRng::new(8), &config()).unwrap();
+    assert!(k.scrub().unwrap().issues.is_empty());
+    drop(k);
+    let disk = install_golden("catalog");
+    let store = CatalogStore::open(disk.clone(), clock(), SeededRng::new(9), &config()).unwrap();
+    assert_eq!(store.recovery_report().1.through_lsn, 4);
+    assert_eq!(store.catalog().id_of(2, "before"), Some(7));
+    assert_eq!(store.catalog().id_of(3, "after"), Some(7));
+    assert_eq!(store.catalog().id_of(4, "next"), Some(8));
+    drop(store);
+    let (k, _) = Kernel::open(disk.clone(), clock(), SeededRng::new(10), &config()).unwrap();
+    assert!(k.scrub().unwrap().issues.is_empty());
+}
+#[test]
+fn uppercase_generation_names_are_noncanonical_cache_candidates() {
+    let disk = install_golden("row");
+    let mut d = disk.clone();
+    for name in disk.list("wal/.checkpoint").unwrap() {
+        let new = name.replace(
+            "0123456789abcdef0123456789abcdef",
+            "0123456789ABCDEF0123456789ABCDEF",
+        );
+        let old = format!("wal/.checkpoint/{name}");
+        let bytes = d.read(&old).unwrap();
+        d.append(&format!("wal/.checkpoint/{new}"), &bytes).unwrap();
+        d.remove(&old).unwrap();
+    }
+    let s = RowStore::open(disk.clone(), clock(), SeededRng::new(11), &config()).unwrap();
+    assert_eq!(s.recovery_report().1.through_lsn, 0);
+    assert_eq!(
+        s.get_at(Snapshot { as_of: 2 }, 7, b"k"),
+        Some(&b"one".to_vec())
+    );
+}

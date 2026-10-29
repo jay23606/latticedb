@@ -371,3 +371,38 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         }
     }
 }
+
+#[cfg(test)]
+mod checkpoint_golden {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    struct Bytes<'a>(&'a [u8]);
+    impl StateRead for Bytes<'_> {
+        fn remaining(&self) -> u64 {
+            self.0.len() as u64
+        }
+        fn raw(&mut self, out: &mut [u8]) -> Result<(), LogError> {
+            let (a, b) = self
+                .0
+                .split_at_checked(out.len())
+                .ok_or_else(|| checkpoint_bad("short golden"))?;
+            out.copy_from_slice(a);
+            self.0 = b;
+            Ok(())
+        }
+    }
+    #[test]
+    fn independently_encoded_row_history_reencodes_exactly() {
+        let expected =
+            include_bytes!("../../../formats/corpus/checkpoint-v1/row/engine-state.golden");
+        let seen = (1u128..=3)
+            .map(|n| lattice_core::ChangeSetId::from_bytes(n.to_be_bytes()))
+            .collect();
+        let mut reader = Bytes(expected);
+        let table = restore_rows(&mut reader, 4, &seen).unwrap();
+        assert_eq!(reader.remaining(), 0);
+        let mut actual = Vec::new();
+        encode_rows(&table, &mut actual).unwrap();
+        assert_eq!(actual, expected);
+    }
+}
