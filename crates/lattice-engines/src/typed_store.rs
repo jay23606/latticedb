@@ -230,32 +230,7 @@ impl<I: Io, C: Clock, R: Rng> TypedStore<I, C, R> {
     }
 
     fn decode(&self, table: u32, bytes: &[u8]) -> Result<Value, Error> {
-        if bytes.get(..4) != Some(ROW_MAGIC.as_slice()) || bytes.get(4) != Some(&ROW_VERSION) {
-            return Err(Error::Corrupt("invalid typed row envelope".into()));
-        }
-        let version_bytes: [u8; 8] = bytes
-            .get(5..13)
-            .ok_or_else(|| Error::Corrupt("truncated typed row version".into()))?
-            .try_into()
-            .map_err(|_| Error::Corrupt("truncated typed row version".into()))?;
-        let version = u64::from_le_bytes(version_bytes);
-        let schema = self
-            .catalog()
-            .schema(version)
-            .ok_or_else(|| Error::Corrupt(format!("unknown writer schema {version}")))?;
-        let layout = schema.layouts.get(&table).ok_or_else(|| {
-            Error::Corrupt(format!("schema {version} does not define table {table}"))
-        })?;
-        let value = typed::decode_row(
-            layout,
-            bytes
-                .get(13..)
-                .ok_or_else(|| Error::Corrupt("truncated typed row".into()))?,
-        )
-        .map_err(|e| Error::Corrupt(format!("typed row: {e:?}")))?;
-        validate::validate(&schema.compiled, &layout.type_name, &value)
-            .map_err(|e| Error::Corrupt(format!("stored row violates writer schema: {e:?}")))?;
-        Ok(value)
+        decode_value(self.catalog(), table, bytes)
     }
 
     /// Reads this transaction's own writes first, then its immutable snapshot.
@@ -317,4 +292,60 @@ impl<I: Io, C: Clock, R: Rng> TypedStore<I, C, R> {
         let lsn = self.rows.commit(tx.raw).map_err(Error::Store)?;
         Ok(if read_only { snapshot.as_of } else { lsn })
     }
+}
+
+fn decode_value(catalog: &Catalog, table: u32, bytes: &[u8]) -> Result<Value, Error> {
+    if bytes.get(..4) != Some(ROW_MAGIC.as_slice()) || bytes.get(4) != Some(&ROW_VERSION) {
+        return Err(Error::Corrupt("invalid typed row envelope".into()));
+    }
+    let version_bytes: [u8; 8] = bytes
+        .get(5..13)
+        .ok_or_else(|| Error::Corrupt("truncated typed row version".into()))?
+        .try_into()
+        .map_err(|_| Error::Corrupt("truncated typed row version".into()))?;
+    let version = u64::from_le_bytes(version_bytes);
+    let schema = catalog
+        .schema(version)
+        .ok_or_else(|| Error::Corrupt(format!("unknown writer schema {version}")))?;
+    let layout = schema
+        .layouts
+        .get(&table)
+        .ok_or_else(|| Error::Corrupt(format!("schema {version} does not define table {table}")))?;
+    let value = typed::decode_row(
+        layout,
+        bytes
+            .get(13..)
+            .ok_or_else(|| Error::Corrupt("truncated typed row".into()))?,
+    )
+    .map_err(|e| Error::Corrupt(format!("typed row: {e:?}")))?;
+    validate::validate(&schema.compiled, &layout.type_name, &value)
+        .map_err(|e| Error::Corrupt(format!("stored row violates writer schema: {e:?}")))?;
+    Ok(value)
+}
+
+// Enforce I8 at the shared raw/typed write boundary, including historical replay.
+pub(crate) fn validate_writes(
+    catalog: &Catalog,
+    writes: &[crate::rowops::RowWrite],
+) -> Result<(), String> {
+    for ((table, _), value) in writes {
+        let Some((schema, _)) = catalog.layout_at(*table, catalog.applied_lsn()) else {
+            if catalog.has_typed_history(*table) {
+                return Err(format!("typed table {table} is no longer live"));
+            }
+            continue;
+        };
+        if let Some(bytes) = value {
+            // New writes use the currently installed schema. Original-layout decoding is for reads,
+            // not a way to append under superseded constraints after a schema change.
+            if bytes.get(5..13) != Some(schema.version.to_le_bytes().as_slice()) {
+                return Err(format!(
+                    "typed table {table} requires writer schema {}",
+                    schema.version
+                ));
+            }
+            decode_value(catalog, *table, bytes).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }

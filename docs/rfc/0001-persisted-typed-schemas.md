@@ -42,10 +42,11 @@ meet P2-02. Serializing compiler structs would make private Rust changes an acci
 
 The WAL and row-operation outer formats remain v1. New catalog readers accept v1 and v2; older
 catalog readers reject v2. Older row-only library clients may ignore catalog payloads entirely and
-must not be used to write a directory after typed schema adoption. Current raw `RowStore` APIs also
-remain a low-level byte interface and bypass `TypedStore` validation. After typed adoption, callers
-must use `TypedStore` for typed tables; mixing raw writes into those tables can make typed reads fail.
-This wrapper is not an enforcement boundary against raw clients. There is no automatic downgrade.
+must not be used to write a directory after typed schema adoption. Current `RowStore` commits validate
+catalog-owned typed tables too: malformed envelopes, superseded writer schemas and constraint violations
+are rejected before WAL append, and replay refuses invalid historical payloads. Raw tables retain their
+byte API. A core-only writer or old binary can still bypass the engine; its semantic damage is detected
+on recovery. There is no automatic downgrade.
 
 Only disposable pre-alpha test data should be used during review. Before later adoption, retain a
 consistent backup readable by the old binary. Rollback restores that backup; it does not reinterpret

@@ -587,3 +587,118 @@ fn schema_catalog_commits_and_replay_reject_prior_raw_history() {
         Err(RowError::Corrupt(_))
     ));
 }
+
+#[test]
+fn raw_commits_enforce_current_typed_schema_before_wal_append() {
+    use lattice_abi::{Classify, ErrorClass};
+    use lattice_engines::{store::RowError, typed};
+    let (disk, clock) = fresh(210);
+    let mut typed = open(&disk, &clock, 210).unwrap();
+    let (version, _) = typed.install_schema(V1).unwrap();
+    let table = typed
+        .catalog()
+        .id_of(typed.snapshot().as_of, "Ticket")
+        .unwrap();
+    let layout = typed
+        .catalog()
+        .layout_at(table, typed.snapshot().as_of)
+        .unwrap()
+        .1;
+    let encode = |value: &Value| {
+        let mut bytes = b"LTYP".to_vec();
+        bytes.push(1);
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes.extend_from_slice(&typed::encode_row(layout, value).unwrap());
+        bytes
+    };
+    let valid = encode(&ticket(3));
+    // Codec encoding itself does not enforce constraints; the store must enforce them.
+    let invalid = encode(&ticket(99));
+    drop(typed);
+    let mut raw = RowStore::open(
+        disk.clone(),
+        SharedClock(clock.clone()),
+        SeededRng::new(211),
+        &config(),
+    )
+    .unwrap();
+    let before = raw.snapshot();
+    for bytes in [b"untyped bytes".to_vec(), invalid] {
+        let mut tx = raw.begin();
+        tx.put((table, b"bad".to_vec()), bytes);
+        tx.put((999, b"mixed".to_vec()), b"must not leak".to_vec());
+        let error = raw.commit(tx).unwrap_err();
+        assert!(matches!(error, RowError::InvalidTyped(_)));
+        assert_eq!(error.class(), ErrorClass::Rejected);
+        assert_eq!(raw.snapshot(), before);
+        assert!(raw.get_at(raw.snapshot(), 999, b"mixed").is_none());
+    }
+    let mut tx = raw.begin();
+    tx.put((table, b"valid".to_vec()), valid.clone());
+    raw.commit(tx).unwrap();
+    drop(raw);
+    let mut typed = open(&disk, &clock, 212).unwrap();
+    assert_eq!(
+        typed.get_at(typed.snapshot(), "Ticket", b"valid").unwrap(),
+        Some(ticket(3))
+    );
+    typed.install_schema(V2).unwrap();
+    drop(typed);
+    let mut raw = RowStore::open(
+        disk.clone(),
+        SharedClock(clock.clone()),
+        SeededRng::new(213),
+        &config(),
+    )
+    .unwrap();
+    let before = raw.snapshot();
+    let mut tx = raw.begin();
+    tx.put((table, b"superseded".to_vec()), valid);
+    assert!(matches!(raw.commit(tx), Err(RowError::InvalidTyped(_))));
+    assert_eq!(raw.snapshot(), before);
+    raw.commit_catalog(vec![CatalogOp::Drop { table }]).unwrap();
+    let mut tx = raw.begin();
+    tx.delete((table, b"valid".to_vec()));
+    assert!(matches!(raw.commit(tx), Err(RowError::InvalidTyped(_))));
+}
+
+#[test]
+fn replay_refuses_crc_valid_rows_that_violate_the_persisted_schema() {
+    use lattice_core::{Kernel, changeset::ChangeSet};
+    use lattice_engines::{rowops, store::RowError};
+    let (disk, clock) = fresh(220);
+    let mut typed = open(&disk, &clock, 220).unwrap();
+    typed.install_schema(V1).unwrap();
+    let table = typed
+        .catalog()
+        .id_of(typed.snapshot().as_of, "Ticket")
+        .unwrap();
+    drop(typed);
+    // A core-only/old client can bypass engine validation. Recovery must detect its semantic damage.
+    let mut kernel = Kernel::open(
+        disk.clone(),
+        SharedClock(clock.clone()),
+        SeededRng::new(221),
+        &config(),
+    )
+    .unwrap()
+    .0;
+    let id = kernel.new_id();
+    let payload =
+        rowops::encode(&[((table, b"bad".to_vec()), Some(b"invalid envelope".to_vec()))]).unwrap();
+    kernel.commit(ChangeSet::new(id, payload)).unwrap();
+    drop(kernel);
+    assert!(matches!(
+        RowStore::open(
+            disk.clone(),
+            SharedClock(clock.clone()),
+            SeededRng::new(222),
+            &config()
+        ),
+        Err(RowError::Corrupt(_))
+    ));
+    assert!(matches!(
+        open(&disk, &clock, 223),
+        Err(Error::Store(RowError::Corrupt(_)))
+    ));
+}

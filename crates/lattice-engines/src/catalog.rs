@@ -376,6 +376,12 @@ impl Catalog {
             .find_map(|schema| schema.layouts.get(&table).map(|layout| (schema, layout)))
     }
 
+    pub(crate) fn has_typed_history(&self, table: u32) -> bool {
+        self.schemas
+            .values()
+            .any(|schema| schema.layouts.contains_key(&table))
+    }
+
     /// Checks operations without changing the catalog.
     pub fn check(&self, ops: &[CatalogOp]) -> Result<Tables, CatalogError> {
         self.prepare(ops).map(|(tables, _, _)| tables)

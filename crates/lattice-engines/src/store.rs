@@ -46,6 +46,8 @@ pub enum RowError {
     InvalidIndexes(String),
     /// Catalog rules rejected the operation before writing anything.
     InvalidCatalog(CatalogError),
+    /// A raw write violates a catalog-owned typed table schema.
+    InvalidTyped(String),
     /// The writes do not fit the payload format.
     Encode(RowOpsError),
 }
@@ -62,6 +64,7 @@ impl fmt::Display for RowError {
             RowError::Corrupt(why) => write!(f, "row data corrupt: {why}"),
             RowError::InvalidCatalog(why) => write!(f, "invalid catalog operation: {why}"),
             RowError::InvalidIndexes(why) => write!(f, "invalid index definitions: {why}"),
+            RowError::InvalidTyped(why) => write!(f, "invalid typed row: {why}"),
             RowError::Encode(e) => write!(f, "cannot encode writes: {e:?}"),
         }
     }
@@ -73,9 +76,10 @@ impl Classify for RowError {
             RowError::Conflict { .. } | RowError::Stale => ErrorClass::Retryable,
             RowError::Rejected(e) | RowError::InDoubt(e) => e.class(),
             RowError::Corrupt(_) => ErrorClass::Fatal,
-            RowError::Encode(_) | RowError::InvalidIndexes(_) | RowError::InvalidCatalog(_) => {
-                ErrorClass::Rejected
-            }
+            RowError::Encode(_)
+            | RowError::InvalidIndexes(_)
+            | RowError::InvalidCatalog(_)
+            | RowError::InvalidTyped(_) => ErrorClass::Rejected,
         }
     }
 }
@@ -168,6 +172,13 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
             }
             match rowops::decode(&cs.payload) {
                 Ok(mut writes) => {
+                    if let Err(e) = crate::typed_store::validate_writes(&catalog, &writes) {
+                        failure = Some(RowError::Corrupt(format!(
+                            "typed rows at lsn {}: {e}",
+                            r.lsn
+                        )));
+                        return;
+                    }
                     row_tables.extend(writes.iter().map(|((table, _), _)| *table));
                     if bugs::active(Bug::RowRecoveryDropsDeletes) {
                         writes.retain(|(_, value)| value.is_some());
@@ -333,8 +344,8 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
     /// Commits a transaction as one change set and returns its commit LSN (the snapshot LSN for a
     /// transaction that wrote nothing).
     ///
-    /// This low-level byte API bypasses typed schema validation. Use `TypedStore` for typed tables;
-    /// raw writes to a typed table can make later typed reads fail.
+    /// Catalog-owned typed tables enforce their current schema here too. Raw tables remain byte
+    /// oriented. Use `TypedStore` to construct valid typed envelopes and retain schema fencing.
     pub fn commit(&mut self, tx: RowTx) -> Result<u64, RowError> {
         if self.stale {
             return Err(RowError::Stale);
@@ -349,6 +360,8 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
             })?;
         }
         let writes = tx.into_writes();
+        crate::typed_store::validate_writes(&self.catalog, &writes)
+            .map_err(RowError::InvalidTyped)?;
         let payload = rowops::encode(&writes).map_err(RowError::Encode)?;
         let id = self.kernel.new_id();
         match self.kernel.commit(ChangeSet::new(id, payload)) {
