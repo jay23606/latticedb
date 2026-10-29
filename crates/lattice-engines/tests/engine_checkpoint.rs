@@ -294,6 +294,63 @@ fn publication_survives_every_mutating_power_cut() {
     }
 }
 
+/// The same sweep on a disk that tears writes, leaves garbage tails and drops directory entries that
+/// were never synced, with an earlier checkpoint generation on disk and enough rows for several chunks.
+/// On a clean disk a checkpoint whose directory entry was never synced survives the crash; here it does
+/// not, so an omitted directory sync would lose the newest generation and expose a bad fallback.
+#[test]
+fn publication_survives_every_power_cut_with_torn_writes_and_lost_directory_entries() {
+    let build = || {
+        let disk = SharedIo::new(SimIo::new(1, FaultProfile::crash_heavy()));
+        let mut s = open(&disk);
+        for i in 0..60u8 {
+            put(&mut s, &[i], &[i; 90]);
+        }
+        s.checkpoint().unwrap(); // an earlier generation
+        let lsn = put(&mut s, b"after-first", b"acked");
+        (disk, s, lsn)
+    };
+    let (baseline, mut s, _) = build();
+    let before = baseline.mutating_ops();
+    s.checkpoint().unwrap();
+    let ops = baseline.mutating_ops() - before;
+    drop(s);
+    assert!(ops > 8);
+    for cut in 0..=ops + 1 {
+        let (disk, mut s, lsn) = build();
+        disk.arm_power_cut(cut);
+        let result = s.checkpoint();
+        drop(s);
+        disk.crash();
+        let mut s = open(&disk);
+        assert_eq!(
+            s.get_at(Snapshot { as_of: lsn }, 1, b"after-first"),
+            Some(&b"acked".to_vec()),
+            "cut {cut}: {result:?}"
+        );
+        // A checkpoint that reported success must survive the crash: recovery uses it (through the
+        // last commit before it was taken) rather than falling back to the older generation. The
+        // expected value comes from the commit, not from running the code under test, so an omitted
+        // directory sync shows up here and not in the data, since recovery can always replay the log.
+        if result.is_ok() {
+            assert_eq!(
+                s.recovery_report().1.through_lsn,
+                lsn,
+                "cut {cut}: a completed checkpoint was lost in the crash"
+            );
+        }
+        for i in 0..60u8 {
+            assert_eq!(
+                s.get_at(Snapshot { as_of: lsn }, 1, &[i]),
+                Some(&vec![i; 90]),
+                "cut {cut}: row {i}"
+            );
+        }
+        s.check_indexes().unwrap();
+        put(&mut s, b"next", b"works");
+    }
+}
+
 #[test]
 fn power_loss_during_suffix_sync_never_returns_an_open_store() {
     for cut in 0..3 {
