@@ -199,6 +199,11 @@ fn recover<I: Io>(
             HeaderCheck::TooShort | HeaderCheck::BadMagic
                 if is_last && data.len() < SEGMENT_HEADER_LEN =>
             {
+                if expected - 1 < source_floor {
+                    return Err(LogError::Corrupt(
+                        "partial segment header below a checkpoint source boundary".into(),
+                    ));
+                }
                 // Torn creation of the newest segment: nothing was ever acknowledged in it.
                 io.truncate(&path, 0)?;
                 io.append(&path, &segment_header())?;

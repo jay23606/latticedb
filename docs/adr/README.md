@@ -16,3 +16,4 @@
 | [0012](0012-row-write-payload.md) | ADR 0012: Row writes travel in the change set payload | accepted |
 | [0013](0013-sql-planner-and-executor.md) | ADR 0013: SQL planner and executor | proposed |
 | [0014](0014-derived-row-indexes.md) | ADR 0014: Secondary indexes are derived from committed rows | accepted |
+| [0016](0016-sealed-engine-checkpoints.md) | ADR 0016: Sealed engine checkpoints | proposed |

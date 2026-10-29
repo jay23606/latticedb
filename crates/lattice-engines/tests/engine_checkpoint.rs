@@ -528,3 +528,24 @@ fn replacing_the_entire_wal_with_a_valid_empty_segment_does_not_escape_source_ev
         .unwrap();
     assert!(Kernel::open(disk.clone(), clock(), SeededRng::new(4), &config()).is_err());
 }
+
+#[test]
+fn refusing_a_partial_header_below_the_source_boundary_preserves_the_damaged_bytes() {
+    let disk = disk();
+    let mut s = open(&disk);
+    put(&mut s, b"acked", b"value");
+    s.checkpoint().unwrap();
+    drop(s);
+    for name in disk
+        .list("wal")
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.ends_with(".seg"))
+    {
+        disk.clone().remove(&format!("wal/{name}")).unwrap();
+    }
+    let path = "wal/00000000000000000001.seg";
+    disk.clone().append(path, b"LAT").unwrap();
+    assert!(Kernel::open(disk.clone(), clock(), SeededRng::new(4), &config()).is_err());
+    assert_eq!(disk.read(path).unwrap(), b"LAT");
+}
