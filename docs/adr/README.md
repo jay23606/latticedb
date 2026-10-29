@@ -19,3 +19,4 @@
 | [0018](0018-schema-change-strategy.md) | ADR 0018: Online schema changes through shadow generations | proposed |
 | [0020](0020-pgwire-scram-sha256.md) | ADR 0020: PostgreSQL SCRAM-SHA-256 primitives with explicit authentication phases | accepted |
 | [0021](0021-pgwire-scram-tls-integration.md) | ADR 0021: Require TLS for configured SCRAM sessions | accepted |
+| [0023](0023-change-feed-event-format.md) | ADR 0023: Change feed event and cursor encoding | proposed |
