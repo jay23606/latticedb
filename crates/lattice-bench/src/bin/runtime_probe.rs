@@ -57,6 +57,9 @@ mod linux {
         fn list(&self, p: &str) -> Result<Vec<String>, IoError> {
             self.inner.list(p)
         }
+        fn visit_dir(&self, dir: &str, visit: &mut dyn FnMut(&str)) -> Result<(), IoError> {
+            self.inner.visit_dir(dir, visit)
+        }
         fn remove(&mut self, p: &str) -> Result<(), IoError> {
             self.inner.remove(p)
         }

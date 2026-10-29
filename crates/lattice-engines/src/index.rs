@@ -110,6 +110,46 @@ impl Indexes {
         self.entries.apply(lsn, cs, changes)
     }
 
+    /// Rebuilds index histories from canonical row histories, without collecting/sorting the WAL.
+    pub(crate) fn restore_history(
+        &mut self,
+        rows: &Table<RowKey, Vec<u8>>,
+    ) -> Result<(), MvccError> {
+        let mut previous_key: Option<&RowKey> = None;
+        let mut previous_value: Option<&Vec<u8>> = None;
+        for (key, lsn, cs, value) in rows.history() {
+            if previous_key != Some(key) {
+                previous_value = None;
+            }
+            for def in self.defs.iter().filter(|d| d.table == key.0) {
+                let old = previous_value.and_then(|v| (def.extract)(v));
+                let new = value.and_then(|v| (def.extract)(v));
+                if old != new {
+                    if let Some(k) = old {
+                        self.entries.restore_version(
+                            entry_key(def.id, &k, &key.1),
+                            lsn,
+                            cs,
+                            None,
+                        )?;
+                    }
+                    if let Some(k) = new {
+                        self.entries.restore_version(
+                            entry_key(def.id, &k, &key.1),
+                            lsn,
+                            cs,
+                            Some(key.1.clone()),
+                        )?;
+                    }
+                }
+            }
+            previous_key = Some(key);
+            previous_value = value;
+        }
+        self.entries.restore_applied(rows.applied_lsn());
+        Ok(())
+    }
+
     /// The primary keys of the rows whose index key is exactly `ikey`, as of `snap`, in key order.
     pub fn lookup(&self, snap: Snapshot, index: u32, ikey: &[u8]) -> Vec<Vec<u8>> {
         if bugs::active(Bug::RowIndexPrefixLookup) {

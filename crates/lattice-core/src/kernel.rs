@@ -12,6 +12,7 @@ use crate::changeset::{
     encode_checkpoint, encode_turn_begin, state_crc,
 };
 use crate::crc::crc32c;
+use crate::engine_checkpoint::{self as cp, CheckpointRecovery, StateRead, StateWrite};
 use crate::hlc::HlcClock;
 use crate::log::{Log, LogError, RecoveryReport};
 use crate::metrics::{Metrics, names};
@@ -167,6 +168,159 @@ impl<I: Io, C: Clock, R: Rng> Kernel<I, C, R> {
             metrics: Metrics::default(),
         };
         Ok((kernel, report, latest_checkpoint))
+    }
+
+    /// Opens an engine's sealed snapshot, then replays only the WAL suffix. A missing, damaged,
+    /// wrong-engine or semantically invalid snapshot falls back to complete WAL replay. Engine
+    /// state must retain all history; the decoder must validate every retained LSN against `through`.
+    /// The WAL writer lock covers both snapshot validation and suffix recovery.
+    // Three injected seams, config/tag, and the three engine recovery callbacks are independent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_checkpointed<E>(
+        io: I,
+        clock: C,
+        mut rng: R,
+        config: &Config,
+        tag: &[u8],
+        mut empty: impl FnMut() -> E,
+        mut restore: impl FnMut(&mut dyn StateRead, u64, &BTreeSet<ChangeSetId>) -> Result<E, LogError>,
+        mut apply: impl FnMut(Record, &mut E) -> Result<(), LogError>,
+    ) -> Result<(Self, E, RecoveryReport, CheckpointRecovery), TxnError> {
+        let (log, report, (seen, turns, highest, _, engine, evidence, failure)) =
+            Log::open_prepared(
+                io,
+                &config.dir,
+                config.segment_limit,
+                |io| {
+                    let restored = (|| {
+                        let Some(mut reader) = cp::load(io, &config.dir, tag)? else {
+                            return Ok(None);
+                        };
+                        let through = reader.through();
+                        let evidence = reader.evidence();
+                        let mut bytes = [0; 16];
+                        reader.raw(&mut bytes)?;
+                        let highest = Hlc::from_bytes(&bytes);
+                        let count = reader.count(16)?;
+                        if count > through {
+                            return Err(cp::bad("dedupe count exceeds source LSN"));
+                        }
+                        let mut seen = BTreeSet::new();
+                        let mut prev = None;
+                        for _ in 0..count {
+                            reader.raw(&mut bytes)?;
+                            let id = ChangeSetId::from_bytes(bytes);
+                            if prev.is_some_and(|p| p >= id) {
+                                return Err(cp::bad("dedupe order"));
+                            }
+                            seen.insert(id);
+                            prev = Some(id);
+                        }
+                        let count = reader.count(16)?;
+                        if count > through {
+                            return Err(cp::bad("turn count exceeds source LSN"));
+                        }
+                        let mut turns = BTreeMap::new();
+                        let mut prev = None;
+                        for _ in 0..count {
+                            let session = reader.u64()?;
+                            let turn = reader.u64()?;
+                            if turn == 0 || prev.is_some_and(|p| p >= session) {
+                                return Err(cp::bad("turn order/value"));
+                            }
+                            turns.insert(session, turn);
+                            prev = Some(session);
+                        }
+                        let engine = restore(&mut reader, through, &seen)?;
+                        if reader.remaining() != 0 {
+                            return Err(cp::bad("trailing state"));
+                        }
+                        Ok(Some((through + 1, seen, turns, highest, engine, evidence)))
+                    })();
+                    match restored {
+                        Ok(Some((start, seen, turns, highest, engine, evidence))) => {
+                            Ok((start, (seen, turns, highest, None, engine, evidence, None)))
+                        }
+                        Ok(None)
+                        | Err(LogError::Corrupt(_))
+                        | Err(LogError::Io(lattice_seams::IoError::NotFound(_))) => Ok((
+                            1,
+                            (
+                                BTreeSet::new(),
+                                BTreeMap::new(),
+                                Hlc::default(),
+                                None,
+                                empty(),
+                                CheckpointRecovery::default(),
+                                None,
+                            ),
+                        )),
+                        Err(e) => Err(e),
+                    }
+                },
+                |record, (seen, turns, highest, latest, engine, _, failure)| {
+                    if failure.is_none() {
+                        *failure = Self::rebuild_step(&record, seen, turns, highest, latest).err();
+                        if failure.is_none() {
+                            *failure = apply(record, engine).err().map(TxnError::Log);
+                        }
+                    }
+                },
+            )?;
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        let owner = rng.next_u64();
+        let kernel = Self {
+            log,
+            clock,
+            rng,
+            hlc: HlcClock::restore(config.node, highest),
+            owner,
+            seen,
+            in_flight: BTreeMap::new(),
+            turns,
+            metrics: Metrics::default(),
+        };
+        Ok((kernel, engine, report, evidence))
+    }
+
+    /// Publishes a durable engine snapshot. The source WAL is synced before snapshot IO; the seal
+    /// is synced last. Failed snapshots are harmless orphans. Refuses logged/unapplied transactions.
+    /// Existing callers and readers continue to use the retained WAL; nothing is pruned.
+    pub fn checkpoint_engine(
+        &mut self,
+        tag: &[u8],
+        encode: impl FnOnce(&mut dyn StateWrite) -> Result<(), LogError>,
+    ) -> Result<u64, TxnError> {
+        if !self.in_flight.is_empty() {
+            return Err(TxnError::Invalid(
+                "engine checkpoint with changes in flight".into(),
+            ));
+        }
+        if tag.is_empty() || tag.len() > 64 {
+            return Err(TxnError::Invalid("checkpoint engine tag".into()));
+        }
+        self.log.checkpoint_boundary()?;
+        let seal = self.log.next_lsn();
+        let dir = self.log.dir().to_string();
+        let id = self.new_id().to_bytes();
+        let mut writer = cp::Writer::new(self.log.io_mut(), &dir, seal, &id)?;
+        writer.raw(&self.hlc.last().to_bytes())?;
+        writer.u64(self.seen.len() as u64)?;
+        for id in &self.seen {
+            writer.raw(&id.to_bytes())?;
+        }
+        writer.u64(self.turns.len() as u64)?;
+        for (session, turn) in &self.turns {
+            writer.u64(*session)?;
+            writer.u64(*turn)?;
+        }
+        encode(&mut writer)?;
+        let payload = writer.finish(&dir, seal - 1, tag)?;
+        let lsn = self.log.append(cp::SEAL_TYPE, &payload)?;
+        self.log.sync()?;
+        Ok(lsn)
     }
 
     /// Folds one recovered record into the kernel's rebuilt state.

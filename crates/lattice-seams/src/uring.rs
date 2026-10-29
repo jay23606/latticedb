@@ -112,6 +112,9 @@ impl Io for UringIo {
     fn list(&self, path: &str) -> Result<Vec<String>, IoError> {
         self.metadata.list(path)
     }
+    fn visit_dir(&self, dir: &str, visit: &mut dyn FnMut(&str)) -> Result<(), IoError> {
+        self.metadata.visit_dir(dir, visit)
+    }
     fn remove(&mut self, path: &str) -> Result<(), IoError> {
         self.metadata.remove(path)
     }

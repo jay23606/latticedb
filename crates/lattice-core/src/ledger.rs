@@ -110,6 +110,13 @@ mod tests {
         fn list(&self, p: &str) -> Result<Vec<String>, lattice_seams::IoError> {
             self.0.borrow().list(p)
         }
+        fn visit_dir(
+            &self,
+            dir: &str,
+            visit: &mut dyn FnMut(&str),
+        ) -> Result<(), lattice_seams::IoError> {
+            self.0.borrow().visit_dir(dir, visit)
+        }
         fn remove(&mut self, p: &str) -> Result<(), lattice_seams::IoError> {
             self.0.borrow_mut().remove(p)
         }

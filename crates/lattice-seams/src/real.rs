@@ -130,6 +130,16 @@ impl Io for StdIo {
         Ok(names)
     }
 
+    fn visit_dir(&self, dir: &str, visit: &mut dyn FnMut(&str)) -> Result<(), IoError> {
+        for entry in fs::read_dir(self.full(dir)).map_err(|e| map(dir, e))? {
+            let entry = entry.map_err(|e| map(dir, e))?;
+            if let Some(name) = entry.file_name().to_str() {
+                visit(name);
+            }
+        }
+        Ok(())
+    }
+
     fn remove(&mut self, path: &str) -> Result<(), IoError> {
         fs::remove_file(self.full(path)).map_err(|e| map(path, e))
     }

@@ -13,8 +13,9 @@ use crate::rowops::{self, RowKey, RowOpsError};
 use lattice_abi::{Classify, ErrorClass};
 use lattice_core::bugs::{self, Bug};
 use lattice_core::changeset::ChangeSet;
+use lattice_core::engine_checkpoint::{CheckpointRecovery, StateRead, StateWrite};
 use lattice_core::record::RecordType;
-use lattice_core::{Config, Kernel, Receipt, TxnError};
+use lattice_core::{Config, Kernel, LogError, Receipt, RecoveryReport, TxnError};
 use lattice_seams::{Clock, Io, Rng};
 use std::fmt;
 use std::ops::{Bound, RangeBounds};
@@ -73,12 +74,79 @@ impl Classify for RowError {
     }
 }
 
+fn checkpoint_bad(why: &str) -> LogError {
+    LogError::Corrupt(format!("row checkpoint: {why}"))
+}
+fn encode_rows(
+    table: &Table<RowKey, Vec<u8>>,
+    writer: &mut dyn StateWrite,
+) -> Result<(), LogError> {
+    writer.u64(table.applied_lsn())?;
+    writer.u64(table.history().count() as u64)?;
+    for ((id, key), lsn, cs, value) in table.history() {
+        writer.u64(u64::from(*id))?;
+        writer.bytes(key)?;
+        writer.u64(lsn)?;
+        writer.raw(&cs.to_bytes())?;
+        writer.u64(u64::from(value.is_some()))?;
+        if let Some(value) = value {
+            writer.bytes(value)?;
+        }
+    }
+    Ok(())
+}
+fn restore_rows(
+    reader: &mut dyn StateRead,
+    through: u64,
+    seen: &std::collections::BTreeSet<lattice_core::ChangeSetId>,
+) -> Result<Table<RowKey, Vec<u8>>, LogError> {
+    let applied = reader.u64()?;
+    if applied > through {
+        return Err(checkpoint_bad("applied LSN beyond source"));
+    }
+    let count = reader.count(48)?;
+    let mut table = Table::new();
+    let mut previous: Option<(RowKey, u64)> = None;
+    for _ in 0..count {
+        let id = u32::try_from(reader.u64()?).map_err(|_| checkpoint_bad("table id"))?;
+        let key = (id, reader.bytes()?);
+        let lsn = reader.u64()?;
+        let mut bytes = [0; 16];
+        reader.raw(&mut bytes)?;
+        let cs = lattice_core::ChangeSetId::from_bytes(bytes);
+        if lsn == 0
+            || lsn > applied
+            || !seen.contains(&cs)
+            || previous
+                .as_ref()
+                .is_some_and(|p| (&key, lsn) <= (&p.0, p.1))
+        {
+            return Err(checkpoint_bad("version order, LSN or change set"));
+        }
+        let value = match reader.u64()? {
+            0 => None,
+            1 => Some(reader.bytes()?),
+            _ => return Err(checkpoint_bad("value tag")),
+        };
+        table
+            .restore_version(key.clone(), lsn, cs, value)
+            .map_err(|_| checkpoint_bad("version order"))?;
+        previous = Some((key, lsn));
+    }
+    if table.applied_lsn() > applied {
+        return Err(checkpoint_bad("applied LSN"));
+    }
+    table.restore_applied(applied);
+    Ok(table)
+}
+
 /// Rows over the kernel.
 pub struct RowStore<I: Io, C: Clock, R: Rng> {
     kernel: Kernel<I, C, R>,
     table: Table<RowKey, Vec<u8>>,
     indexes: Indexes,
     stale: bool,
+    recovery: (RecoveryReport, CheckpointRecovery),
 }
 
 impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
@@ -101,57 +169,74 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         if index_defs.iter().any(|def| !ids.insert(def.id)) {
             return Err(RowError::InvalidIndexes("duplicate index id".into()));
         }
-        let mut table: Table<RowKey, Vec<u8>> = Table::new();
-        let mut indexes = Indexes::new(index_defs);
-        let mut failure: Option<RowError> = None;
-        let (kernel, _, _) = Kernel::open_streaming(io, clock, rng, config, |r| {
-            if failure.is_some() || RecordType::from_u8(r.rtype) != Some(RecordType::ChangeSet) {
-                return;
-            }
-            let cs = match ChangeSet::decode(&r.payload) {
-                Ok(cs) => cs,
-                Err(e) => {
-                    failure = Some(RowError::Corrupt(format!(
-                        "change set at lsn {}: {e}",
-                        r.lsn
-                    )));
-                    return;
+        let (kernel, (table, indexes), report, checkpoint) = Kernel::open_checkpointed(
+            io,
+            clock,
+            rng,
+            config,
+            b"raw-row-history-v1",
+            || (Table::new(), Indexes::new(index_defs.clone())),
+            |reader, through, seen| {
+                let table = restore_rows(reader, through, seen)?;
+                let mut indexes = Indexes::new(index_defs.clone());
+                indexes
+                    .restore_history(&table)
+                    .map_err(|e| checkpoint_bad(&format!("index history: {e:?}")))?;
+                Ok((table, indexes))
+            },
+            |r, (table, indexes)| {
+                if RecordType::from_u8(r.rtype) != Some(RecordType::ChangeSet) {
+                    return Ok(());
                 }
-            };
-            if !rowops::is_row_payload(&cs.payload) {
-                return; // another engine's change set
-            }
-            match rowops::decode(&cs.payload) {
-                Ok(mut writes) => {
-                    if bugs::active(Bug::RowRecoveryDropsDeletes) {
-                        writes.retain(|(_, value)| value.is_some());
-                    }
-                    let changes = indexes.changes_for(&table, &writes);
-                    if let Err(e) = table
-                        .apply(r.lsn, cs.id, writes)
-                        .and_then(|()| indexes.apply(r.lsn, cs.id, changes))
-                    {
-                        failure = Some(RowError::Corrupt(format!("lsn {}: {e:?}", r.lsn)));
-                    }
+                let cs = ChangeSet::decode(&r.payload)
+                    .map_err(|e| checkpoint_bad(&format!("change set: {e}")))?;
+                if !rowops::is_row_payload(&cs.payload) {
+                    return Ok(());
                 }
-                Err(e) => {
-                    failure = Some(RowError::Corrupt(format!(
-                        "row writes at lsn {}: {e:?}",
-                        r.lsn
-                    )));
+                let mut writes = rowops::decode(&cs.payload)
+                    .map_err(|e| checkpoint_bad(&format!("row writes: {e:?}")))?;
+                if bugs::active(Bug::RowRecoveryDropsDeletes) {
+                    writes.retain(|(_, value)| value.is_some());
                 }
-            }
-        })
+                let changes = indexes.changes_for(table, &writes);
+                table
+                    .apply(r.lsn, cs.id, writes)
+                    .and_then(|()| indexes.apply(r.lsn, cs.id, changes))
+                    .map_err(|e| checkpoint_bad(&format!("row lsn {}: {e:?}", r.lsn)))
+            },
+        )
         .map_err(RowError::Rejected)?;
-        match failure {
-            Some(e) => Err(e),
-            None => Ok(Self {
-                kernel,
-                table,
-                indexes,
-                stale: false,
-            }),
+        Ok(Self {
+            kernel,
+            table,
+            indexes,
+            stale: false,
+            recovery: (report, checkpoint),
+        })
+    }
+
+    /// Publishes every retained row version and kernel dedupe/fence state. A failure leaves this
+    /// store stale; reopening decides whether the last seal reached durable storage.
+    pub fn checkpoint(&mut self) -> Result<u64, RowError> {
+        if self.stale {
+            return Err(RowError::Stale);
         }
+        match self
+            .kernel
+            .checkpoint_engine(b"raw-row-history-v1", |writer| {
+                encode_rows(&self.table, writer)
+            }) {
+            Ok(lsn) => Ok(lsn),
+            Err(e) => {
+                self.stale = true;
+                Err(RowError::InDoubt(e))
+            }
+        }
+    }
+
+    /// Snapshot and suffix recovery evidence for this opening. Full scrub still audits prefix bytes.
+    pub fn recovery_report(&self) -> &(RecoveryReport, CheckpointRecovery) {
+        &self.recovery
     }
 
     /// Starts a transaction on the newest snapshot.

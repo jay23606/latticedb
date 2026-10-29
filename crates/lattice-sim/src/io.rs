@@ -471,6 +471,18 @@ impl Io for SimIo {
             .collect())
     }
 
+    fn visit_dir(&self, dir: &str, visit: &mut dyn FnMut(&str)) -> Result<(), IoError> {
+        if !dir.is_empty() && !self.dirs.contains_key(dir) {
+            return Err(IoError::NotFound(dir.into()));
+        }
+        for name in self.files.keys().filter(|n| parent(n) == dir) {
+            if let Some(name) = name.rsplit('/').next() {
+                visit(name);
+            }
+        }
+        Ok(())
+    }
+
     fn remove(&mut self, path: &str) -> Result<(), IoError> {
         self.trace.write(b"remove");
         self.trace.write(path.as_bytes());

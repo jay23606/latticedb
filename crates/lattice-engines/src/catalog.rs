@@ -10,8 +10,10 @@
 
 use lattice_abi::{Classify, ErrorClass};
 use lattice_core::changeset::ChangeSet;
+use lattice_core::engine_checkpoint::{CheckpointRecovery, StateRead, StateWrite};
 use lattice_core::record::{Record, RecordType};
 use lattice_core::{Config, Kernel, Receipt, TxnError};
+use lattice_core::{LogError, RecoveryReport};
 use lattice_seams::{Clock, Io, Rng};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -187,6 +189,10 @@ pub fn decode(payload: &[u8]) -> Result<Vec<CatalogOp>, CatalogError> {
 /// The tables that exist at one version: id to name.
 pub type Tables = BTreeMap<u32, String>;
 
+fn catalog_checkpoint_bad(why: &str) -> LogError {
+    LogError::Corrupt(format!("catalog checkpoint: {why}"))
+}
+
 /// Every version of the catalog.
 #[derive(Debug, Clone, Default)]
 pub struct Catalog {
@@ -197,6 +203,82 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    fn encode_checkpoint(&self, writer: &mut dyn StateWrite) -> Result<(), LogError> {
+        writer.u64(self.used.len() as u64)?;
+        for id in &self.used {
+            writer.u64(u64::from(*id))?;
+        }
+        writer.u64(self.versions.len() as u64)?;
+        for (lsn, tables) in &self.versions {
+            writer.u64(*lsn)?;
+            writer.u64(tables.len() as u64)?;
+            for (id, name) in tables {
+                writer.u64(u64::from(*id))?;
+                writer.bytes(name.as_bytes())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn restore_checkpoint(reader: &mut dyn StateRead, through: u64) -> Result<Self, LogError> {
+        let mut used = BTreeSet::new();
+        let mut previous = None;
+        for _ in 0..reader.count(8)? {
+            let id = u32::try_from(reader.u64()?).map_err(|_| catalog_checkpoint_bad("used id"))?;
+            if previous.is_some_and(|p| p >= id) {
+                return Err(catalog_checkpoint_bad("used id order"));
+            }
+            used.insert(id);
+            previous = Some(id);
+        }
+        let count = reader.count(16)?;
+        if count > through {
+            return Err(catalog_checkpoint_bad("version count"));
+        }
+        let mut versions = Vec::new();
+        let mut last_lsn = 0;
+        let mut appeared = BTreeSet::new();
+        let mut dropped = BTreeSet::new();
+        let mut prior = BTreeSet::new();
+        for _ in 0..count {
+            let lsn = reader.u64()?;
+            if lsn <= last_lsn || lsn > through {
+                return Err(catalog_checkpoint_bad("version LSN"));
+            }
+            let mut tables = BTreeMap::new();
+            let mut names = BTreeSet::new();
+            let mut prev = None;
+            for _ in 0..reader.count(17)? {
+                let id =
+                    u32::try_from(reader.u64()?).map_err(|_| catalog_checkpoint_bad("table id"))?;
+                let name = String::from_utf8(reader.bytes()?)
+                    .map_err(|_| catalog_checkpoint_bad("name encoding"))?;
+                if name.is_empty()
+                    || name.len() > MAX_NAME
+                    || !used.contains(&id)
+                    || dropped.contains(&id)
+                    || prev.is_some_and(|p| p >= id)
+                    || !names.insert(name.clone())
+                {
+                    return Err(catalog_checkpoint_bad("table/name/order"));
+                }
+                tables.insert(id, name);
+                prev = Some(id);
+                appeared.insert(id);
+            }
+            let current: BTreeSet<_> = tables.keys().copied().collect();
+            dropped.extend(prior.difference(&current).copied());
+            prior = current;
+            versions.push((lsn, tables));
+            last_lsn = lsn;
+        }
+        // IDs created and dropped atomically may occur only in `used`, never in a visible version.
+        if !appeared.is_subset(&used) {
+            return Err(catalog_checkpoint_bad("used ids"));
+        }
+        Ok(Self { versions, used })
+    }
+
     /// An empty catalog.
     pub fn new() -> Self {
         Self::default()
@@ -292,6 +374,7 @@ pub struct CatalogStore<I: Io, C: Clock, R: Rng> {
     kernel: Kernel<I, C, R>,
     catalog: Catalog,
     stale: bool,
+    recovery: (RecoveryReport, CheckpointRecovery),
 }
 
 /// Why a catalog store operation failed.
@@ -323,48 +406,60 @@ impl Classify for StoreError {
 impl<I: Io, C: Clock, R: Rng> CatalogStore<I, C, R> {
     /// Opens the log and rebuilds the catalog from its catalog change sets, skipping other engines'.
     pub fn open(io: I, clock: C, rng: R, config: &Config) -> Result<Self, StoreError> {
-        let mut catalog = Catalog::new();
-        let mut failure: Option<StoreError> = None;
-        let (kernel, _, _) = Kernel::open_streaming(io, clock, rng, config, |r: Record| {
-            if failure.is_some() || RecordType::from_u8(r.rtype) != Some(RecordType::ChangeSet) {
-                return;
-            }
-            let cs = match ChangeSet::decode(&r.payload) {
-                Ok(cs) => cs,
-                Err(e) => {
-                    failure = Some(StoreError::Corrupt(format!(
-                        "change set at lsn {}: {e}",
-                        r.lsn
-                    )));
-                    return;
+        let (kernel, catalog, report, checkpoint) = Kernel::open_checkpointed(
+            io,
+            clock,
+            rng,
+            config,
+            b"legacy-catalog-history-v1",
+            Catalog::new,
+            |reader, through, _| Catalog::restore_checkpoint(reader, through),
+            |r: Record, catalog| {
+                if RecordType::from_u8(r.rtype) != Some(RecordType::ChangeSet) {
+                    return Ok(());
                 }
-            };
-            if !is_catalog_payload(&cs.payload) {
-                return;
-            }
-            match decode(&cs.payload) {
-                Ok(ops) => {
-                    if let Err(e) = catalog.apply(r.lsn, &ops) {
-                        failure = Some(StoreError::Corrupt(format!("lsn {}: {e}", r.lsn)));
-                    }
+                let cs = ChangeSet::decode(&r.payload)
+                    .map_err(|e| catalog_checkpoint_bad(&format!("change set: {e}")))?;
+                if !is_catalog_payload(&cs.payload) {
+                    return Ok(());
                 }
-                Err(e) => {
-                    failure = Some(StoreError::Corrupt(format!(
-                        "catalog at lsn {}: {e}",
-                        r.lsn
-                    )));
-                }
-            }
-        })
+                let ops = decode(&cs.payload)
+                    .map_err(|e| catalog_checkpoint_bad(&format!("catalog: {e}")))?;
+                catalog
+                    .apply(r.lsn, &ops)
+                    .map_err(|e| catalog_checkpoint_bad(&format!("catalog lsn {}: {e}", r.lsn)))
+            },
+        )
         .map_err(StoreError::Rejected)?;
-        match failure {
-            Some(e) => Err(e),
-            None => Ok(Self {
-                kernel,
-                catalog,
-                stale: false,
-            }),
+        Ok(Self {
+            kernel,
+            catalog,
+            stale: false,
+            recovery: (report, checkpoint),
+        })
+    }
+
+    /// Publishes all catalog versions and every used id alongside kernel state.
+    pub fn checkpoint(&mut self) -> Result<u64, StoreError> {
+        if self.stale {
+            return Err(StoreError::Stale);
         }
+        match self
+            .kernel
+            .checkpoint_engine(b"legacy-catalog-history-v1", |writer| {
+                self.catalog.encode_checkpoint(writer)
+            }) {
+            Ok(lsn) => Ok(lsn),
+            Err(e) => {
+                self.stale = true;
+                Err(StoreError::InDoubt(e))
+            }
+        }
+    }
+
+    /// Evidence of prefix skipping and suffix replay for this opening.
+    pub fn recovery_report(&self) -> &(RecoveryReport, CheckpointRecovery) {
+        &self.recovery
     }
 
     /// The catalog as it stands.

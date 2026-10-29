@@ -79,7 +79,7 @@ fn seg_name(dir: &str, first_lsn: u64) -> String {
     format!("{dir}/{first_lsn:020}.seg")
 }
 
-fn first_lsn_of(name: &str) -> Option<u64> {
+pub(crate) fn first_lsn_of(name: &str) -> Option<u64> {
     name.strip_suffix(".seg")?.parse().ok()
 }
 
@@ -140,16 +140,30 @@ struct Recovered {
 fn recover<I: Io>(
     io: &mut I,
     dir: &str,
+    start: u64,
     sink: &mut dyn FnMut(Record),
 ) -> Result<Recovered, LogError> {
-    let mut names: Vec<(u64, String)> = io
-        .list(dir)?
-        .into_iter()
-        .filter_map(|n| first_lsn_of(&n).map(|l| (l, n)))
-        .collect();
+    let mut names = Vec::new();
+    io.visit_dir(dir, &mut |name| {
+        if let Some(first) = first_lsn_of(name).filter(|first| *first >= start) {
+            names.push((first, name.to_string()));
+        }
+    })?;
     names.sort();
+    let source_floor = crate::engine_checkpoint::source_lsn_evidence(io, dir)?;
     let mut report = RecoveryReport::default();
     if names.is_empty() {
+        if source_floor > 0 {
+            return Err(LogError::Corrupt(
+                "all WAL segments missing while checkpoint artifacts prove nonempty source history"
+                    .into(),
+            ));
+        }
+        if start != 1 {
+            return Err(LogError::Corrupt(
+                "checkpoint anchor segment missing".into(),
+            ));
+        }
         let name = seg_name(dir, 1);
         io.append(&name, &segment_header())?;
         io.sync(&name)?;
@@ -165,7 +179,7 @@ fn recover<I: Io>(
     // One record is held back so the last one can still be dropped by the planted recovery bug.
     let mut pending: Option<Record> = None;
     let mut count: u64 = 0;
-    let mut expected: u64 = 1;
+    let mut expected: u64 = start;
     let mut current = String::new();
     let mut current_len = 0u64;
     let last_idx = names.len() - 1;
@@ -206,7 +220,9 @@ fn recover<I: Io>(
         while off < data.len() {
             match decode_record(&data, off) {
                 Decoded::Record(r, next) if r.lsn == expected => {
-                    expected += 1;
+                    expected = expected
+                        .checked_add(1)
+                        .ok_or_else(|| LogError::Corrupt("LSN overflow".into()))?;
                     if let Some(prev) = pending.replace(r) {
                         sink(prev);
                         count += 1;
@@ -220,6 +236,11 @@ fn recover<I: Io>(
             }
         }
         if let Some(at) = bad_at {
+            if expected - 1 < source_floor {
+                return Err(LogError::Corrupt(
+                    "damaged WAL below a checkpoint source boundary".into(),
+                ));
+            }
             if !is_last {
                 return Err(LogError::Corrupt(format!(
                     "segment {name} damaged at offset {at} and later segments exist"
@@ -243,6 +264,11 @@ fn recover<I: Io>(
         current = path;
         current_len = off as u64;
         report.segments += 1;
+    }
+    if expected - 1 < source_floor {
+        return Err(LogError::Corrupt(
+            "WAL ends below a checkpoint source boundary".into(),
+        ));
     }
     if bugs::active(Bug::RecoveryDropsLastRecord)
         && let Some(last) = pending.take()
@@ -300,15 +326,39 @@ impl<I: Io> Log<I> {
     /// then turns out to be damaged beyond repair; in that case the open fails and they must be
     /// discarded.
     pub fn open_streaming(
-        mut io: I,
+        io: I,
         dir: &str,
         segment_limit: u64,
         mut visit: impl FnMut(Record),
     ) -> Result<(Self, RecoveryReport), LogError> {
+        let (log, report, ()) = Self::open_prepared(
+            io,
+            dir,
+            segment_limit,
+            |_| Ok((1, ())),
+            |record, _| visit(record),
+        )?;
+        Ok((log, report))
+    }
+
+    pub(crate) fn open_prepared<T>(
+        mut io: I,
+        dir: &str,
+        segment_limit: u64,
+        prepare: impl FnOnce(&I) -> Result<(u64, T), LogError>,
+        mut visit: impl FnMut(Record, &mut T),
+    ) -> Result<(Self, RecoveryReport, T), LogError> {
         ensure_dir(&mut io, dir)?;
         let lock_path = format!("{dir}/LOCK");
         io.lock(&lock_path)?;
-        match recover(&mut io, dir, &mut visit) {
+        let (start, mut state) = match prepare(&io) {
+            Ok(state) => state,
+            Err(e) => {
+                io.unlock(&lock_path);
+                return Err(e);
+            }
+        };
+        match recover(&mut io, dir, start, &mut |r| visit(r, &mut state)) {
             Ok(r) => {
                 let log = Self {
                     io,
@@ -322,7 +372,7 @@ impl<I: Io> Log<I> {
                     buffer: Vec::new(),
                     poisoned: false,
                 };
-                Ok((log, r.report))
+                Ok((log, r.report, state))
             }
             Err(e) => {
                 io.unlock(&lock_path);
@@ -341,9 +391,13 @@ impl<I: Io> Log<I> {
             return Err(LogError::TooLarge(payload.len()));
         }
         let lsn = self.next_lsn;
+        let next = self
+            .next_lsn
+            .checked_add(1)
+            .ok_or_else(|| LogError::Corrupt("LSN exhausted".into()))?;
         self.buffer
             .extend_from_slice(&encode_record(lsn, rtype, payload));
-        self.next_lsn += 1;
+        self.next_lsn = next;
         Ok(lsn)
     }
 
@@ -389,6 +443,25 @@ impl<I: Io> Log<I> {
         self.current = name;
         self.current_len = SEGMENT_HEADER_LEN as u64;
         Ok(())
+    }
+
+    /// Establishes a durable source boundary and an empty anchor segment for a checkpoint seal.
+    pub(crate) fn checkpoint_boundary(&mut self) -> Result<(), LogError> {
+        self.sync()?;
+        if self.poisoned {
+            return Err(LogError::Poisoned);
+        }
+        if self.current_len > SEGMENT_HEADER_LEN as u64
+            && let Err(e) = self.rotate()
+        {
+            self.poisoned = true;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn io_mut(&mut self) -> &mut I {
+        &mut self.io
     }
 
     /// Highest LSN known durable.

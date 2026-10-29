@@ -26,6 +26,13 @@ pub fn run<I: Io>(io: &mut I) {
         vec!["a".to_string(), "b".to_string()]
     );
 
+    let mut visited = Vec::new();
+    io.visit_dir("conf", &mut |name| visited.push(name.to_string()))
+        .expect("visit dir");
+    visited.sort();
+    assert_eq!(visited, io.list("conf").expect("list"));
+    assert!(io.visit_dir("conf/missing", &mut |_| {}).is_err());
+
     io.remove("conf/b").expect("remove");
     assert!(!io.exists("conf/b"));
     assert_eq!(io.remove("conf/b"), Err(IoError::NotFound("conf/b".into())));

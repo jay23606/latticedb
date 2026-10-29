@@ -106,6 +106,44 @@ impl<K: Ord + Clone, V: Clone> Table<K, V> {
         Ok(())
     }
 
+    /// Canonical key/version traversal, including tombstones, for offline checkpoint encoding.
+    #[cfg(feature = "row")]
+    pub(crate) fn history(&self) -> impl Iterator<Item = (&K, u64, ChangeSetId, Option<&V>)> {
+        self.rows.iter().flat_map(|(key, versions)| {
+            versions
+                .iter()
+                .map(move |v| (key, v.lsn, v.cs, v.value.as_ref()))
+        })
+    }
+
+    /// Offline restore only: independent keys may be restored out of global LSN order.
+    #[cfg(feature = "row")]
+    pub(crate) fn restore_version(
+        &mut self,
+        key: K,
+        lsn: u64,
+        cs: ChangeSetId,
+        value: Option<V>,
+    ) -> Result<(), MvccError> {
+        let versions = self.rows.entry(key).or_default();
+        if let Some(last) = versions.last()
+            && last.lsn >= lsn
+        {
+            return Err(MvccError::OutOfOrder {
+                lsn,
+                applied: last.lsn,
+            });
+        }
+        versions.push(Version { lsn, cs, value });
+        self.applied = self.applied.max(lsn);
+        Ok(())
+    }
+
+    #[cfg(feature = "row")]
+    pub(crate) fn restore_applied(&mut self, lsn: u64) {
+        self.applied = lsn;
+    }
+
     fn visible(versions: &[Version<V>], snap: Snapshot) -> Option<&Version<V>> {
         if bugs::active(Bug::RowTombstoneSkipped) {
             return versions

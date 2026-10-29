@@ -105,6 +105,9 @@ impl Io for SharedIo {
     fn list(&self, dir: &str) -> Result<Vec<String>, IoError> {
         self.0.borrow().list(dir)
     }
+    fn visit_dir(&self, dir: &str, visit: &mut dyn FnMut(&str)) -> Result<(), IoError> {
+        self.0.borrow().visit_dir(dir, visit)
+    }
     fn remove(&mut self, path: &str) -> Result<(), IoError> {
         self.0.borrow_mut().remove(path)
     }

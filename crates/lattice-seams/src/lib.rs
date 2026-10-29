@@ -85,6 +85,14 @@ pub trait Io {
     fn sync_dir(&mut self, dir: &str) -> Result<(), IoError>;
     /// File names (not paths) directly inside `dir`, sorted.
     fn list(&self, dir: &str) -> Result<Vec<String>, IoError>;
+    /// Visits direct file names in unspecified order, without retaining them. The compatibility
+    /// default collects `list`; bounded implementations and transparent wrappers should override.
+    fn visit_dir(&self, dir: &str, visit: &mut dyn FnMut(&str)) -> Result<(), IoError> {
+        for name in self.list(dir)? {
+            visit(&name);
+        }
+        Ok(())
+    }
     /// Removes a file.
     fn remove(&mut self, path: &str) -> Result<(), IoError>;
     /// Creates a directory and its parents. Like a file creation, the new directories are only
