@@ -80,7 +80,7 @@ impl Classify for RowError {
     }
 }
 
-// Catalog-only validation cannot see uncatalogued physical row ids. The shared row/catalog
+// Catalog-only validation cannot see uncataloged physical row ids. The shared row/catalog
 // boundary must reject assigning a typed layout to any id with older untyped row history.
 fn check_schema_history(
     catalog: &Catalog,

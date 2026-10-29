@@ -21,7 +21,7 @@ reviewable branch code, not an accepted format or a Phase 2 exit claim. The Phas
 - Replay catalog and row change sets through RowStore's one kernel/WAL writer. Validate catalog
   semantics before append and during recovery; malformed known catalog payloads stop recovery.
 - Use one typed physical table per type, not an entity/attribute/value table. Reserve all physical
-  table ids found in row history, including deleted and previously uncatalogued raw tables.
+  table ids found in row history, including deleted and previously uncataloged raw tables.
 - Store typed values as LTYP v1 envelopes carrying the immutable writer-schema version. Decode with
   the original layout and validate stored values against its constraints, rather than the newest one.
 - Fence writing transactions when the catalog changes after begin; preserve read-only snapshots.

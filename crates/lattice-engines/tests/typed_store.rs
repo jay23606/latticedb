@@ -396,7 +396,7 @@ fn independent_python_catalog_and_typed_envelope_goldens_are_byte_exact() {
 }
 
 #[test]
-fn uncatalogued_raw_history_is_never_adopted_by_new_typed_tables() {
+fn uncataloged_raw_history_is_never_adopted_by_new_typed_tables() {
     for deleted in [false, true] {
         let (disk, clock) = fresh(101 + u64::from(deleted));
         let mut raw = RowStore::open(
@@ -493,7 +493,7 @@ fn catalogued_raw_tombstones_also_prevent_typed_adoption() {
 }
 
 #[test]
-fn delete_only_and_mixed_uncatalogued_ids_remain_reserved_after_replay() {
+fn delete_only_and_mixed_uncataloged_ids_remain_reserved_after_replay() {
     let (disk, clock) = fresh(120);
     let mut raw = RowStore::open(
         disk.clone(),
