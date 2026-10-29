@@ -175,3 +175,35 @@ fn a_catalog_change_is_all_there_or_not_at_all_across_crashes() {
         }
     }
 }
+
+#[test]
+fn a_catalog_only_store_refuses_schema_and_checkpoint_once_the_log_holds_row_data() {
+    use lattice_lsl::{format, parser};
+    use std::collections::BTreeMap;
+    let (disk, clock) = fresh();
+    // Raw rows in table 7 are written by the row store, then it closes.
+    {
+        let mut rows = RowStore::open(
+            disk.clone(),
+            SharedClock(clock.clone()),
+            SeededRng::new(1),
+            &config(),
+        )
+        .unwrap();
+        let mut tx = rows.begin();
+        tx.put((7, b"k".to_vec()), b"raw".to_vec());
+        rows.commit(tx).unwrap();
+    }
+    let mut cat = open(&disk, &clock, 2).unwrap();
+    let source = format::format(&parser::parse("facet Ticket { title: text }").unwrap());
+    let define = CatalogOp::DefineSchema {
+        version: 1,
+        source,
+        tables: BTreeMap::from([(7, "Ticket".into())]),
+    };
+    // Adopting table 7 would orphan its raw history, and a checkpoint would hide that history.
+    assert_eq!(cat.commit(vec![define]), Err(StoreError::SharedLog));
+    assert_eq!(cat.checkpoint(), Err(StoreError::SharedLog));
+    // Catalog operations that do not depend on row history still work.
+    cat.commit(vec![create(9, "plain")]).unwrap();
+}

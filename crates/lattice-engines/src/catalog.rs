@@ -9,6 +9,7 @@
 //! the UTF-8 name. Version 2 adds schema definitions and type-to-table mappings; legacy operations
 //! retain their v1 encoding. Decoding and semantic replay are strict.
 
+use crate::rowops;
 use crate::typed::{self, TableLayout};
 use lattice_abi::{Classify, ErrorClass};
 use lattice_core::changeset::ChangeSet;
@@ -782,6 +783,10 @@ pub struct CatalogStore<I: Io, C: Clock, R: Rng> {
     kernel: Kernel<I, C, R>,
     catalog: Catalog,
     stale: bool,
+    /// The log holds row change sets. This store cannot see which tables they write, so it refuses
+    /// the changes that depend on knowing: defining a schema and checkpointing (a checkpoint would
+    /// hide the row history from the next open).
+    saw_rows: bool,
     recovery: (RecoveryReport, CheckpointRecovery),
 }
 
@@ -798,12 +803,15 @@ pub enum StoreError {
     Stale,
     /// The log holds a catalog change this code cannot apply.
     Corrupt(String),
+    /// The log also holds row data, which this catalog-only store cannot see; use the combined row
+    /// store for schema definitions and checkpoints.
+    SharedLog,
 }
 
 impl Classify for StoreError {
     fn class(&self) -> ErrorClass {
         match self {
-            StoreError::Invalid(_) => ErrorClass::Rejected,
+            StoreError::Invalid(_) | StoreError::SharedLog => ErrorClass::Rejected,
             StoreError::Rejected(e) | StoreError::InDoubt(e) => e.class(),
             StoreError::Stale => ErrorClass::Retryable,
             StoreError::Corrupt(_) => ErrorClass::Fatal,
@@ -814,6 +822,7 @@ impl Classify for StoreError {
 impl<I: Io, C: Clock, R: Rng> CatalogStore<I, C, R> {
     /// Opens the log and rebuilds the catalog from its catalog change sets, skipping other engines'.
     pub fn open(io: I, clock: C, rng: R, config: &Config) -> Result<Self, StoreError> {
+        let mut saw_rows = false;
         let (kernel, catalog, report, checkpoint) = Kernel::open_checkpointed(
             io,
             clock,
@@ -829,6 +838,7 @@ impl<I: Io, C: Clock, R: Rng> CatalogStore<I, C, R> {
                 let cs = ChangeSet::decode(&r.payload)
                     .map_err(|e| catalog_checkpoint_bad(&format!("change set: {e}")))?;
                 if !is_catalog_payload(&cs.payload) {
+                    saw_rows |= rowops::is_row_payload(&cs.payload);
                     return Ok(());
                 }
                 let ops = decode(&cs.payload)
@@ -846,6 +856,7 @@ impl<I: Io, C: Clock, R: Rng> CatalogStore<I, C, R> {
             kernel,
             catalog,
             stale: false,
+            saw_rows,
             recovery: (report, checkpoint),
         })
     }
@@ -854,6 +865,9 @@ impl<I: Io, C: Clock, R: Rng> CatalogStore<I, C, R> {
     pub fn checkpoint(&mut self) -> Result<u64, StoreError> {
         if self.stale {
             return Err(StoreError::Stale);
+        }
+        if self.saw_rows {
+            return Err(StoreError::SharedLog);
         }
         match self
             .kernel
@@ -882,6 +896,13 @@ impl<I: Io, C: Clock, R: Rng> CatalogStore<I, C, R> {
     pub fn commit(&mut self, ops: Vec<CatalogOp>) -> Result<u64, StoreError> {
         if self.stale {
             return Err(StoreError::Stale);
+        }
+        if self.saw_rows
+            && ops
+                .iter()
+                .any(|op| matches!(op, CatalogOp::DefineSchema { .. }))
+        {
+            return Err(StoreError::SharedLog);
         }
         self.catalog.check(&ops).map_err(StoreError::Invalid)?;
         let payload = encode(&ops).map_err(StoreError::Invalid)?;
