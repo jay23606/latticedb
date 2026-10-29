@@ -22,6 +22,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+pub mod admission;
 pub mod bugs;
 pub mod chain;
 pub mod changeset;
@@ -49,3 +50,6 @@ pub use txn::{
 
 /// Layer marker used by the layer check. Do not remove.
 pub const LAYER: u8 = 3;
+
+#[cfg(test)]
+mod admission_tests;
