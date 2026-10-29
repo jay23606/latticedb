@@ -107,8 +107,8 @@ typed-schema/checkpoint formats still in review. Branch histories remain pending
 
 ## Still missing
 
-Catalog-backed index definitions; completed typed-table integration; checkpoint-based recovery with
-memory/time measurements; vacuum; SQL parser, planner and executor; PostgreSQL wire and driver
+Catalog-backed index definitions; accepted typed-table and checkpoint formats, including combined
+typed-state recovery measurements; vacuum; SQL parser, planner and executor; PostgreSQL wire and driver
 conformance; branches and SQL time travel; online schema changes; and complete Phase 2 simulation,
 benchmark and north-star evidence. The Phase 1 nightly/fuzz history and final gate review also remain
 open. Track partial acceptance on [the roadmap](https://github.com/users/moncifem/projects/1).
@@ -120,4 +120,31 @@ original schema, catalog timeline, raw physical-id reservation and row version i
 It validates rows against their historical writer layout before exposing the restored state. Tests
 require actual fast-path use and exercise publication cuts and corrupt-cache full-replay fallback.
 This branch does not accept either parent RFC or establish recovery memory/time bounds for typed data.
-Independent combined fixtures and measured costs remain pending; all three review periods apply.
+Twenty-one independently encoded combined fixtures now verify fast restoration and byte-exact
+public-store re-publication of checkpoint chunks, manifests and seals. Combined-schema measured
+costs remain pending; all three review periods apply.
+
+## Raw checkpoint measurements under review (P2-08 / E2-6)
+
+[Run 40797913195](https://github.com/moncifem/latticedb/actions/runs/40797913195), revision
+`1d7035092b192a6f9104c7aa1930a65d7390a5e0`, measured draft RFC 0002 with 11 datasets and
+66 fresh recovery processes. Every trial passed its enforced 192 MiB process-tree cgroup ceiling
+with swap disabled and no OOM kill. An independent over-limit calibration confirmed enforcement.
+Complete semantic verification ran separately from measurement. These are warm/uncontrolled-cache
+Linux results; times are median engine-open milliseconds and RSS is the maximum over three trials.
+
+| Dataset | Full open ms | Checkpoint open ms | Full peak RSS KiB | Checkpoint peak RSS KiB |
+| --- | --- | --- | --- | --- |
+| 256 keys ×4 retained versions | 6.755 | 3.514 | 5,068 | 4,196 |
+| 1024 keys ×4 retained versions | 24.074 | 10.900 | 10,336 | 8,820 |
+| 4096 keys ×4 retained versions | 88.114 | 43.388 | 27,632 | 26,844 |
+| 268,528,165-byte opaque prefix | 854.850 | 1.163 | 18,816 | 2,860 |
+| 518 prefix files | 32.186 | 2.824 | 2,928 | 2,876 |
+| 4096 suffix rows /4,616,358 suffix bytes | 33.582 | 21.879 | 9,992 | 9,928 |
+
+The opaque-prefix comparison holds source row history and committed-ID cardinality constant.
+Retained-state memory still grows, prefix metadata work is O(file count), and suffix replay adds
+memory and time. These measurements cover raw row/catalog checkpoints, not typed-schema compilation
+or the legacy collecting `Kernel::open` API. They do not close #108/#118 or accept the draft format.
+See the [protocol and interpretation](../../crates/lattice-bench/CHECKPOINT_RECOVERY.md) and
+[raw results](../../crates/lattice-bench/evidence/checkpoint-recovery/2026-10-29/results.json).
