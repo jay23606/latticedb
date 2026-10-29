@@ -46,6 +46,14 @@ are skipped under an insufficient tag. Existing log records remain retained; no 
 
 ## Evidence still needed
 
-Independent combined-state golden fixtures and fresh-process RSS/time measurements remain pending.
+Independent combined-state fixtures now come from `generate_combined_checkpoint_golden.py`, which
+owns LCATv2/LTYP/cells, WAL CRC/framing, lifetime/state and container encoding; only BLAKE3 hashing
+uses an external pinned library. The 21 binary files under `corpus/combined-checkpoint-v1/` cover
+evolved writer layouts, same-key history, a raw tombstone table-id reservation and an invisible
+atomic schema/create-drop lifetime. Tests require actual fast restoration and reproduce a second
+complete chunk/manifest/seal through the public stores using explicit test Clock/Rng seams; full
+WAL replay cannot masquerade as the fast-path evidence. Existing legacy fixtures remain unchanged.
+
+Fresh-process RSS/time measurements for combined typed state remain pending.
 Raw checkpoint measurements do not prove the cost of compiling retained schema histories. Validation
 holds at the current tag version; adding fields or relaxing canonicality requires another version.

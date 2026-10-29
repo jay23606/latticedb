@@ -1,0 +1,4 @@
+format = "combined-typed-checkpoint-v1-reencoded-manifest"
+version = 1
+generator = "formats/generate_combined_checkpoint_golden.py"
+case = "evolved-rows"

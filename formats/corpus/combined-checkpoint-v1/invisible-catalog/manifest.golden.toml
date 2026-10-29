@@ -1,0 +1,4 @@
+format = "combined-typed-checkpoint-v1-manifest"
+version = 1
+generator = "formats/generate_combined_checkpoint_golden.py"
+case = "invisible-catalog"
