@@ -6,14 +6,17 @@
 //!
 //! Layout (little endian): magic `LCAT`, a version byte, a `u32` count, then per operation a kind byte
 //! (1 create, 2 rename, 3 drop), a `u32` table id and, for create and rename, a `u32` name length and
-//! the UTF-8 name. Decoding is strict, like the row payloads.
+//! the UTF-8 name. Version 2 adds schema definitions and type-to-table mappings; legacy operations
+//! retain their v1 encoding. Decoding and semantic replay are strict.
 
+use crate::typed::{self, TableLayout};
 use lattice_abi::{Classify, ErrorClass};
 use lattice_core::changeset::ChangeSet;
 use lattice_core::engine_checkpoint::{CheckpointRecovery, StateRead, StateWrite};
 use lattice_core::record::{Record, RecordType};
-use lattice_core::{Config, Kernel, Receipt, TxnError};
-use lattice_core::{LogError, RecoveryReport};
+use lattice_core::{Config, Kernel, LogError, Receipt, RecoveryReport, TxnError};
+use lattice_lsl::check::{self, Compiled};
+use lattice_lsl::{format, parser};
 use lattice_seams::{Clock, Io, Rng};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -46,6 +49,15 @@ pub enum CatalogOp {
         /// The table.
         table: u32,
     },
+    /// Installs checked schema text and its exact type-to-table mapping atomically.
+    DefineSchema {
+        /// Monotonically increasing schema version, never reused.
+        version: u64,
+        /// The LSL source; parsing and checking happen before logging and on replay.
+        source: String,
+        /// One stable physical table id per type in the schema.
+        tables: BTreeMap<u32, String>,
+    },
 }
 
 /// Why a catalog change or payload was refused.
@@ -71,6 +83,14 @@ pub enum CatalogError {
     UnsupportedVersion(u8),
     /// Bytes remain after the last operation.
     Trailing,
+    /// The schema text is invalid or not canonical LSL.
+    InvalidSchema(String),
+    /// The schema version is zero or not newer than the last installed version.
+    SchemaVersion(u64),
+    /// The table mapping does not identify every schema type exactly once.
+    InvalidMapping,
+    /// An id or format length is exhausted.
+    Exhausted,
 }
 
 impl fmt::Display for CatalogError {
@@ -90,13 +110,53 @@ pub fn encode(ops: &[CatalogOp]) -> Result<Vec<u8>, CatalogError> {
         return Err(CatalogError::Empty);
     }
     let mut out = MAGIC.to_vec();
-    out.push(VERSION);
-    out.extend_from_slice(&(ops.len() as u32).to_le_bytes());
+    let schema_payload = ops
+        .iter()
+        .any(|op| matches!(op, CatalogOp::DefineSchema { .. }));
+    out.push(if schema_payload { 2 } else { VERSION });
+    out.extend_from_slice(
+        &u32::try_from(ops.len())
+            .map_err(|_| CatalogError::Exhausted)?
+            .to_le_bytes(),
+    );
     for op in ops {
+        if let CatalogOp::DefineSchema {
+            version,
+            source,
+            tables,
+        } = op
+        {
+            if source.len() > parser::MAX_SCHEMA_BYTES {
+                return Err(CatalogError::Exhausted);
+            }
+            out.push(4);
+            out.extend_from_slice(&version.to_le_bytes());
+            out.extend_from_slice(
+                &u32::try_from(source.len())
+                    .map_err(|_| CatalogError::Exhausted)?
+                    .to_le_bytes(),
+            );
+            out.extend_from_slice(source.as_bytes());
+            out.extend_from_slice(
+                &u32::try_from(tables.len())
+                    .map_err(|_| CatalogError::Exhausted)?
+                    .to_le_bytes(),
+            );
+            for (table, name) in tables {
+                if name.is_empty() || name.len() > MAX_NAME {
+                    return Err(CatalogError::BadName);
+                }
+                out.extend_from_slice(&table.to_le_bytes());
+                out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+                out.extend_from_slice(name.as_bytes());
+            }
+            continue;
+        }
         let (kind, table, name) = match op {
             CatalogOp::Create { table, name } => (1u8, *table, Some(name)),
             CatalogOp::Rename { table, name } => (2, *table, Some(name)),
             CatalogOp::Drop { table } => (3, *table, None),
+            CatalogOp::DefineSchema { .. } => return Err(CatalogError::InvalidMapping),
         };
         out.push(kind);
         out.extend_from_slice(&table.to_le_bytes());
@@ -155,17 +215,46 @@ pub fn decode(payload: &[u8]) -> Result<Vec<CatalogOp>, CatalogError> {
     if r.take(4)? != MAGIC.as_slice() {
         return Err(CatalogError::Truncated);
     }
-    match r.u8()? {
-        VERSION => {}
-        v => return Err(CatalogError::UnsupportedVersion(v)),
+    let version = r.u8()?;
+    if version != VERSION && version != 2 {
+        return Err(CatalogError::UnsupportedVersion(version));
     }
     let count = r.u32()?;
     if count == 0 {
         return Err(CatalogError::Empty);
     }
     let mut ops = Vec::new();
+    let mut has_schema = false;
     for _ in 0..count {
         let kind = r.u8()?;
+        if kind == 4 && version == 2 {
+            has_schema = true;
+            let bytes: [u8; 8] = r.take(8)?.try_into().map_err(|_| CatalogError::Truncated)?;
+            let schema_version = u64::from_le_bytes(bytes);
+            let len = r.u32()? as usize;
+            if len > parser::MAX_SCHEMA_BYTES {
+                return Err(CatalogError::Exhausted);
+            }
+            let source = String::from_utf8(r.take(len)?.to_vec())
+                .map_err(|_| CatalogError::InvalidSchema("invalid UTF-8".into()))?;
+            let n = r.u32()?;
+            let mut tables = BTreeMap::new();
+            let mut previous = None;
+            for _ in 0..n {
+                let table = r.u32()?;
+                if previous.is_some_and(|id| id >= table) {
+                    return Err(CatalogError::InvalidMapping);
+                }
+                previous = Some(table);
+                tables.insert(table, r.name()?);
+            }
+            ops.push(CatalogOp::DefineSchema {
+                version: schema_version,
+                source,
+                tables,
+            });
+            continue;
+        }
         let table = r.u32()?;
         ops.push(match kind {
             1 => CatalogOp::Create {
@@ -183,14 +272,28 @@ pub fn decode(payload: &[u8]) -> Result<Vec<CatalogOp>, CatalogError> {
     if !r.rest.is_empty() {
         return Err(CatalogError::Trailing);
     }
+    if version == 2 && !has_schema {
+        return Err(CatalogError::InvalidMapping);
+    }
     Ok(ops)
 }
 
 /// The tables that exist at one version: id to name.
 pub type Tables = BTreeMap<u32, String>;
 
-fn catalog_checkpoint_bad(why: &str) -> LogError {
-    LogError::Corrupt(format!("catalog checkpoint: {why}"))
+/// A persisted checked schema and the physical layouts it owns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaVersion {
+    /// Stable version, also stamped into typed row values.
+    pub version: u64,
+    /// The LSN at which this schema became visible.
+    pub installed_lsn: u64,
+    /// Canonical LSL source, retained in the catalog log.
+    pub source: String,
+    /// Checked field constraints used before encoding.
+    pub compiled: Compiled,
+    /// Stable physical table id to typed layout.
+    pub layouts: BTreeMap<u32, TableLayout>,
 }
 
 /// Every version of the catalog.
@@ -200,10 +303,17 @@ pub struct Catalog {
     versions: Vec<(u64, Tables)>,
     /// Every id ever created, live or dropped.
     used: BTreeSet<u32>,
+    schemas: BTreeMap<u64, SchemaVersion>,
+    /// Actual create/drop change-set positions, including IDs never visible between commits.
+    lifetimes: BTreeMap<u32, (u64, Option<u64>)>,
+}
+
+fn catalog_checkpoint_bad(why: &str) -> LogError {
+    LogError::Corrupt(format!("catalog checkpoint: {why}"))
 }
 
 impl Catalog {
-    fn encode_checkpoint(&self, writer: &mut dyn StateWrite) -> Result<(), LogError> {
+    fn encode_legacy_checkpoint(&self, writer: &mut dyn StateWrite) -> Result<(), LogError> {
         writer.u64(self.used.len() as u64)?;
         for id in &self.used {
             writer.u64(u64::from(*id))?;
@@ -220,7 +330,10 @@ impl Catalog {
         Ok(())
     }
 
-    fn restore_checkpoint(reader: &mut dyn StateRead, through: u64) -> Result<Self, LogError> {
+    fn restore_legacy_checkpoint(
+        reader: &mut dyn StateRead,
+        through: u64,
+    ) -> Result<Self, LogError> {
         let mut used = BTreeSet::new();
         let mut previous = None;
         for _ in 0..reader.count(8)? {
@@ -276,7 +389,167 @@ impl Catalog {
         if !appeared.is_subset(&used) {
             return Err(catalog_checkpoint_bad("used ids"));
         }
-        Ok(Self { versions, used })
+        Ok(Self {
+            versions,
+            used,
+            schemas: BTreeMap::new(),
+            lifetimes: BTreeMap::new(),
+        })
+    }
+
+    pub(crate) fn encode_checkpoint(&self, writer: &mut dyn StateWrite) -> Result<(), LogError> {
+        self.encode_legacy_checkpoint(writer)?;
+        if self.lifetimes.len() != self.used.len() {
+            return Err(catalog_checkpoint_bad("missing table lifetimes"));
+        }
+        writer.u64(self.lifetimes.len() as u64)?;
+        for (id, (born, dropped)) in &self.lifetimes {
+            writer.u64(u64::from(*id))?;
+            writer.u64(*born)?;
+            writer.u64(dropped.unwrap_or(0))?;
+        }
+        writer.u64(self.schemas.len() as u64)?;
+        for schema in self.schemas.values() {
+            writer.u64(schema.installed_lsn)?;
+            let tables = schema
+                .layouts
+                .iter()
+                .map(|(id, layout)| (*id, layout.type_name.clone()))
+                .collect();
+            let bytes = encode(&[CatalogOp::DefineSchema {
+                version: schema.version,
+                source: schema.source.clone(),
+                tables,
+            }])
+            .map_err(|e| catalog_checkpoint_bad(&format!("encode schema: {e}")))?;
+            writer.bytes(&bytes)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_checkpoint(
+        reader: &mut dyn StateRead,
+        through: u64,
+    ) -> Result<Self, LogError> {
+        let mut catalog = Self::restore_legacy_checkpoint(reader, through)?;
+        let count = reader.count(24)?;
+        if count != catalog.used.len() as u64 {
+            return Err(catalog_checkpoint_bad("lifetime coverage"));
+        }
+        let mut previous_id = None;
+        for _ in 0..count {
+            let id =
+                u32::try_from(reader.u64()?).map_err(|_| catalog_checkpoint_bad("lifetime id"))?;
+            let born = reader.u64()?;
+            let death = reader.u64()?;
+            let dropped = (death != 0).then_some(death);
+            if !catalog.used.contains(&id)
+                || previous_id.is_some_and(|p| p >= id)
+                || born == 0
+                || born > through
+                || catalog
+                    .versions
+                    .binary_search_by_key(&born, |(lsn, _)| *lsn)
+                    .is_err()
+                || dropped.is_some_and(|d| {
+                    d < born
+                        || d > through
+                        || catalog
+                            .versions
+                            .binary_search_by_key(&d, |(lsn, _)| *lsn)
+                            .is_err()
+                })
+            {
+                return Err(catalog_checkpoint_bad("table lifetime order or LSN"));
+            }
+            catalog.lifetimes.insert(id, (born, dropped));
+            previous_id = Some(id);
+        }
+        // The legacy timeline already refuses drop/reappearance. Validate the encoded lifetime at
+        // every visible position and its endpoints without allocating another full history map.
+        for (lsn, tables) in &catalog.versions {
+            for id in tables.keys() {
+                let (born, dropped) = catalog
+                    .lifetimes
+                    .get(id)
+                    .ok_or_else(|| catalog_checkpoint_bad("untracked lifetime"))?;
+                if *born > *lsn || dropped.is_some_and(|d| d <= *lsn) {
+                    return Err(catalog_checkpoint_bad("visible table outside lifetime"));
+                }
+            }
+        }
+        for (id, (born, dropped)) in &catalog.lifetimes {
+            let valid = match dropped {
+                Some(dead) if dead == born => !catalog.table_live_at(*id, *born),
+                Some(dead) => {
+                    catalog.table_live_at(*id, *born)
+                        && catalog.table_live_at(*id, dead - 1)
+                        && !catalog.table_live_at(*id, *dead)
+                }
+                None => {
+                    catalog.table_live_at(*id, *born)
+                        && catalog.table_live_at(*id, catalog.applied_lsn())
+                }
+            };
+            if !valid {
+                return Err(catalog_checkpoint_bad(
+                    "lifetime does not match visible history",
+                ));
+            }
+        }
+        let mut previous_version = 0;
+        let mut previous_lsn = 0;
+        for _ in 0..reader.count(16)? {
+            let lsn = reader.u64()?;
+            if lsn == 0
+                || lsn > through
+                || lsn < previous_lsn
+                || !catalog.versions.iter().any(|(v, _)| *v == lsn)
+            {
+                return Err(catalog_checkpoint_bad("schema source LSN"));
+            }
+            let bytes = reader.bytes()?;
+            let ops =
+                decode(&bytes).map_err(|e| catalog_checkpoint_bad(&format!("schema: {e}")))?;
+            let [
+                CatalogOp::DefineSchema {
+                    version, tables, ..
+                },
+            ] = ops.as_slice()
+            else {
+                return Err(catalog_checkpoint_bad(
+                    "expected exactly one schema definition",
+                ));
+            };
+            if *version <= previous_version || tables.keys().any(|id| !catalog.used.contains(id)) {
+                return Err(catalog_checkpoint_bad("schema order or unreserved table"));
+            }
+            for id in tables.keys() {
+                let (born, dropped) = catalog
+                    .lifetimes
+                    .get(id)
+                    .ok_or_else(|| catalog_checkpoint_bad("schema table lifetime missing"))?;
+                // Installing a layout and dropping it in the same atomic change set is valid.
+                if lsn < *born || dropped.is_some_and(|dead| lsn > dead) {
+                    return Err(catalog_checkpoint_bad(
+                        "schema installed outside table lifetime",
+                    ));
+                }
+            }
+            // Recompile canonical checked LSL through the same semantic catalog operation. Do not
+            // deserialize private compiler structs or infer a layout from the newest schema.
+            let mut one = Self::new();
+            one.apply(lsn, &ops)
+                .map_err(|e| catalog_checkpoint_bad(&format!("schema semantics: {e}")))?;
+            let schema = one
+                .schemas
+                .remove(version)
+                .ok_or_else(|| catalog_checkpoint_bad("missing schema"))?;
+            catalog.schemas.insert(*version, schema);
+            previous_version = *version;
+            previous_lsn = lsn;
+        }
+        Ok(catalog)
     }
 
     /// An empty catalog.
@@ -290,6 +563,13 @@ impl Catalog {
             .last()
             .map(|(_, t)| t.clone())
             .unwrap_or_default()
+    }
+
+    fn table_live_at(&self, table: u32, lsn: u64) -> bool {
+        let end = self.versions.partition_point(|(at, _)| *at <= lsn);
+        end.checked_sub(1)
+            .and_then(|i| self.versions.get(i))
+            .is_some_and(|(_, tables)| tables.contains_key(&table))
     }
 
     /// The tables as of `lsn`: what the catalog said after the last change at or before it.
@@ -313,10 +593,72 @@ impl Catalog {
         self.versions.last().map_or(0, |(l, _)| *l)
     }
 
-    /// Checks the operations against the current catalog without changing it.
+    /// The next never-used physical table id.
+    pub fn next_table_id(&self) -> Result<u32, CatalogError> {
+        self.used
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(CatalogError::Exhausted)
+    }
+
+    /// The next never-used schema version.
+    pub fn next_schema_version(&self) -> Result<u64, CatalogError> {
+        self.schemas
+            .last_key_value()
+            .map_or(0, |(v, _)| *v)
+            .checked_add(1)
+            .ok_or(CatalogError::Exhausted)
+    }
+
+    /// An original writer schema, retained even after later schemas or drops.
+    pub fn schema(&self, version: u64) -> Option<&SchemaVersion> {
+        self.schemas.get(&version)
+    }
+
+    /// The schema and layout governing a physical table at `lsn`.
+    pub fn layout_at(&self, table: u32, lsn: u64) -> Option<(&SchemaVersion, &TableLayout)> {
+        if !self.table_live_at(table, lsn) {
+            return None;
+        }
+        self.schemas
+            .values()
+            .rev()
+            .filter(|s| s.installed_lsn <= lsn)
+            .find_map(|schema| schema.layouts.get(&table).map(|layout| (schema, layout)))
+    }
+
+    pub(crate) fn first_typed_lsn(&self, table: u32) -> Option<u64> {
+        self.schemas
+            .values()
+            .filter(|schema| schema.layouts.contains_key(&table))
+            .map(|schema| schema.installed_lsn)
+            .min()
+    }
+
+    pub(crate) fn has_typed_history_at(&self, table: u32, at: u64) -> bool {
+        self.schemas
+            .values()
+            .any(|schema| schema.installed_lsn <= at && schema.layouts.contains_key(&table))
+    }
+
+    /// Checks operations without changing the catalog.
     pub fn check(&self, ops: &[CatalogOp]) -> Result<Tables, CatalogError> {
+        self.prepare(ops).map(|(tables, _, _)| tables)
+    }
+
+    fn prepare(
+        &self,
+        ops: &[CatalogOp],
+    ) -> Result<(Tables, BTreeSet<u32>, Vec<SchemaVersion>), CatalogError> {
+        if ops.is_empty() {
+            return Err(CatalogError::Empty);
+        }
         let mut tables = self.current();
         let mut used = self.used.clone();
+        let mut schemas = Vec::new();
+        let mut latest = self.schemas.last_key_value().map_or(0, |(v, _)| *v);
         for op in ops {
             match op {
                 CatalogOp::Create { table, name } => {
@@ -348,21 +690,87 @@ impl Catalog {
                         return Err(CatalogError::NoSuchTable(*table));
                     }
                 }
+                CatalogOp::DefineSchema {
+                    version,
+                    source,
+                    tables: mapping,
+                } => {
+                    if *version == 0 || *version <= latest {
+                        return Err(CatalogError::SchemaVersion(*version));
+                    }
+                    let ast = parser::parse(source)
+                        .map_err(|e| CatalogError::InvalidSchema(format!("{e:?}")))?;
+                    let compiled = check::check(&ast)
+                        .map_err(|e| CatalogError::InvalidSchema(format!("{e:?}")))?;
+                    if format::format(&ast) != *source {
+                        return Err(CatalogError::InvalidSchema(
+                            "source must be canonical LSL".into(),
+                        ));
+                    }
+                    let layouts_by_name = typed::layouts(&compiled);
+                    let names: BTreeSet<_> = mapping.values().cloned().collect();
+                    if mapping.is_empty()
+                        || mapping.len() != names.len()
+                        || names != compiled.types.keys().cloned().collect()
+                    {
+                        return Err(CatalogError::InvalidMapping);
+                    }
+                    let mut layouts = BTreeMap::new();
+                    for (id, name) in mapping {
+                        if name.is_empty() || name.len() > MAX_NAME {
+                            return Err(CatalogError::BadName);
+                        }
+                        match tables.get(id) {
+                            Some(existing) if existing == name => {}
+                            Some(_) => return Err(CatalogError::IdUsed(*id)),
+                            None => {
+                                if !used.insert(*id) {
+                                    return Err(CatalogError::IdUsed(*id));
+                                }
+                                if tables.values().any(|n| n == name) {
+                                    return Err(CatalogError::NameTaken(name.clone()));
+                                }
+                                tables.insert(*id, name.clone());
+                            }
+                        }
+                        let layout = layouts_by_name
+                            .get(name)
+                            .cloned()
+                            .ok_or(CatalogError::InvalidMapping)?;
+                        layouts.insert(*id, layout);
+                    }
+                    latest = *version;
+                    schemas.push(SchemaVersion {
+                        version: *version,
+                        installed_lsn: 0,
+                        source: source.clone(),
+                        compiled,
+                        layouts,
+                    });
+                }
             }
         }
-        Ok(tables)
+        Ok((tables, used, schemas))
     }
 
-    /// Applies one change set's operations atomically at `lsn`; on error nothing changes.
+    /// Applies one change set atomically; on error nothing changes.
     pub fn apply(&mut self, lsn: u64, ops: &[CatalogOp]) -> Result<(), CatalogError> {
         if lsn <= self.applied_lsn() {
             return Err(CatalogError::OutOfOrder);
         }
-        let tables = self.check(ops)?;
-        for op in ops {
-            if let CatalogOp::Create { table, .. } = op {
-                self.used.insert(*table);
+        let (tables, used, schemas) = self.prepare(ops)?;
+        for id in used.difference(&self.used) {
+            self.lifetimes.insert(*id, (lsn, None));
+        }
+        for (id, (_, dropped)) in &mut self.lifetimes {
+            if dropped.is_none() && !tables.contains_key(id) {
+                *dropped = Some(lsn);
             }
+        }
+        self.used = used;
+        for mut schema in schemas {
+            schema.installed_lsn = lsn;
+            self.schemas.insert(schema.version, schema);
         }
         self.versions.push((lsn, tables));
         Ok(())
@@ -411,7 +819,7 @@ impl<I: Io, C: Clock, R: Rng> CatalogStore<I, C, R> {
             clock,
             rng,
             config,
-            b"legacy-catalog-history-v1",
+            b"typed-catalog-history-v1",
             Catalog::new,
             |reader, through, _| Catalog::restore_checkpoint(reader, through),
             |r: Record, catalog| {
@@ -430,7 +838,10 @@ impl<I: Io, C: Clock, R: Rng> CatalogStore<I, C, R> {
                     .map_err(|e| catalog_checkpoint_bad(&format!("catalog lsn {}: {e}", r.lsn)))
             },
         )
-        .map_err(StoreError::Rejected)?;
+        .map_err(|error| match error {
+            TxnError::Log(LogError::Corrupt(why)) => StoreError::Corrupt(why),
+            other => StoreError::Rejected(other),
+        })?;
         Ok(Self {
             kernel,
             catalog,
@@ -446,7 +857,7 @@ impl<I: Io, C: Clock, R: Rng> CatalogStore<I, C, R> {
         }
         match self
             .kernel
-            .checkpoint_engine(b"legacy-catalog-history-v1", |writer| {
+            .checkpoint_engine(b"typed-catalog-history-v1", |writer| {
                 self.catalog.encode_checkpoint(writer)
             }) {
             Ok(lsn) => Ok(lsn),
@@ -528,11 +939,110 @@ mod tests {
         let expected =
             include_bytes!("../../../formats/corpus/checkpoint-v1/catalog/engine-state.golden");
         let mut reader = Bytes(expected);
-        let catalog = Catalog::restore_checkpoint(&mut reader, 4).unwrap();
+        let catalog = Catalog::restore_legacy_checkpoint(&mut reader, 4).unwrap();
         assert_eq!(reader.remaining(), 0);
         let mut actual = Vec::new();
-        catalog.encode_checkpoint(&mut actual).unwrap();
+        catalog.encode_legacy_checkpoint(&mut actual).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    fn restore_typed_catalog_bytes(bytes: &[u8], through: u64) -> Result<Catalog, LogError> {
+        struct Bytes<'a>(&'a [u8]);
+        impl StateRead for Bytes<'_> {
+            fn remaining(&self) -> u64 {
+                self.0.len() as u64
+            }
+            fn raw(&mut self, out: &mut [u8]) -> Result<(), LogError> {
+                let (head, tail) = self
+                    .0
+                    .split_at_checked(out.len())
+                    .ok_or_else(|| catalog_checkpoint_bad("short test state"))?;
+                out.copy_from_slice(head);
+                self.0 = tail;
+                Ok(())
+            }
+        }
+        let mut reader = Bytes(bytes);
+        let catalog = Catalog::restore_checkpoint(&mut reader, through)?;
+        if reader.remaining() != 0 {
+            return Err(catalog_checkpoint_bad("test trailing state"));
+        }
+        Ok(catalog)
+    }
+
+    fn schema_op() -> CatalogOp {
+        CatalogOp::DefineSchema {
+            version: 1,
+            source: format::format(&parser::parse("type Ticket { points: int }").unwrap()),
+            tables: BTreeMap::from([(7, "Ticket".into())]),
+        }
+    }
+
+    #[test]
+    fn typed_checkpoints_reject_schema_installations_outside_table_lifetimes() {
+        let mut after_drop = Catalog::new();
+        after_drop.apply(1, &[schema_op()]).unwrap();
+        after_drop
+            .apply(2, &[CatalogOp::Drop { table: 7 }])
+            .unwrap();
+        after_drop.apply(3, &[create(8, "Other")]).unwrap();
+        // Both the claimed LSN and the ID exist, but their lifetimes do not overlap.
+        after_drop.schemas.get_mut(&1).unwrap().installed_lsn = 3;
+        let mut bytes = Vec::new();
+        after_drop.encode_checkpoint(&mut bytes).unwrap();
+        assert!(restore_typed_catalog_bytes(&bytes, 3).is_err());
+
+        let mut before_birth = Catalog::new();
+        before_birth.apply(1, &[create(8, "Other")]).unwrap();
+        before_birth.apply(3, &[schema_op()]).unwrap();
+        before_birth.schemas.get_mut(&1).unwrap().installed_lsn = 1;
+        let mut bytes = Vec::new();
+        before_birth.encode_checkpoint(&mut bytes).unwrap();
+        assert!(restore_typed_catalog_bytes(&bytes, 3).is_err());
+    }
+
+    #[test]
+    fn atomic_schema_create_and_drop_keeps_its_exact_invisible_lifetime() {
+        for prior_create in [false, true] {
+            let mut catalog = Catalog::new();
+            if prior_create {
+                catalog.apply(1, &[create(7, "Ticket")]).unwrap();
+            }
+            catalog
+                .apply(2, &[schema_op(), CatalogOp::Drop { table: 7 }])
+                .unwrap();
+            catalog.apply(3, &[create(8, "Other")]).unwrap();
+            let mut bytes = Vec::new();
+            catalog.encode_checkpoint(&mut bytes).unwrap();
+            let restored = restore_typed_catalog_bytes(&bytes, 3).unwrap();
+            assert_eq!(restored.schemas.get(&1).unwrap().installed_lsn, 2);
+            assert_eq!(
+                restored.lifetimes.get(&7),
+                Some(&(if prior_create { 1 } else { 2 }, Some(2)))
+            );
+            assert!(!restored.current().contains_key(&7));
+            // Moving an invisible schema to another real catalog LSN must also be rejected.
+            catalog.schemas.get_mut(&1).unwrap().installed_lsn = 3;
+            let mut shifted = Vec::new();
+            catalog.encode_checkpoint(&mut shifted).unwrap();
+            assert!(restore_typed_catalog_bytes(&shifted, 3).is_err());
+        }
+    }
+
+    #[test]
+    fn checkpoint_lifetime_metadata_must_match_every_visible_catalog_version() {
+        let mut catalog = Catalog::new();
+        catalog.apply(1, &[schema_op()]).unwrap();
+        catalog.apply(2, &[CatalogOp::Drop { table: 7 }]).unwrap();
+        for lifetime in [(1, None), (2, Some(2)), (1, Some(1))] {
+            catalog.lifetimes.insert(7, lifetime);
+            let mut bytes = Vec::new();
+            catalog.encode_checkpoint(&mut bytes).unwrap();
+            assert!(
+                restore_typed_catalog_bytes(&bytes, 2).is_err(),
+                "invalid lifetime {lifetime:?}"
+            );
+        }
     }
 
     fn create(table: u32, name: &str) -> CatalogOp {

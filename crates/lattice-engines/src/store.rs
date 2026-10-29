@@ -7,6 +7,7 @@
 //! in one call, so every reader sees all of the change set or none of it. Recovery replays the log's
 //! row change sets through the same apply, so a restart reproduces exactly the acknowledged state.
 
+use crate::catalog::{self, Catalog, CatalogError, CatalogOp};
 use crate::index::{IndexDef, Indexes};
 use crate::mvcc::{MvccError, Snapshot, Table, Tx};
 use crate::rowops::{self, RowKey, RowOpsError};
@@ -14,9 +15,10 @@ use lattice_abi::{Classify, ErrorClass};
 use lattice_core::bugs::{self, Bug};
 use lattice_core::changeset::ChangeSet;
 use lattice_core::engine_checkpoint::{CheckpointRecovery, StateRead, StateWrite};
-use lattice_core::record::RecordType;
+use lattice_core::record::{Record, RecordType};
 use lattice_core::{Config, Kernel, LogError, Receipt, RecoveryReport, TxnError};
 use lattice_seams::{Clock, Io, Rng};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::{Bound, RangeBounds};
 
@@ -43,6 +45,10 @@ pub enum RowError {
     Corrupt(String),
     /// The index definitions cannot identify their entries unambiguously.
     InvalidIndexes(String),
+    /// Catalog rules rejected the operation before writing anything.
+    InvalidCatalog(CatalogError),
+    /// A raw write violates a catalog-owned typed table schema.
+    InvalidTyped(String),
     /// The writes do not fit the payload format.
     Encode(RowOpsError),
 }
@@ -57,7 +63,9 @@ impl fmt::Display for RowError {
             RowError::InDoubt(e) => write!(f, "commit outcome unknown: {e}"),
             RowError::Stale => write!(f, "store is stale after an ambiguous failure; reopen it"),
             RowError::Corrupt(why) => write!(f, "row data corrupt: {why}"),
+            RowError::InvalidCatalog(why) => write!(f, "invalid catalog operation: {why}"),
             RowError::InvalidIndexes(why) => write!(f, "invalid index definitions: {why}"),
+            RowError::InvalidTyped(why) => write!(f, "invalid typed row: {why}"),
             RowError::Encode(e) => write!(f, "cannot encode writes: {e:?}"),
         }
     }
@@ -69,9 +77,33 @@ impl Classify for RowError {
             RowError::Conflict { .. } | RowError::Stale => ErrorClass::Retryable,
             RowError::Rejected(e) | RowError::InDoubt(e) => e.class(),
             RowError::Corrupt(_) => ErrorClass::Fatal,
-            RowError::Encode(_) | RowError::InvalidIndexes(_) => ErrorClass::Rejected,
+            RowError::Encode(_)
+            | RowError::InvalidIndexes(_)
+            | RowError::InvalidCatalog(_)
+            | RowError::InvalidTyped(_) => ErrorClass::Rejected,
         }
     }
+}
+
+// Catalog-only validation cannot see uncataloged physical row ids. The shared row/catalog
+// boundary must reject assigning a typed layout to any id with older untyped row history.
+fn check_schema_history(
+    catalog: &Catalog,
+    row_tables: &BTreeSet<u32>,
+    ops: &[CatalogOp],
+) -> Result<(), CatalogError> {
+    for op in ops {
+        if let CatalogOp::DefineSchema { tables, .. } = op {
+            for table in tables.keys() {
+                if row_tables.contains(table)
+                    && catalog.layout_at(*table, catalog.applied_lsn()).is_none()
+                {
+                    return Err(CatalogError::IdUsed(*table));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn checkpoint_bad(why: &str) -> LogError {
@@ -145,6 +177,9 @@ pub struct RowStore<I: Io, C: Clock, R: Rng> {
     kernel: Kernel<I, C, R>,
     table: Table<RowKey, Vec<u8>>,
     indexes: Indexes,
+    catalog: Catalog,
+    /// Physical ids observed in any row write, including deletions and historical versions.
+    row_tables: BTreeSet<u32>,
     stale: bool,
     recovery: (RecoveryReport, CheckpointRecovery),
 }
@@ -169,72 +204,134 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         if index_defs.iter().any(|def| !ids.insert(def.id)) {
             return Err(RowError::InvalidIndexes("duplicate index id".into()));
         }
-        let (kernel, (table, indexes), report, checkpoint) = Kernel::open_checkpointed(
-            io,
-            clock,
-            rng,
-            config,
-            b"raw-row-history-v1",
-            || (Table::new(), Indexes::new(index_defs.clone())),
-            |reader, through, seen| {
-                let table = restore_rows(reader, through, seen)?;
-                let mut indexes = Indexes::new(index_defs.clone());
-                indexes
-                    .restore_history(&table)
-                    .map_err(|e| checkpoint_bad(&format!("index history: {e:?}")))?;
-                Ok((table, indexes))
-            },
-            |r, (table, indexes)| {
-                if RecordType::from_u8(r.rtype) != Some(RecordType::ChangeSet) {
-                    return Ok(());
-                }
-                let cs = ChangeSet::decode(&r.payload)
-                    .map_err(|e| checkpoint_bad(&format!("change set: {e}")))?;
-                if !rowops::is_row_payload(&cs.payload) {
-                    return Ok(());
-                }
-                let mut writes = rowops::decode(&cs.payload)
-                    .map_err(|e| checkpoint_bad(&format!("row writes: {e:?}")))?;
-                if bugs::active(Bug::RowRecoveryDropsDeletes) {
-                    writes.retain(|(_, value)| value.is_some());
-                }
-                let changes = indexes.changes_for(table, &writes);
-                table
-                    .apply(r.lsn, cs.id, writes)
-                    .and_then(|()| indexes.apply(r.lsn, cs.id, changes))
-                    .map_err(|e| checkpoint_bad(&format!("row lsn {}: {e:?}", r.lsn)))
-            },
-        )
-        .map_err(RowError::Rejected)?;
+        let (kernel, (table, indexes, catalog, row_tables), report, checkpoint) =
+            Kernel::open_checkpointed(
+                io,
+                clock,
+                rng,
+                config,
+                b"typed-row-catalog-history-v1",
+                || {
+                    (
+                        Table::new(),
+                        Indexes::new(index_defs.clone()),
+                        Catalog::new(),
+                        BTreeSet::new(),
+                    )
+                },
+                |reader, through, seen| {
+                    let catalog = Catalog::restore_checkpoint(reader, through)?;
+                    let mut row_tables = BTreeSet::new();
+                    let mut previous = None;
+                    for _ in 0..reader.count(8)? {
+                        let id = u32::try_from(reader.u64()?)
+                            .map_err(|_| checkpoint_bad("reserved raw table"))?;
+                        if previous.is_some_and(|p| p >= id) {
+                            return Err(checkpoint_bad("reserved table order"));
+                        }
+                        row_tables.insert(id);
+                        previous = Some(id);
+                    }
+                    let table = restore_rows(reader, through, seen)?;
+                    for (key, lsn, _, value) in table.history() {
+                        if catalog
+                            .first_typed_lsn(key.0)
+                            .is_some_and(|first| lsn <= first)
+                        {
+                            return Err(checkpoint_bad(
+                                "typed layout adopts older raw row history",
+                            ));
+                        }
+                        if !row_tables.contains(&key.0) {
+                            return Err(checkpoint_bad("unreserved historical row table"));
+                        }
+                        crate::typed_store::validate_value_at(
+                            &catalog,
+                            key.0,
+                            value.map(Vec::as_slice),
+                            lsn,
+                        )
+                        .map_err(|e| checkpoint_bad(&e))?;
+                    }
+                    let mut indexes = Indexes::new(index_defs.clone());
+                    indexes
+                        .restore_history(&table)
+                        .map_err(|e| checkpoint_bad(&format!("index restore: {e:?}")))?;
+                    Ok((table, indexes, catalog, row_tables))
+                },
+                |r: Record, (table, indexes, catalog, row_tables)| {
+                    if RecordType::from_u8(r.rtype) != Some(RecordType::ChangeSet) {
+                        return Ok(());
+                    }
+                    let cs = ChangeSet::decode(&r.payload)
+                        .map_err(|e| checkpoint_bad(&format!("change set: {e}")))?;
+                    if catalog::is_catalog_payload(&cs.payload) {
+                        let ops = catalog::decode(&cs.payload)
+                            .map_err(|e| checkpoint_bad(&format!("catalog: {e}")))?;
+                        check_schema_history(catalog, row_tables, &ops)
+                            .map_err(|e| checkpoint_bad(&format!("catalog history: {e}")))?;
+                        catalog
+                            .apply(r.lsn, &ops)
+                            .map_err(|e| checkpoint_bad(&format!("catalog apply: {e}")))?;
+                        return Ok(());
+                    }
+                    if !rowops::is_row_payload(&cs.payload) {
+                        return Ok(());
+                    }
+                    let mut writes = rowops::decode(&cs.payload)
+                        .map_err(|e| checkpoint_bad(&format!("row writes: {e:?}")))?;
+                    crate::typed_store::validate_writes(catalog, &writes)
+                        .map_err(|e| checkpoint_bad(&format!("typed rows: {e}")))?;
+                    row_tables.extend(writes.iter().map(|((table, _), _)| *table));
+                    if bugs::active(Bug::RowRecoveryDropsDeletes) {
+                        writes.retain(|(_, value)| value.is_some());
+                    }
+                    let changes = indexes.changes_for(table, &writes);
+                    table
+                        .apply(r.lsn, cs.id, writes)
+                        .and_then(|()| indexes.apply(r.lsn, cs.id, changes))
+                        .map_err(|e| checkpoint_bad(&format!("row apply: {e:?}")))
+                },
+            )
+            .map_err(|error| match error {
+                TxnError::Log(LogError::Corrupt(why)) => RowError::Corrupt(why),
+                other => RowError::Rejected(other),
+            })?;
         Ok(Self {
             kernel,
             table,
             indexes,
+            catalog,
+            row_tables,
             stale: false,
             recovery: (report, checkpoint),
         })
     }
 
-    /// Publishes every retained row version and kernel dedupe/fence state. A failure leaves this
-    /// store stale; reopening decides whether the last seal reached durable storage.
+    /// Publishes catalog schemas, physical-id reservations, all retained rows and kernel state.
     pub fn checkpoint(&mut self) -> Result<u64, RowError> {
         if self.stale {
             return Err(RowError::Stale);
         }
         match self
             .kernel
-            .checkpoint_engine(b"raw-row-history-v1", |writer| {
+            .checkpoint_engine(b"typed-row-catalog-history-v1", |writer| {
+                self.catalog.encode_checkpoint(writer)?;
+                writer.u64(self.row_tables.len() as u64)?;
+                for id in &self.row_tables {
+                    writer.u64(u64::from(*id))?;
+                }
                 encode_rows(&self.table, writer)
             }) {
             Ok(lsn) => Ok(lsn),
-            Err(e) => {
+            Err(error) => {
                 self.stale = true;
-                Err(RowError::InDoubt(e))
+                Err(RowError::InDoubt(error))
             }
         }
     }
 
-    /// Snapshot and suffix recovery evidence for this opening. Full scrub still audits prefix bytes.
+    /// Evidence of checkpoint state and suffix replay for this opening.
     pub fn recovery_report(&self) -> &(RecoveryReport, CheckpointRecovery) {
         &self.recovery
     }
@@ -246,7 +343,50 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
 
     /// The newest snapshot: everything committed so far.
     pub fn snapshot(&self) -> Snapshot {
-        self.table.snapshot()
+        Snapshot {
+            as_of: self.kernel.durable_lsn(),
+        }
+    }
+
+    /// The versioned catalog sharing this store's WAL and writer.
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    /// Whether this physical table id has appeared in any durable row write. Deletions do not
+    /// release ids: tombstones and all historical versions reserve the id even without a catalog.
+    /// Recovery rebuilds this set from the WAL independently of live row visibility.
+    pub fn has_table_history(&self, table: u32) -> bool {
+        self.row_tables.contains(&table)
+    }
+
+    /// Commits catalog changes through the same writer as row changes.
+    pub fn commit_catalog(&mut self, ops: Vec<CatalogOp>) -> Result<u64, RowError> {
+        if self.stale {
+            return Err(RowError::Stale);
+        }
+        self.catalog.check(&ops).map_err(RowError::InvalidCatalog)?;
+        check_schema_history(&self.catalog, &self.row_tables, &ops)
+            .map_err(RowError::InvalidCatalog)?;
+        let payload = catalog::encode(&ops).map_err(RowError::InvalidCatalog)?;
+        let id = self.kernel.new_id();
+        match self.kernel.commit(ChangeSet::new(id, payload)) {
+            Ok(Receipt::Recorded { lsn, .. }) => {
+                self.catalog
+                    .apply(lsn, &ops)
+                    .map_err(|e| RowError::Corrupt(format!("catalog apply after commit: {e}")))?;
+                Ok(lsn)
+            }
+            Ok(Receipt::Duplicate) => {
+                self.stale = true;
+                Err(RowError::Corrupt("fresh catalog id was a duplicate".into()))
+            }
+            Err(e) if e.class() == ErrorClass::Rejected => Err(RowError::Rejected(e)),
+            Err(e) => {
+                self.stale = true;
+                Err(RowError::InDoubt(e))
+            }
+        }
     }
 
     /// Reads a row inside a transaction: its own writes first, then its snapshot.
@@ -319,13 +459,16 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         self.check_indexes_at(self.snapshot())
     }
 
-    /// The commit LSN of the newest change set applied.
+    /// The newest row change set applied. [`Self::snapshot`] also includes catalog-only commits.
     pub fn applied_lsn(&self) -> u64 {
         self.table.applied_lsn()
     }
 
     /// Commits a transaction as one change set and returns its commit LSN (the snapshot LSN for a
     /// transaction that wrote nothing).
+    ///
+    /// Catalog-owned typed tables enforce their current schema here too. Raw tables remain byte
+    /// oriented. Use `TypedStore` to construct valid typed envelopes and retain schema fencing.
     pub fn commit(&mut self, tx: RowTx) -> Result<u64, RowError> {
         if self.stale {
             return Err(RowError::Stale);
@@ -340,6 +483,8 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
             })?;
         }
         let writes = tx.into_writes();
+        crate::typed_store::validate_writes(&self.catalog, &writes)
+            .map_err(RowError::InvalidTyped)?;
         let payload = rowops::encode(&writes).map_err(RowError::Encode)?;
         let id = self.kernel.new_id();
         match self.kernel.commit(ChangeSet::new(id, payload)) {
@@ -349,6 +494,8 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                 } else {
                     writes
                 };
+                self.row_tables
+                    .extend(writes.iter().map(|((table, _), _)| *table));
                 let changes = self.indexes.changes_for(&self.table, &writes);
                 self.table
                     .apply(lsn, id, writes)

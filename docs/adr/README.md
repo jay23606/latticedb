@@ -16,4 +16,6 @@
 | [0012](0012-row-write-payload.md) | ADR 0012: Row writes travel in the change set payload | accepted |
 | [0013](0013-sql-planner-and-executor.md) | ADR 0013: SQL planner and executor | proposed |
 | [0014](0014-derived-row-indexes.md) | ADR 0014: Secondary indexes are derived from committed rows | accepted |
+| [0015](0015-persisted-typed-schemas.md) | ADR 0015: Persist schemas with typed rows' writer-layout versions | proposed |
 | [0016](0016-sealed-engine-checkpoints.md) | ADR 0016: Sealed engine checkpoints | proposed |
+| [0017](0017-combined-typed-checkpoints.md) | ADR 0017: Restore schemas and row histories as one checkpoint state | proposed |

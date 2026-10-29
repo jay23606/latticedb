@@ -9,6 +9,9 @@ between minor versions; format changes are called out explicitly.
 
 ### Added
 
+- Combined typed catalog/row checkpoints proposed under RFC 0003, preserving writer layouts and
+  physical-id reservations alongside retained row histories. This integration remains draft.
+
 - Unsigned scorecards with ten observed-or-missing sections, bounded ledger JSON interchange,
   retained nightly producer provenance and completed-fuzz summaries. Benchmark ledger entries now
   include the actual comparison verdict; missing measures remain explicit.

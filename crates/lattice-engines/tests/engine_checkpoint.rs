@@ -605,7 +605,7 @@ fn install_golden(case: &str) -> SharedIo {
     disk
 }
 #[test]
-fn independent_golden_databases_restore_fast_and_full_replay_agrees() {
+fn legacy_golden_tags_fall_back_without_losing_rows_or_catalog_history() {
     let disk = install_golden("row");
     let store = RowStore::open_with_indexes(
         disk.clone(),
@@ -619,7 +619,8 @@ fn independent_golden_databases_restore_fast_and_full_replay_agrees() {
         }],
     )
     .unwrap();
-    assert_eq!(store.recovery_report().1.through_lsn, 4);
+    assert_eq!(store.recovery_report().1.through_lsn, 0);
+    // The old tag lacks the complete typed catalog state; do not reinterpret its prefix.
     assert_eq!(
         store.get_at(Snapshot { as_of: 2 }, 7, b"k"),
         Some(&b"one".to_vec())
@@ -642,7 +643,8 @@ fn independent_golden_databases_restore_fast_and_full_replay_agrees() {
     drop(k);
     let disk = install_golden("catalog");
     let store = CatalogStore::open(disk.clone(), clock(), SeededRng::new(9), &config()).unwrap();
-    assert_eq!(store.recovery_report().1.through_lsn, 4);
+    assert_eq!(store.recovery_report().1.through_lsn, 0);
+    // The old tag lacks the complete typed catalog state; do not reinterpret its prefix.
     assert_eq!(store.catalog().id_of(2, "before"), Some(7));
     assert_eq!(store.catalog().id_of(3, "after"), Some(7));
     assert_eq!(store.catalog().id_of(4, "next"), Some(8));
@@ -653,6 +655,29 @@ fn independent_golden_databases_restore_fast_and_full_replay_agrees() {
 #[test]
 fn uppercase_generation_names_are_noncanonical_cache_candidates() {
     let disk = install_golden("row");
+    fn original_tag_through(disk: SharedIo) -> u64 {
+        let (kernel, _, _, evidence) = Kernel::open_checkpointed(
+            disk,
+            clock(),
+            SeededRng::new(21),
+            &config(),
+            b"raw-row-history-v1",
+            Vec::<u8>::new,
+            |reader, _, _| {
+                let mut state = vec![0; usize::try_from(reader.remaining()).unwrap()];
+                reader.raw(&mut state)?;
+                Ok(state)
+            },
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        drop(kernel);
+        evidence.through_lsn
+    }
+    // Prove the fixture is accepted under its original tag before changing case, so a wrong-tag
+    // fallback cannot make this grammar test pass vacuously for the combined engine.
+    assert_eq!(original_tag_through(disk.clone()), 4);
+
     let mut d = disk.clone();
     for name in disk.list("wal/.checkpoint").unwrap() {
         let new = name.replace(
@@ -664,6 +689,7 @@ fn uppercase_generation_names_are_noncanonical_cache_candidates() {
         d.append(&format!("wal/.checkpoint/{new}"), &bytes).unwrap();
         d.remove(&old).unwrap();
     }
+    assert_eq!(original_tag_through(disk.clone()), 0);
     let s = RowStore::open(disk.clone(), clock(), SeededRng::new(11), &config()).unwrap();
     assert_eq!(s.recovery_report().1.through_lsn, 0);
     assert_eq!(

@@ -24,4 +24,5 @@ Rules:
   version or kind, an empty list and an invalid name. Other engines' payloads start with a different magic
   and are skipped; a catalog change set that does not decode or apply stops recovery as corruption.
 
-Columns and types are not part of this version; they arrive with the typed tables (WP22).
+Columns and types are not part of v1. [Catalog v2](catalog-v2.md) adds persisted schemas while keeping
+legacy create/rename/drop payloads byte-identical.

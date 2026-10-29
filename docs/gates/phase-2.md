@@ -112,3 +112,12 @@ memory/time measurements; vacuum; SQL parser, planner and executor; PostgreSQL w
 conformance; branches and SQL time travel; online schema changes; and complete Phase 2 simulation,
 benchmark and north-star evidence. The Phase 1 nightly/fuzz history and final gate review also remain
 open. Track partial acceptance on [the roadmap](https://github.com/users/moncifem/projects/1).
+
+## Combined checkpoint proposal under review
+
+RFC 0003/proposed ADR 0017 compose the two unaccepted format proposals. The integration retains every
+original schema, catalog timeline, raw physical-id reservation and row version in one checkpoint tag.
+It validates rows against their historical writer layout before exposing the restored state. Tests
+require actual fast-path use and exercise publication cuts and corrupt-cache full-replay fallback.
+This branch does not accept either parent RFC or establish recovery memory/time bounds for typed data.
+Independent combined fixtures and measured costs remain pending; all three review periods apply.
