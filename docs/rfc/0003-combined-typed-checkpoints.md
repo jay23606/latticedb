@@ -45,6 +45,8 @@ See `formats/typed-checkpoint-v1.md`. This adds new engine tags under the draft 
 old readers must use retained WAL and cannot assume new typed schemas are writable. No WAL is pruned.
 Wrong tags cause full replay. No downgrade converter or automatic migration is supplied.
 
-Review evidence includes fast-path layout/id-reservation tests, corrupt-cache full-replay tests and
-an every-operation publication-cut sweep. Independent byte-exact combined-state fixtures, measured
-RSS/time for combined typed state and composition with vacuum remain required before acceptance.
+Review evidence includes fast-path layout/id-reservation tests, corrupt-cache full-replay tests,
+an every-operation publication-cut sweep and 21 independently encoded combined-state fixtures.
+Public-store tests restore those fixtures through the fast path and reproduce exact second
+checkpoint chunks, manifests and seals. Measured RSS/time for combined typed state and composition
+with vacuum remain required before acceptance.
