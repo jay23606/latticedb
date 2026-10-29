@@ -1,7 +1,11 @@
 # Format: change feed v1
 
-Status: draft. Implemented by `lattice_core::feed`. No RFC or ADR has reviewed it yet and nothing writes
-or reads it outside tests, so no frozen golden file exists.
+Status: experimental candidate, unaccepted. Implemented by `lattice_core::feed`; proposed in
+[RFC 0009](../docs/rfc/0009-change-feed-event-format.md) and
+[ADR 0023](../docs/adr/0023-change-feed-event-format.md). PR #263 merged the codec before that review
+package existed; this proposal does not retroactively approve it. No owner acceptance or review-period
+waiver is assumed. Nothing writes or reads it outside tests in the reviewed implementation, and no
+frozen golden file exists. Do not promise persisted or cross-version compatibility yet.
 
 The change feed turns each committed change set into one event per entity change. An event is addressed
 by a cursor. This document specifies the cursor, the event encoding and the ordering rules. How a
@@ -26,8 +30,8 @@ index u32 big endian
 ```
 
 Big endian is deliberate: comparing the 12 bytes as unsigned strings gives the cursor order, so a store
-can range-scan on the encoded form. Every other integer in this format is little endian, as in
-`changeset-v1.md`.
+can range-scan on the encoded form. Lengths, set size, HLC, turn fields and entity kind are little endian, as in
+`changeset-v1.md`; change-set IDs and author bytes are big endian as specified below.
 
 A decoder rejects any length other than 12, and rejects LSN 0 with a non-zero index.
 
@@ -161,8 +165,9 @@ Each row is bytewise smaller than the next. Two events in LSN 7 and a later even
 
 ## Versioning and compatibility
 
-The version byte is 1. A reader refuses other versions. A change adds a new version byte value and a new
-section here; version 1 bytes never change meaning.
+The candidate version byte is 1; the current reader refuses other versions. Acceptance is pending.
+After acceptance, version 1 bytes must never change meaning; a changed layout needs a new version and
+its own reviewed compatibility/admission policy. No enclosing storage or transport admission exists yet.
 
 ## Checksums
 
