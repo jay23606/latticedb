@@ -105,6 +105,14 @@ cache and is not power loss. The simulated fault suites above supply complementa
 The tests do not guarantee that every kill landed inside a commit, prove soak volume, or cover the new
 typed-schema/checkpoint formats still in review. Branch histories remain pending.
 
+## Under format review (not merged or accepted)
+
+RFC 0001 and proposed ADR 0015 cover persisted checked schemas, stable physical type ids, original-layout
+row envelopes and typed validation through one WAL writer. The implementation branch has independent
+golden fixtures and crash/replay regressions, including protection against adopting raw table history.
+The RFC comment period ends on 2026-11-05; code review and passing tests do not waive that period.
+No Phase 2 gate criterion is claimed from this draft.
+
 ## Still missing
 
 Catalog-backed index definitions; completed typed-table integration; checkpoint-based recovery with

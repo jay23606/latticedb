@@ -26,6 +26,10 @@ between minor versions; format changes are called out explicitly.
   deterministic replay and exhaustive rotation/recovery cut points. Rot-censored histories are
   reported separately from verified histories; this does not claim the Phase 2 soak gate.
 
+- Persisted typed schemas and original-layout row envelopes proposed under RFC 0001, with stable
+  physical table ids, schema validation/fencing and independent format fixtures. The format remains
+  under review; no upgrade or downgrade guarantee is provided by this pre-alpha branch.
+
 - Typed-row layouts and a canonical codec with an overflow area for fields unknown to the encoding
   layout. Decoding requires the original layout; catalog integration and schema migration remain open.
 
