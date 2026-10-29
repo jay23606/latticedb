@@ -80,10 +80,15 @@ are separate review steps; passing CI does not waive the comment period.
 
 Tests cover multi-chunk state, all historical row/index/catalog snapshots, dropped ID refusal,
 wrong-engine fallback, missing/corrupt cache, missing WAL failure, dedupe/fences/HLC, publication
-power cuts at every mutating operation and recovery-sync power loss. Instrumented IO verifies
-zero reads of prefix segments, zero collecting directory calls, and snapshot buffers at most
-256 KiB for growing retained histories. Decoder tests cover truncation, trailing bytes, oversized
-counts/lengths, overflow and arbitrary bytes.
+power cuts at every mutating operation and recovery-sync power loss. A second publication sweep
+runs on a disk that tears writes and drops directory entries that were never synced, with an earlier
+generation on disk and several chunks, and asserts that a checkpoint which reported success is the one
+recovery uses; removing the manifest directory sync makes it fail, while the same sweep on a clean disk
+cannot see that. Instrumented IO verifies zero reads of prefix segments, zero collecting directory
+calls, and snapshot buffers at most 256 KiB for growing retained histories. Decoder tests cover
+truncation, trailing bytes, oversized counts and lengths and overflow in the manifest framing. The
+arbitrary-bytes test is rejected at the magic bytes, so it exercises the framing check only; the
+engine-state decoders are covered by the targeted cases and the golden fixtures, not by random input.
 
 These establish buffer/IO behavior, not a measured process RSS bound. Retained MVCC data, indexes,
 catalog versions and dedupe IDs necessarily grow with history. Before P2-08 is called complete,
@@ -97,8 +102,9 @@ constant total resident state or WAL-content verification is made.
 
 Independent byte-exact fixtures now come from `formats/generate_checkpoint_golden.py`: Python owns
 the framing/state encoder and delegates only standard BLAKE3 hashing to an external pinned library.
-Rust independently decodes/reencodes and reproduces the files, including full fast/legacy replay
-agreement. The first fresh-process Linux CI run now records 11 datasets and 66 trials with an enforced
+Rust independently decodes/reencodes and reproduces the files. Fast and legacy replay are compared on
+the whole kernel (dedupe, fences, HLC, durable LSN); engine state is compared through reads at historical
+snapshots, not by an independent replay of the engine histories. The first fresh-process Linux CI run now records 11 datasets and 66 trials with an enforced
 192 MiB per-child cgroup ceiling and actual over-limit OOM calibration. Raw results, exact runner
 provenance and interpretation are in `crates/lattice-bench/CHECKPOINT_RECOVERY.md`. Retained-state
 RSS and prefix metadata costs demonstrably grow; this finite evidence does not bound the separate
