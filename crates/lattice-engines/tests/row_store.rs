@@ -318,3 +318,22 @@ fn duplicate_index_ids_are_rejected_before_opening_the_log() {
     assert!(!disk.exists("wal"));
     assert!(open(&disk, &Rc::new(SimClock::new(1_000)), 2).is_ok());
 }
+
+#[test]
+fn a_transaction_begins_at_the_same_boundary_as_the_store_snapshot() {
+    use lattice_engines::catalog::CatalogOp;
+    let (disk, clock) = fresh();
+    let mut store = open(&disk, &clock, 1).unwrap();
+    // A catalog-only commit moves the log forward without writing any row.
+    let lsn = store
+        .commit_catalog(vec![CatalogOp::Create {
+            table: 9,
+            name: "t".into(),
+        }])
+        .unwrap();
+    let tx = store.begin();
+    assert_eq!(tx.snapshot(), store.snapshot());
+    assert_eq!(tx.snapshot().as_of, lsn);
+    // A read-only commit reports that boundary, not the last row LSN.
+    assert_eq!(store.commit(tx).unwrap(), lsn);
+}

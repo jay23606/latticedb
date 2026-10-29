@@ -202,6 +202,15 @@ impl<K: Ord + Clone, V: Clone> Tx<K, V> {
         }
     }
 
+    /// Starts a transaction at an explicit snapshot, for stores whose read boundary is not the table's
+    /// own last LSN (for example when catalog change sets share the log).
+    pub fn begin_at(snapshot: Snapshot) -> Self {
+        Self {
+            snapshot,
+            writes: BTreeMap::new(),
+        }
+    }
+
     /// The snapshot this transaction reads from.
     pub fn snapshot(&self) -> Snapshot {
         self.snapshot

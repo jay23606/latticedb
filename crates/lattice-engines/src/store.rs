@@ -336,9 +336,10 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         &self.recovery
     }
 
-    /// Starts a transaction on the newest snapshot.
+    /// Starts a transaction on the newest snapshot: the same boundary [`RowStore::snapshot`] reports,
+    /// so a catalog-only commit is visible to it and a read-only commit returns that boundary.
     pub fn begin(&self) -> RowTx {
-        Tx::begin(&self.table)
+        Tx::begin_at(self.snapshot())
     }
 
     /// The newest snapshot: everything committed so far.
