@@ -29,7 +29,10 @@
 //!   of the feed), and a read that starts at the blocked event fails with
 //!   [`FeedReadError::KeyTooLarge`] naming its cursor. Reading again from that cursor skips exactly
 //!   that event, so nothing else is lost. A reader who may not read it is unaffected.
-//! * **Provenance.** The store commits with no author or turn, so events carry author 0 and no turn.
+//! * **Provenance.** A change set carries the author its committer was authenticated as
+//!   ([`RowTx::with_author`](crate::store::RowTx::with_author)); events repeat it, and recovery rebuilds
+//!   it from the log. A commit made without one, including all history from before authors were
+//!   recorded, reads as author 0 ("unknown"). No turn is recorded for row commits yet.
 //!
 //! Cost: `history_from` visits every key of every table, so a call is O(total rows) even for a
 //! caught-up reader, plus O(versions at or after the cursor's LSN); events (with cloned values) are
@@ -129,6 +132,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
             cs.hlc = self
                 .commit_time_at(lsn)
                 .ok_or(FeedReadError::MissingCommitTime { lsn })?;
+            cs.author = self.author_at(lsn);
             let changes = group
                 .iter()
                 .map(|e| EntityChange {
@@ -190,6 +194,7 @@ mod tests {
         clippy::indexing_slicing
     )]
     use super::*;
+    use crate::authors::AUTHOR_UNKNOWN;
     use lattice_core::Config;
     use lattice_sim::{FaultProfile, SeededRng, SimClock, SimIo};
     use lattice_testkit::scenario::{SharedClock, SharedIo};
@@ -479,5 +484,102 @@ mod tests {
             }
         }
         assert!(skipped > 100 && reordered > 100 && inclusive > 100);
+    }
+    fn authors_of(store: &Store) -> Vec<(u64, u128)> {
+        store
+            .events_since(Cursor::ORIGIN)
+            .unwrap()
+            .map(|e| (e.cursor.lsn(), e.author))
+            .collect()
+    }
+
+    #[test]
+    fn events_carry_the_author_of_each_commit_also_after_a_kill_and_reopen() {
+        let disk = SharedIo::new(SimIo::new(7, FaultProfile::clean()));
+        let clock = Rc::new(SimClock::new(1_000));
+        let mut store = open(&disk, &clock);
+        // Two authors alternate, a commit with no author sits between, and one commit has two writes.
+        let plan: [(u128, u8); 6] = [(300, 1), (301, 2), (0, 3), (300, 4), (301, 5), (300, 6)];
+        let mut expected = Vec::new();
+        for (author, k) in plan {
+            clock.advance(1);
+            let mut tx = store.begin().with_author(author);
+            assert_eq!(tx.author(), author);
+            tx.put((1, vec![k]), vec![k]);
+            if k == 4 {
+                tx.put((1, vec![k, k]), vec![k]);
+            }
+            let lsn = store.commit(tx).unwrap();
+            expected.push((lsn, author));
+            if k == 4 {
+                expected.push((lsn, author));
+            }
+        }
+        assert_eq!(authors_of(&store), expected);
+        let live = flatten(store.events_since(Cursor::ORIGIN).unwrap());
+        drop(store);
+        let reopened = open(&disk, &clock);
+        assert_eq!(
+            authors_of(&reopened),
+            expected,
+            "authors changed across a reopen"
+        );
+        assert_eq!(
+            flatten(reopened.events_since(Cursor::ORIGIN).unwrap()),
+            live
+        );
+        // The author is part of the durable change set, not only of this process.
+        disk.crash();
+        let after_cut = open(&disk, &clock);
+        assert_eq!(authors_of(&after_cut), expected);
+    }
+
+    #[test]
+    fn a_commit_without_an_author_and_a_legacy_log_read_as_unknown() {
+        let disk = SharedIo::new(SimIo::new(8, FaultProfile::clean()));
+        let clock = Rc::new(SimClock::new(1_000));
+        let mut store = open(&disk, &clock);
+        for k in 0..3u8 {
+            clock.advance(1);
+            let mut tx = store.begin();
+            tx.put((1, vec![k]), vec![k]);
+            store.commit(tx).unwrap();
+        }
+        assert!(authors_of(&store).iter().all(|(_, a)| *a == AUTHOR_UNKNOWN));
+        assert_eq!(store.author_at(1), AUTHOR_UNKNOWN);
+        // A log written by code that never set an author has author 0 in its bytes: it reads the same.
+        drop(store);
+        let reopened = open(&disk, &clock);
+        assert_eq!(authors_of(&reopened).len(), 3);
+        assert!(authors_of(&reopened).iter().all(|(_, a)| *a == 0));
+    }
+
+    #[test]
+    fn the_author_survives_vacuum_for_retained_commits_and_is_dropped_below_the_floor() {
+        let disk = SharedIo::new(SimIo::new(9, FaultProfile::clean()));
+        let clock = Rc::new(SimClock::new(1_000));
+        let mut store = open(&disk, &clock);
+        for k in 0..6u8 {
+            clock.advance(1);
+            let mut tx = store.begin().with_author(400 + u128::from(k));
+            tx.put((1, vec![k]), vec![k]);
+            store.commit(tx).unwrap();
+        }
+        let stats = store.vacuum(4);
+        assert!(stats.horizon >= 4);
+        for lsn in stats.horizon..=6 {
+            assert_eq!(store.author_at(lsn), 400 + u128::from(lsn as u8 - 1));
+        }
+        let tail = store
+            .events_since(Cursor::new(stats.horizon + 1, 0).unwrap())
+            .unwrap();
+        for e in tail {
+            assert_eq!(e.author, 400 + u128::from(e.cursor.lsn() as u8 - 1));
+        }
+        assert_eq!(
+            store.author_at(1),
+            AUTHOR_UNKNOWN,
+            "an author below the floor is forgotten"
+        );
     }
 }

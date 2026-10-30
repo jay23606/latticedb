@@ -22,6 +22,7 @@ use std::rc::Rc;
 use lattice_abi::Hlc;
 use lattice_core::bugs::{self, Bug};
 use lattice_core::changeset::ChangeSetId;
+use lattice_engines::authors::AUTHOR_UNKNOWN;
 use lattice_engines::catalog::{DdlRef, Tables};
 use lattice_engines::grants::{TableGrantPolicy, TableGrants};
 use lattice_engines::limits::{
@@ -53,19 +54,25 @@ pub struct ActorPolicy(
     pub(crate) Rc<dyn PolicyEvaluator>,
     pub(crate) bool,
     pub(crate) Option<Rc<TableGrants>>,
+    pub(crate) u128,
 );
 
 impl ActorPolicy {
     /// Wraps an evaluator supplied by a trusted host.
     pub fn new(policy: Rc<dyn PolicyEvaluator>) -> Self {
-        ActorPolicy(policy, true, None)
+        ActorPolicy(policy, true, None, AUTHOR_UNKNOWN)
     }
 
     /// An actor limited to per-table grants (the interim permission model, issue 522). Tables the
     /// actor holds no bit on are absent from its catalog: binding, `Describe` and the change feed
     /// answer for them exactly as for a table that does not exist.
     pub fn with_table_grants(grants: TableGrants) -> Self {
-        ActorPolicy(Rc::new(DenyAll), true, Some(Rc::new(grants)))
+        ActorPolicy(
+            Rc::new(DenyAll),
+            true,
+            Some(Rc::new(grants)),
+            AUTHOR_UNKNOWN,
+        )
     }
 
     /// Whether the actor sees the table called `name` when binding and describing: with grants, when
@@ -108,6 +115,7 @@ impl ActorPolicy {
                 Rc::new(TableGrantPolicy::resolve(g, tables, owning_table)),
                 self.1,
                 self.2.clone(),
+                self.3,
             ),
         }
     }
@@ -182,6 +190,20 @@ impl ActorPolicy {
         Ok(())
     }
 
+    /// Attributes every commit made under this policy to `author`, the id the host assigned to the
+    /// principal it authenticated (`lattice_engines::authors`). The executor never derives it from a
+    /// statement, a parameter or a session setting. Without it commits are by `AUTHOR_UNKNOWN`.
+    #[must_use]
+    pub fn with_author(mut self, author: u128) -> Self {
+        self.3 = author;
+        self
+    }
+
+    /// The author commits under this policy are attributed to.
+    pub fn author(&self) -> u128 {
+        self.3
+    }
+
     /// Hides the catalog from this actor: binding and describing see no tables, so every table
     /// reference is `42P01` exactly as for a table that does not exist. Use it for an actor whose
     /// policy grants nothing, so a denied actor cannot learn table or column names from error codes
@@ -246,7 +268,10 @@ impl TxState {
     ) -> Self {
         let policy = policy.bound(&db.store.catalog().current());
         TxState {
-            tx: db.store.begin_with_policy(policy.clone()),
+            tx: db
+                .store
+                .begin_with_policy(policy.clone())
+                .with_author(policy.author()),
             policy,
             overlay: BTreeMap::new(),
             staged: 0,

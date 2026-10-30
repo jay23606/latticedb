@@ -19,6 +19,13 @@
 //! statement that arrives under a different principal (`28000`), so a policy chosen for one identity
 //! cannot be reused for another.
 //!
+//! **Provenance.** Every commit carries an author id (issue 520). The local-development principal gets
+//! the fixed [`AUTHOR_LOCAL_DEVELOPMENT`]; an account gets the id the shared [`AuthorRegistry`] assigns to its
+//! authenticated name, injective per account and durable when the host gave it a data directory. The
+//! id is fixed with the principal, so it comes from the credential check and from nothing the client
+//! sends: not the SQL text, not `application_name`, not a parameter. A handler that was given no
+//! registry keeps a private in-memory one, which is only injective inside that handler.
+//!
 //! Transaction status is the session's own: the executor reports `BEGIN`, `COMMIT` and `ROLLBACK`
 //! in its command tags, and the session derives `ReadyForQuery` from them. One known difference:
 //! after a failed `COMMIT` (for example `40001`) the executor has ended the block, while the
@@ -28,6 +35,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use lattice_core::bugs::{self, Bug};
+use lattice_engines::authors::{AUTHOR_LOCAL_DEVELOPMENT, AuthorRegistry};
 use lattice_exec::{
     ActorPolicy, Database, ExecError, ExecLimits, ExecResult, ExecSession, ResultColumn, TxStatus,
 };
@@ -50,6 +59,8 @@ pub struct ExecHandler<I: Io, C: Clock + Clone, R: Rng> {
     bound: Option<(Principal, ExecSession)>,
     /// Statement limits for the session, including the host's timeout ceiling.
     limits: ExecLimits,
+    /// Assigns the author id of an account principal. Shared by every connection of a host.
+    authors: Rc<RefCell<AuthorRegistry>>,
 }
 
 impl<I: Io, C: Clock + Clone, R: Rng> ExecHandler<I, C, R> {
@@ -66,7 +77,14 @@ impl<I: Io, C: Clock + Clone, R: Rng> ExecHandler<I, C, R> {
             accounts: Box::new(accounts),
             bound: None,
             limits: ExecLimits::default(),
+            authors: Rc::new(RefCell::new(AuthorRegistry::in_memory())),
         }
+    }
+
+    /// Uses the host's registry to assign account author ids, so every connection of the host agrees
+    /// on them. Applies to connections that have not run a statement yet.
+    pub fn set_authors(&mut self, authors: Rc<RefCell<AuthorRegistry>>) {
+        self.authors = authors;
     }
 
     /// Sets the statement limits of this connection (default timeout, memory budget and the ceiling
@@ -107,7 +125,18 @@ impl<I: Io, C: Clock + Clone, R: Rng> ExecHandler<I, C, R> {
                 PrincipalKind::LocalDevelopment => self.development.clone(),
                 PrincipalKind::Account => (self.accounts)(principal.name()),
             };
-            let mut session = ExecSession::new(policy);
+            let author = match principal.kind() {
+                PrincipalKind::LocalDevelopment => AUTHOR_LOCAL_DEVELOPMENT,
+                PrincipalKind::Account => self
+                    .authors
+                    .try_borrow_mut()
+                    .map_err(|_| QueryError::new("55P03", "the author registry is in use"))?
+                    .author_for_account(principal.name())
+                    .map_err(|_| {
+                        QueryError::new("XX000", "cannot assign an author id to this account")
+                    })?,
+            };
+            let mut session = ExecSession::new(policy.with_author(author));
             session.set_limits(self.limits);
             self.bound = Some((principal.clone(), session));
         }
@@ -129,6 +158,12 @@ impl<I: Io, C: Clock + Clone, R: Rng> ExecHandler<I, C, R> {
     ) -> Result<QueryOutput, QueryError> {
         let db = Rc::clone(&self.db);
         let session = self.session(ctx)?;
+        if bugs::active(Bug::AuthorFromClient) {
+            // The planted defect: provenance read from the statement text.
+            if let Some(forged) = forged_author(sql) {
+                session.set_author(forged);
+            }
+        }
         // A host that lets two connections interleave inside one call would be a bug; fail the
         // statement rather than panic on the borrow.
         let mut db = db
@@ -139,6 +174,18 @@ impl<I: Io, C: Clock + Clone, R: Rng> ExecHandler<I, C, R> {
             .map_err(error)?;
         Ok(output(&result))
     }
+}
+
+/// The planted defect's parser: a leading `/*author:N*/` comment. Never compiled into a build
+/// without the `planted-bugs` feature, where `bugs::active` is a constant `false`.
+fn forged_author(sql: &str) -> Option<u128> {
+    sql.trim_start()
+        .strip_prefix("/*author:")?
+        .split("*/")
+        .next()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn error(e: ExecError) -> QueryError {
@@ -775,5 +822,153 @@ mod tests {
         assert_eq!(s.tx_status(), WireStatus::Idle);
         let out = query(&mut s, "INSERT INTO t VALUES (1)");
         assert!(out.contains(&Backend::CommandComplete("INSERT 0 1".into())));
+    }
+
+    // ----- provenance: who committed (issue 520) -----
+
+    fn open_accounts_handler(
+        db: &Rc<RefCell<Db>>,
+        authors: &Rc<RefCell<AuthorRegistry>>,
+    ) -> ExecHandler<SharedIo, SharedClock, SeededRng> {
+        let mut h = ExecHandler::new(db.clone(), admin(), |_| admin());
+        h.set_authors(authors.clone());
+        h
+    }
+
+    fn feed_authors(db: &Rc<RefCell<Db>>) -> Vec<u128> {
+        db.borrow()
+            .store()
+            .events_since(lattice_core::feed::Cursor::ORIGIN)
+            .unwrap()
+            .map(|e| e.author)
+            .collect()
+    }
+
+    fn sql(h: &mut ExecHandler<SharedIo, SharedClock, SeededRng>, p: &Principal, text: &str) {
+        h.execute(&QueryContext::new(p), text, &[])
+            .unwrap_or_else(|e| panic!("{text}: {e:?}"));
+    }
+
+    #[test]
+    fn event_author_is_the_committing_principal() {
+        let disk = SharedIo::new(SimIo::new(1, FaultProfile::clean()));
+        let clock = SharedClock(Rc::new(SimClock::new(1_000)));
+        let open_db = |seed: u64| {
+            Rc::new(RefCell::new(
+                Database::open(
+                    disk.clone(),
+                    clock.clone(),
+                    SeededRng::new(seed),
+                    &Config::default(),
+                )
+                .unwrap(),
+            ))
+        };
+        let open_registry = || {
+            Rc::new(RefCell::new(
+                AuthorRegistry::open(Box::new(disk.clone())).unwrap(),
+            ))
+        };
+        let (db, authors) = (open_db(2), open_registry());
+        let (alice, bob) = (Principal::account("alice"), Principal::account("bob"));
+        let dev = Principal::local_development();
+        // One connection per principal, as the host gives them.
+        let mut ha = open_accounts_handler(&db, &authors);
+        let mut hb = open_accounts_handler(&db, &authors);
+        let mut hd = open_accounts_handler(&db, &authors);
+        sql(&mut hd, &dev, "CREATE TABLE t (id INT PRIMARY KEY, v TEXT)");
+        sql(&mut ha, &alice, "INSERT INTO t VALUES (1, 'a')");
+        sql(&mut hb, &bob, "INSERT INTO t VALUES (2, 'b')");
+        sql(&mut ha, &alice, "UPDATE t SET v = 'A' WHERE id = 1");
+        sql(&mut hb, &bob, "DELETE FROM t WHERE id = 2");
+        sql(&mut hd, &dev, "INSERT INTO t VALUES (3, 'd')");
+        // Independent oracle: development is 1, accounts are numbered in the order they first
+        // committed, from 256.
+        let expected = vec![256, 257, 256, 257, 1];
+        assert_eq!(feed_authors(&db), expected);
+        // Kill the process (the disk survives) and start again with a fresh registry and connections.
+        drop((ha, hb, hd, authors, db));
+        disk.restart_process();
+        let (db, authors) = (open_db(3), open_registry());
+        assert_eq!(
+            feed_authors(&db),
+            expected,
+            "history changed across a reopen"
+        );
+        // Column definitions are not durable (#379), so the second life writes a new table.
+        let mut hd = open_accounts_handler(&db, &authors);
+        sql(&mut hd, &dev, "CREATE TABLE u (id INT PRIMARY KEY)");
+        let mut hc = open_accounts_handler(&db, &authors);
+        let mut ha = open_accounts_handler(&db, &authors);
+        sql(
+            &mut hc,
+            &Principal::account("carol"),
+            "INSERT INTO u VALUES (4)",
+        );
+        sql(&mut ha, &alice, "INSERT INTO u VALUES (5)");
+        let mut want = expected;
+        want.extend([258, 256]);
+        assert_eq!(
+            feed_authors(&db),
+            want,
+            "alice kept her id across the restart"
+        );
+    }
+
+    #[test]
+    fn author_is_never_taken_from_client_input() {
+        let db = shared_db();
+        let authors = Rc::new(RefCell::new(AuthorRegistry::in_memory()));
+        let mut h = open_accounts_handler(&db, &authors);
+        h.execute(
+            &QueryContext::new(&Principal::local_development()),
+            "CREATE TABLE t (id INT PRIMARY KEY, v TEXT)",
+            &[],
+        )
+        .unwrap();
+        // The wire session: a startup whose user and application_name look like authors.
+        let mut s = Session::local_trust(h, 1, 2);
+        s.on_startup(Startup::Params(vec![
+            ("user".into(), "author=999".into()),
+            ("application_name".into(), "author=999".into()),
+        ]));
+        for text in [
+            "SET application_name = 'author=999'",
+            "/*author:999*/ INSERT INTO t VALUES (1, 'author:999')",
+            "-- author:999\nINSERT INTO t VALUES (2, 'x')",
+        ] {
+            let out = s.on_message(Frontend::Query(text.into())).messages;
+            assert!(error_code(&out).is_none(), "{text}: {out:?}");
+        }
+        // An account principal whose name looks like an author: the registry id wins.
+        let mut ha = open_accounts_handler(&db, &authors);
+        let alice = Principal::account("author=999");
+        sql(
+            &mut ha,
+            &alice,
+            "/*author:999*/ INSERT INTO t VALUES (3, 'y')",
+        );
+        sql(&mut ha, &alice, "SET application_name = 'author=1'");
+        sql(
+            &mut ha,
+            &alice,
+            "/*author:1*/ INSERT INTO t VALUES (4, 'z')",
+        );
+        assert_eq!(feed_authors(&db), vec![1, 1, 256, 256]);
+    }
+
+    #[test]
+    fn the_author_from_client_bug_is_caught_by_the_forgery_witness() {
+        let db = shared_db();
+        let authors = Rc::new(RefCell::new(AuthorRegistry::in_memory()));
+        let mut h = open_accounts_handler(&db, &authors);
+        let alice = Principal::account("alice");
+        sql(&mut h, &alice, "CREATE TABLE t (id INT PRIMARY KEY)");
+        bugs::clear();
+        bugs::enable(Bug::AuthorFromClient);
+        sql(&mut h, &alice, "/*author:999*/ INSERT INTO t VALUES (1)");
+        bugs::clear();
+        // With the defect the forged id is recorded, which the test above rejects.
+        assert_eq!(feed_authors(&db), vec![999]);
     }
 }

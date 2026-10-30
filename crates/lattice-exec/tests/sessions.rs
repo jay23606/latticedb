@@ -1398,3 +1398,94 @@ fn settings_that_change_behaviour_are_accepted_only_for_the_supported_value() {
     );
     assert_eq!(s.status(), TxStatus::Failed);
 }
+
+// ----- provenance: who committed -----
+
+fn author_session(author: u128) -> ExecSession {
+    ExecSession::new(
+        ActorPolicy::new(Rc::new(lattice_engines::limits::AllowAll)).with_author(author),
+    )
+}
+
+fn commit_authors(db: &Db) -> Vec<(u64, u128)> {
+    db.store()
+        .events_since(lattice_core::feed::Cursor::ORIGIN)
+        .unwrap()
+        .map(|e| (e.cursor.lsn(), e.author))
+        .collect()
+}
+
+#[test]
+fn event_author_is_the_committing_principal() {
+    let mut f = fixture();
+    let (mut alice, mut bob) = (author_session(300), author_session(301));
+    // The DDL commit is alice's too; it has no row events.
+    ok(
+        &mut f.db,
+        &mut alice,
+        "CREATE TABLE t (id INT PRIMARY KEY, v TEXT)",
+    );
+    ok(&mut f.db, &mut alice, "INSERT INTO t VALUES (1, 'a')");
+    ok(&mut f.db, &mut bob, "INSERT INTO t VALUES (2, 'b')");
+    // A block commits as one change set, attributed to the session that ran it.
+    ok(&mut f.db, &mut bob, "BEGIN");
+    ok(&mut f.db, &mut bob, "INSERT INTO t VALUES (3, 'c')");
+    ok(&mut f.db, &mut bob, "UPDATE t SET v = 'B' WHERE id = 2");
+    ok(&mut f.db, &mut bob, "COMMIT");
+    ok(&mut f.db, &mut alice, "UPDATE t SET v = 'A' WHERE id = 1");
+    ok(&mut f.db, &mut bob, "DELETE FROM t WHERE id = 1");
+    // Independent oracle, one entry per write in commit order: alice, bob, bob's block (two writes),
+    // alice, bob.
+    let expected = [300u128, 301, 301, 301, 300, 301];
+    let got = commit_authors(&f.db);
+    assert_eq!(
+        got.iter().map(|(_, a)| *a).collect::<Vec<_>>(),
+        expected,
+        "{got:?}"
+    );
+    // The two writes of the block are one change set.
+    assert_eq!(got.get(2).map(|e| e.0), got.get(3).map(|e| e.0));
+    // And again after a kill and reopen: the log, not the process, holds the author.
+    drop(f.db);
+    f.disk.restart_process();
+    let db: Db = Database::open(
+        f.disk.clone(),
+        lattice_testkit::scenario::SharedClock(f.clock.clone()),
+        SeededRng::new(5),
+        &common::config(),
+    )
+    .unwrap();
+    assert_eq!(commit_authors(&db), got);
+}
+
+#[test]
+fn a_session_without_an_author_commits_as_unknown_and_sql_text_cannot_change_it() {
+    let mut f = fixture();
+    let mut s = common::admin();
+    ok(
+        &mut f.db,
+        &mut s,
+        "CREATE TABLE t (id INT PRIMARY KEY, v TEXT)",
+    );
+    // Nothing a statement says is read as an author: comments, text values, settings.
+    ok(
+        &mut f.db,
+        &mut s,
+        "/* author=999 */ INSERT INTO t VALUES (1, 'author=999')",
+    );
+    ok(&mut f.db, &mut s, "SET application_name = 'author=999'");
+    ok(
+        &mut f.db,
+        &mut s,
+        "INSERT INTO t VALUES (2, '-- author:999')",
+    );
+    assert!(commit_authors(&f.db).iter().all(|(_, a)| *a == 0));
+    let mut named = author_session(777);
+    ok(&mut f.db, &mut named, "SET application_name = 'author=999'");
+    ok(
+        &mut f.db,
+        &mut named,
+        "/*author:999*/ INSERT INTO t VALUES (3, 'x')",
+    );
+    assert_eq!(commit_authors(&f.db).last().map(|(_, a)| *a), Some(777));
+}

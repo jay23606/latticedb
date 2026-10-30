@@ -28,3 +28,6 @@ pub mod limits;
 pub mod feed_emit;
 
 pub mod merge;
+
+/// Author ids and the durable account registry that assigns them.
+pub mod authors;

@@ -19,6 +19,7 @@
 //! when a change set committed, whatever rows it touched. A request handler must not expose them
 //! to an actor without its own authorization.
 
+use crate::authors::AUTHOR_UNKNOWN;
 use crate::catalog::{self, Catalog, CatalogError, CatalogOp, CompoundChange, DdlRef, IndexOp};
 use crate::index::{IndexDef, Indexes, ManagedIndexes};
 use crate::limits::{
@@ -46,9 +47,24 @@ use std::ops::{Bound, RangeBounds};
 pub struct RowTx<P = AllowAll> {
     inner: Tx<RowKey, Vec<u8>>,
     policy: P,
+    /// Who the commit is attributed to; `AUTHOR_UNKNOWN` unless the host sets it.
+    author: u128,
 }
 
 impl<P> RowTx<P> {
+    /// Attributes the commit to `author`. The host passes the id of the principal it authenticated
+    /// (see [`crate::authors`]); an id taken from client input would forge provenance.
+    #[must_use]
+    pub fn with_author(mut self, author: u128) -> Self {
+        self.author = author;
+        self
+    }
+
+    /// The author the commit will carry.
+    pub fn author(&self) -> u128 {
+        self.author
+    }
+
     /// The immutable transaction snapshot.
     pub fn snapshot(&self) -> Snapshot {
         self.inner.snapshot()
@@ -177,6 +193,13 @@ impl Classify for RowError {
 /// Refuses a write set that puts a key the change feed could not carry, before anything is
 /// appended. Deletes are not checked: a row written before the limit existed must stay removable,
 /// and a delete of a row that is not there produces no feed event for anyone.
+/// The change set of one commit, attributed to `author`.
+fn change_set(id: ChangeSetId, payload: Vec<u8>, author: u128) -> ChangeSet {
+    let mut cs = ChangeSet::new(id, payload);
+    cs.author = author;
+    cs
+}
+
 fn check_key_lengths(writes: &[rowops::RowWrite]) -> Result<(), RowError> {
     if bugs::active(Bug::RowOversizeKeyAccepted) {
         return Ok(());
@@ -263,6 +286,9 @@ pub struct RowStore<I: Io, C: Clock, R: Rng> {
     /// with the LSN, so `AS OF` can name a retained point by change set or by time.
     commit_lsn: std::collections::BTreeMap<ChangeSetId, u64>,
     commit_times: Vec<(Hlc, u64, ChangeSetId)>,
+    /// The author of each retained commit that has one. Commits by `AUTHOR_UNKNOWN` (all history
+    /// from before authors were recorded) have no entry, so a legacy log costs nothing.
+    commit_authors: std::collections::BTreeMap<u64, u128>,
     stale: bool,
 }
 
@@ -296,6 +322,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         let mut catalog = Catalog::new();
         let mut commit_lsn = std::collections::BTreeMap::new();
         let mut commit_times: Vec<(Hlc, u64, ChangeSetId)> = Vec::new();
+        let mut commit_authors = std::collections::BTreeMap::new();
         let mut failure: Option<RowError> = None;
         let supported = if legacy_indexes { 0 } else { MANAGED_COMPOUND };
         let (kernel, _, _) = Kernel::open_streaming_with_capabilities(
@@ -398,6 +425,9 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                     Ok(true) => {
                         commit_lsn.insert(cs.id, r.lsn);
                         commit_times.push((cs.hlc, r.lsn, cs.id));
+                        if cs.author != AUTHOR_UNKNOWN {
+                            commit_authors.insert(r.lsn, cs.author);
+                        }
                     }
                     Ok(false) => {}
                     Err(error) => failure = Some(error),
@@ -415,6 +445,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                 legacy_indexes,
                 commit_lsn,
                 commit_times,
+                commit_authors,
                 stale: false,
             }),
         }
@@ -503,7 +534,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
             .catalog
             .check_change(&tables, &indexes)
             .map_err(RowError::InvalidCatalog)?;
-        let RowTx { inner, .. } = tx;
+        let RowTx { inner, author, .. } = tx;
         let writes = inner.into_writes();
         check_key_lengths(&writes)?;
         let changes = self
@@ -519,7 +550,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         let id = self.kernel.new_id();
         match self
             .kernel
-            .commit_with_capabilities(ChangeSet::new(id, payload), MANAGED_COMPOUND)
+            .commit_with_capabilities(change_set(id, payload, author), MANAGED_COMPOUND)
         {
             Ok(Receipt::Recorded { lsn, hlc }) => {
                 let applied = (|| {
@@ -540,6 +571,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                 }
                 self.commit_lsn.insert(id, lsn);
                 self.commit_times.push((hlc, lsn, id));
+                self.record_author(lsn, author);
                 Ok(lsn)
             }
             Ok(Receipt::Duplicate) => {
@@ -570,6 +602,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         RowTx {
             inner: Tx::begin(&self.table),
             policy,
+            author: AUTHOR_UNKNOWN,
         }
     }
 
@@ -824,6 +857,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         self.indexes.vacuum_definitions(applied_horizon);
         self.catalog.vacuum_index_versions(applied_horizon);
         self.commit_lsn.retain(|_, lsn| *lsn >= applied_horizon);
+        self.commit_authors = self.commit_authors.split_off(&applied_horizon);
         let before_floor = self
             .commit_times
             .partition_point(|(_, lsn, _)| *lsn < applied_horizon);
@@ -915,6 +949,21 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         self.commit_times.get(i).map(|(_, _, id)| *id)
     }
 
+    /// The author recorded for the row change set at `lsn`: [`AUTHOR_UNKNOWN`] for a commit made
+    /// without one, including every commit from before authors were recorded.
+    pub fn author_at(&self, lsn: u64) -> u128 {
+        self.commit_authors
+            .get(&lsn)
+            .copied()
+            .unwrap_or(AUTHOR_UNKNOWN)
+    }
+
+    fn record_author(&mut self, lsn: u64, author: u128) {
+        if author != AUTHOR_UNKNOWN {
+            self.commit_authors.insert(lsn, author);
+        }
+    }
+
     /// The timestamp of the row change set at `lsn`, if retained at or above the vacuum floor.
     pub fn commit_time_at(&self, lsn: u64) -> Option<Hlc> {
         let i = self
@@ -955,12 +1004,12 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         if !bugs::active(Bug::RowConflictCheckSkipped) {
             tx.inner.check(&self.table).map_err(mvcc_error)?;
         }
-        let RowTx { inner, .. } = tx;
+        let RowTx { inner, author, .. } = tx;
         let writes = inner.into_writes();
         check_key_lengths(&writes)?;
         let payload = rowops::encode(&writes).map_err(RowError::Encode)?;
         let id = self.kernel.new_id();
-        match self.kernel.commit(ChangeSet::new(id, payload)) {
+        match self.kernel.commit(change_set(id, payload, author)) {
             Ok(Receipt::Recorded { lsn, hlc }) => {
                 let writes: Vec<_> = if bugs::active(Bug::RowPartialApply) {
                     writes.into_iter().take(1).collect()
@@ -983,6 +1032,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                 }
                 self.commit_lsn.insert(id, lsn);
                 self.commit_times.push((hlc, lsn, id));
+                self.record_author(lsn, author);
                 Ok(lsn)
             }
             Ok(Receipt::Duplicate) => {

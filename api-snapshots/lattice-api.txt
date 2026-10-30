@@ -214,6 +214,7 @@ impl<I: lattice_seams::Io, C: lattice_seams::Clock + core::clone::Clone, R: latt
 pub fn lattice_api::exec_handler::ExecHandler<I, C, R>::abort_transaction(&mut self)
 pub fn lattice_api::exec_handler::ExecHandler<I, C, R>::discard_transaction(&mut self)
 pub fn lattice_api::exec_handler::ExecHandler<I, C, R>::new(alloc::rcs::rc::Rc<core::cell::RefCell<lattice_exec::db::Database<I, C, R>>>, lattice_exec::exec::ActorPolicy, impl core::ops::function::Fn(&str) -> lattice_exec::exec::ActorPolicy + 'static) -> Self
+pub fn lattice_api::exec_handler::ExecHandler<I, C, R>::set_authors(&mut self, alloc::rcs::rc::Rc<core::cell::RefCell<lattice_engines::authors::AuthorRegistry>>)
 pub fn lattice_api::exec_handler::ExecHandler<I, C, R>::set_limits(&mut self, lattice_exec::session::ExecLimits)
 pub fn lattice_api::exec_handler::ExecHandler<I, C, R>::tx_status(&self) -> lattice_exec::session::TxStatus
 impl<I: lattice_seams::Io, C: lattice_seams::Clock + core::clone::Clone, R: lattice_seams::Rng> lattice_api::session::QueryHandler for lattice_api::exec_handler::ExecHandler<I, C, R>
@@ -278,6 +279,7 @@ pub fn lattice_api::exec_host::ExecHost::is_alive(&self) -> bool
 pub fn lattice_api::exec_host::ExecHost::shutdown(&self) -> core::result::Result<(), alloc::string::String>
 pub fn lattice_api::exec_host::ExecHost::start<I, C, R>(impl core::ops::function::FnOnce() -> core::result::Result<lattice_exec::db::Database<I, C, R>, lattice_exec::error::ExecError> + core::marker::Send + 'static, lattice_api::exec_host::PolicyTable, lattice_api::exec_host::HostLimits) -> core::result::Result<Self, alloc::string::String> where I: lattice_seams::Io + 'static, C: lattice_seams::Clock + core::clone::Clone + 'static, R: lattice_seams::Rng + 'static
 pub fn lattice_api::exec_host::ExecHost::start_dir(std::path::PathBuf, lattice_api::exec_host::PolicyTable, lattice_api::exec_host::HostLimits) -> core::result::Result<Self, alloc::string::String>
+pub fn lattice_api::exec_host::ExecHost::start_with_authors<I, C, R>(impl core::ops::function::FnOnce() -> core::result::Result<lattice_exec::db::Database<I, C, R>, lattice_exec::error::ExecError> + core::marker::Send + 'static, impl core::ops::function::FnOnce() -> core::result::Result<lattice_engines::authors::AuthorRegistry, alloc::string::String> + core::marker::Send + 'static, lattice_api::exec_host::PolicyTable, lattice_api::exec_host::HostLimits) -> core::result::Result<Self, alloc::string::String> where I: lattice_seams::Io + 'static, C: lattice_seams::Clock + core::clone::Clone + 'static, R: lattice_seams::Rng + 'static
 pub fn lattice_api::exec_host::ExecHost::unattached_tables(&self) -> &[alloc::string::String]
 impl core::ops::drop::Drop for lattice_api::exec_host::ExecHost
 pub fn lattice_api::exec_host::ExecHost::drop(&mut self)

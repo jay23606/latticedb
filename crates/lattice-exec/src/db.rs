@@ -176,7 +176,10 @@ impl<I: Io, C: Clock + Clone, R: Rng> Database<I, C, R> {
         let def = TableDef::from_create(id, ct)?;
         // `IdUsed` cannot happen here: `&mut self` is the only writer and `id` is above every used
         // id. If it ever did, it would be an internal error (XX000), not something to retry.
-        let tx = self.store.begin_with_policy(policy.clone());
+        let tx = self
+            .store
+            .begin_with_policy(policy.clone())
+            .with_author(policy.author());
         self.store.commit_with_catalog(
             tx,
             vec![CatalogOp::Create {
@@ -277,7 +280,10 @@ impl<I: Io, C: Clock + Clone, R: Rng> Database<I, C, R> {
         };
         let id = def.id;
         let ops = vec![CatalogOp::Drop { table: id }];
-        let tx = self.store.begin_with_policy(policy.clone());
+        let tx = self
+            .store
+            .begin_with_policy(policy.clone())
+            .with_author(policy.author());
         self.store.commit_with_catalog(tx, ops, Vec::new())?;
         self.schema.remove(name);
         self.next_rowid.borrow_mut().remove(&id);

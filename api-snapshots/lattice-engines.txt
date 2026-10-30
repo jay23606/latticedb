@@ -1,4 +1,41 @@
 pub mod lattice_engines
+pub mod lattice_engines::authors
+pub enum lattice_engines::authors::AuthorError
+pub lattice_engines::authors::AuthorError::Corrupt
+pub lattice_engines::authors::AuthorError::Corrupt::line: usize
+pub lattice_engines::authors::AuthorError::Full
+pub lattice_engines::authors::AuthorError::InvalidName
+pub lattice_engines::authors::AuthorError::Io(alloc::string::String)
+pub lattice_engines::authors::AuthorError::Taken
+pub lattice_engines::authors::AuthorError::Unknown
+impl core::clone::Clone for lattice_engines::authors::AuthorError
+pub fn lattice_engines::authors::AuthorError::clone(&self) -> Self
+impl core::cmp::Eq for lattice_engines::authors::AuthorError
+impl core::cmp::PartialEq for lattice_engines::authors::AuthorError
+pub fn lattice_engines::authors::AuthorError::eq(&self, &Self) -> bool
+impl core::error::Error for lattice_engines::authors::AuthorError
+impl core::fmt::Debug for lattice_engines::authors::AuthorError
+pub fn lattice_engines::authors::AuthorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for lattice_engines::authors::AuthorError
+pub fn lattice_engines::authors::AuthorError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for lattice_engines::authors::AuthorError
+pub struct lattice_engines::authors::AuthorRegistry
+impl lattice_engines::authors::AuthorRegistry
+pub fn lattice_engines::authors::AuthorRegistry::accounts(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, u128)>
+pub fn lattice_engines::authors::AuthorRegistry::author_for_account(&mut self, &str) -> core::result::Result<u128, lattice_engines::authors::AuthorError>
+pub fn lattice_engines::authors::AuthorRegistry::id_of(&self, &str) -> core::option::Option<u128>
+pub fn lattice_engines::authors::AuthorRegistry::in_memory() -> Self
+pub fn lattice_engines::authors::AuthorRegistry::is_retired(&self, u128) -> bool
+pub fn lattice_engines::authors::AuthorRegistry::name_of(&self, u128) -> core::option::Option<&str>
+pub fn lattice_engines::authors::AuthorRegistry::open(alloc::boxed::Box<dyn lattice_seams::Io>) -> core::result::Result<Self, lattice_engines::authors::AuthorError>
+pub fn lattice_engines::authors::AuthorRegistry::rename(&mut self, &str, &str) -> core::result::Result<u128, lattice_engines::authors::AuthorError>
+pub fn lattice_engines::authors::AuthorRegistry::retire(&mut self, &str) -> core::result::Result<u128, lattice_engines::authors::AuthorError>
+pub const lattice_engines::authors::AUTHOR_LOCAL_DEVELOPMENT: u128
+pub const lattice_engines::authors::AUTHOR_UNKNOWN: u128
+pub const lattice_engines::authors::FIRST_ACCOUNT_AUTHOR: u128
+pub const lattice_engines::authors::MAX_ACCOUNT_NAME_BYTES: usize
+pub const lattice_engines::authors::MAX_REGISTRY_BYTES: u64
+pub const lattice_engines::authors::MAX_REGISTRY_IDS: usize
 pub mod lattice_engines::catalog
 pub enum lattice_engines::catalog::CatalogError
 pub lattice_engines::catalog::CatalogError::BadCompound(&'static str)
@@ -628,6 +665,7 @@ pub fn lattice_engines::store::Charged<'l, T>::fmt(&self, &mut core::fmt::Format
 pub struct lattice_engines::store::RowStore<I: lattice_seams::Io, C: lattice_seams::Clock, R: lattice_seams::Rng>
 impl<I: lattice_seams::Io, C: lattice_seams::Clock, R: lattice_seams::Rng> lattice_engines::store::RowStore<I, C, R>
 pub fn lattice_engines::store::RowStore<I, C, R>::applied_lsn(&self) -> u64
+pub fn lattice_engines::store::RowStore<I, C, R>::author_at(&self, u64) -> u128
 pub fn lattice_engines::store::RowStore<I, C, R>::begin(&self) -> lattice_engines::store::RowTx
 pub fn lattice_engines::store::RowStore<I, C, R>::begin_with_policy<P: lattice_engines::limits::PolicyEvaluator>(&self, P) -> lattice_engines::store::RowTx<P>
 pub fn lattice_engines::store::RowStore<I, C, R>::catalog(&self) -> &lattice_engines::catalog::Catalog
@@ -662,10 +700,12 @@ pub fn lattice_engines::store::RowStore<I, C, R>::events_since(&self, lattice_co
 pub fn lattice_engines::store::RowStore<I, C, R>::events_since_as<P: lattice_engines::limits::PolicyEvaluator + ?core::marker::Sized>(&self, lattice_core::feed::Cursor, &P) -> core::result::Result<alloc::vec::into_iter::IntoIter<lattice_core::feed::ChangeEvent>, lattice_engines::feed_emit::FeedReadError>
 pub struct lattice_engines::store::RowTx<P>
 impl<P> lattice_engines::store::RowTx<P>
+pub fn lattice_engines::store::RowTx<P>::author(&self) -> u128
 pub fn lattice_engines::store::RowTx<P>::delete(&mut self, lattice_engines::rowops::RowKey)
 pub fn lattice_engines::store::RowTx<P>::is_read_only(&self) -> bool
 pub fn lattice_engines::store::RowTx<P>::put(&mut self, lattice_engines::rowops::RowKey, alloc::vec::Vec<u8>)
 pub fn lattice_engines::store::RowTx<P>::snapshot(&self) -> lattice_engines::mvcc::Snapshot
+pub fn lattice_engines::store::RowTx<P>::with_author(self, u128) -> Self
 impl<P: core::clone::Clone> core::clone::Clone for lattice_engines::store::RowTx<P>
 pub fn lattice_engines::store::RowTx<P>::clone(&self) -> Self
 pub struct lattice_engines::store::VacuumStats

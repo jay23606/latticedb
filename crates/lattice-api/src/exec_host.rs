@@ -44,6 +44,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use lattice_core::Config;
+use lattice_engines::authors::AuthorRegistry;
 use lattice_engines::grants::{GrantSpecError, TableGrants};
 use lattice_engines::limits::{AllowAll, DenyAll};
 use lattice_exec::{ActorPolicy, Database, ExecError, ExecLimits, TxStatus};
@@ -550,7 +551,8 @@ impl ExecHost {
                 "cannot open or recover the data directory ({e}); the log may be damaged or another server may be using the directory"
             )
         };
-        Self::start(
+        let authors_dir = directory.clone();
+        Self::start_with_authors(
             move || {
                 Database::open(
                     StdIo::new(directory),
@@ -558,6 +560,12 @@ impl ExecHost {
                     OsRng,
                     &Config::default(),
                 )
+            },
+            // The registry of author ids lives beside the log. It is opened after the log, so the
+            // directory lock is already held, and a damaged or colliding registry refuses startup.
+            move || {
+                AuthorRegistry::open(Box::new(StdIo::new(authors_dir)))
+                    .map_err(|e| format!("cannot open the author registry: {e}"))
             },
             policies,
             limits,
@@ -569,6 +577,23 @@ impl ExecHost {
     /// single-threaded. Returns once the database is open (or failed to open).
     pub fn start<I, C, R>(
         open: impl FnOnce() -> Result<Database<I, C, R>, ExecError> + Send + 'static,
+        policies: PolicyTable,
+        limits: HostLimits,
+    ) -> Result<Self, String>
+    where
+        I: Io + 'static,
+        C: Clock + Clone + 'static,
+        R: Rng + 'static,
+    {
+        Self::start_with_authors(open, || Ok(AuthorRegistry::in_memory()), policies, limits)
+    }
+
+    /// Like [`ExecHost::start`], with the registry that assigns account author ids opened on the
+    /// actor's thread after the database. [`ExecHost::start`] keeps the ids in memory, so they are
+    /// injective for the life of the process only; `start_dir` stores them beside the log.
+    pub fn start_with_authors<I, C, R>(
+        open: impl FnOnce() -> Result<Database<I, C, R>, ExecError> + Send + 'static,
+        open_authors: impl FnOnce() -> Result<AuthorRegistry, String> + Send + 'static,
         policies: PolicyTable,
         limits: HostLimits,
     ) -> Result<Self, String>
@@ -589,6 +614,13 @@ impl ExecHost {
                 let db = match open() {
                     Ok(db) => db,
                     Err(e) => {
+                        let _ = ready_tx.send(Err(e.to_string()));
+                        return;
+                    }
+                };
+                let authors = match open_authors() {
+                    Ok(authors) => Rc::new(RefCell::new(authors)),
+                    Err(e) => {
                         let _ = ready_tx.send(Err(e));
                         return;
                     }
@@ -602,7 +634,7 @@ impl ExecHost {
                 if ready_tx.send(Ok(unattached)).is_err() {
                     return;
                 }
-                serve(db, inbox, &policies, limits, &thread_shared);
+                serve(db, authors, inbox, &policies, limits, &thread_shared);
             })
             .map_err(|e| format!("cannot start the SQL thread: {e}"))?;
         match ready_rx.recv() {
@@ -620,7 +652,7 @@ impl ExecHost {
             }),
             Ok(Err(e)) => {
                 let _ = thread.join();
-                Err(e.to_string())
+                Err(e)
             }
             Err(_) => {
                 let _ = thread.join();
@@ -768,6 +800,7 @@ impl Drop for ExecHost {
 
 fn serve<I, C, R>(
     db: Database<I, C, R>,
+    authors: Rc<RefCell<AuthorRegistry>>,
     inbox: Receiver<Request>,
     policies: &PolicyTable,
     limits: HostLimits,
@@ -792,6 +825,7 @@ fn serve<I, C, R>(
                 accounts.account(n).policy()
             });
         handler.set_limits(limits.exec());
+        handler.set_authors(Rc::clone(&authors));
         handler
     };
     while let Ok(request) = inbox.recv() {
@@ -2317,5 +2351,90 @@ reader	allow-all
         shared.fail_through.store(8, Ordering::Release);
         assert_eq!(apply(8), Some((7, 0)));
         assert_eq!(apply(9), Some((7, 8)));
+    }
+
+    // ----- provenance: who committed (issue 520) -----
+
+    fn authors_in(dir: &std::path::Path) -> Vec<u128> {
+        let db = Database::open(
+            StdIo::new(dir.to_path_buf()),
+            SystemClock,
+            OsRng,
+            &Config::default(),
+        )
+        .unwrap();
+        db.store()
+            .events_since(lattice_core::feed::Cursor::ORIGIN)
+            .unwrap()
+            .map(|e| e.author)
+            .collect()
+    }
+
+    fn accounts(names: &[&str]) -> PolicyTable {
+        PolicyTable::new(Grant::AllowAll).with_accounts(
+            names
+                .iter()
+                .map(|n| ((*n).to_string(), Grant::AllowAll))
+                .collect(),
+        )
+    }
+
+    fn as_account(host: &ExecHost, name: &str, sql: &str) {
+        let principal = Principal::account(name);
+        host.handler()
+            .execute(&QueryContext::new(&principal), sql, &[])
+            .unwrap_or_else(|e| panic!("{sql}: {e:?}"));
+    }
+
+    #[test]
+    fn account_author_ids_are_durable_injective_and_stable_across_a_host_restart() {
+        let path = dir("authors");
+        let table = accounts(&["alice", "bob", "carol"]);
+        let host = ExecHost::start_dir(path.clone(), table.clone(), HostLimits::default()).unwrap();
+        as_account(&host, "alice", "CREATE TABLE t (id INT PRIMARY KEY)");
+        as_account(&host, "bob", "INSERT INTO t VALUES (1)");
+        as_account(&host, "alice", "INSERT INTO t VALUES (2)");
+        let _ = run(&host, "INSERT INTO t VALUES (3)");
+        host.shutdown().unwrap();
+        drop(host);
+        // Accounts are numbered in order of first use; the development principal is 1. The table
+        // was created by alice, so she is first.
+        assert_eq!(authors_in(&path), vec![257, 256, 1]);
+        let host = ExecHost::start_dir(path.clone(), table, HostLimits::default()).unwrap();
+        as_account(&host, "carol", "CREATE TABLE u (id INT PRIMARY KEY)");
+        as_account(&host, "carol", "INSERT INTO u VALUES (1)");
+        as_account(&host, "bob", "INSERT INTO u VALUES (2)");
+        host.shutdown().unwrap();
+        drop(host);
+        assert_eq!(authors_in(&path), vec![257, 256, 1, 258, 257]);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn author_id_collision_refuses_startup() {
+        let path = dir("authors-collision");
+        // A hand-edited or damaged registry that gives two accounts one id.
+        let mut io = StdIo::new(path.clone());
+        io.append(
+            "authors.reg",
+            b"lattice-authors v1\nA\t256\talice\nA\t256\tbob\n",
+        )
+        .unwrap();
+        io.sync("authors.reg").unwrap();
+        let error = match ExecHost::start_dir(
+            path.clone(),
+            accounts(&["alice", "bob"]),
+            HostLimits::default(),
+        ) {
+            Ok(_) => panic!("started on a colliding registry"),
+            Err(e) => e,
+        };
+        assert!(error.contains("author registry"), "{error}");
+        // The message names the line and never the account names.
+        assert!(
+            !error.contains("alice") && !error.contains("bob"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(path);
     }
 }
