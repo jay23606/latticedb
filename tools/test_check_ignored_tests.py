@@ -129,6 +129,23 @@ class IgnoredTests(unittest.TestCase):
         text = '#[cfg_attr(unix, ignore)]\nfn slow() {}\n'
         self.assertEqual(check.ignored_tests(text, PATH), [(PATH, 'slow', '')])
 
+    def test_miri_only_ignore_runs_natively_so_it_is_not_counted(self):
+        text = '#[test]\n#[cfg_attr(miri, ignore = "fills the 2^18 default origin share")]\nfn pinned() {}\n'
+        self.assertEqual(check.ignored_tests(text, PATH), [])
+
+    def test_miri_only_ignore_split_over_lines_is_not_counted(self):
+        text = '#[cfg_attr(\n    miri,\n    ignore\n)]\nfn pinned() {}\n'
+        self.assertEqual(check.ignored_tests(text, PATH), [])
+
+    def test_predicates_that_ignore_natively_are_still_counted(self):
+        for predicate in ('not(miri)', 'any(miri, unix)'):
+            text = f'#[cfg_attr({predicate}, ignore = "volume: slow")]\nfn slow() {{}}\n'
+            self.assertEqual(check.ignored_tests(text, PATH), [(PATH, 'slow', 'volume: slow')], predicate)
+
+    def test_miri_only_ignore_beside_a_native_ignore_adds_nothing(self):
+        text = '#[ignore = "volume: slow"]\n#[cfg_attr(miri, ignore)]\nfn slow() {}\n'
+        self.assertEqual(check.ignored_tests(text, PATH), [(PATH, 'slow', 'volume: slow')])
+
     def test_multi_line_attribute_is_found(self):
         text = '#[test]\n#[ignore =\n    "volume: slow"\n]\nfn slow() {}\n'
         self.assertEqual(check.ignored_tests(text, PATH), [(PATH, 'slow', 'volume: slow')])

@@ -4,7 +4,8 @@
 An ignored test never runs in `cargo test`, so a volume test that no workflow starts with `--ignored`
 is dead code that reads like evidence (#455). Every attribute under crates/ and xtask/ that contains
 the word `ignore` (`#[ignore]`, `#[ignore = "..."]`, `#[cfg_attr(..., ignore)]`, raw-string reasons,
-attributes over several lines) marks an ignored test, which must be one of:
+attributes over several lines) marks an ignored test, except `#[cfg_attr(miri, ignore)]`: that only
+applies under Miri, so a native run executes the test. Every other ignored test must be one of:
 
 - a pending specification: the reason starts with `phase N:` and N is in `pending_phases` in
   tools/ignored-tests.toml (a phase that is still ahead; remove a phase from the list when it starts);
@@ -40,6 +41,10 @@ TRIGGERS = re.compile(r'\b(schedule|push|pull_request)\b')
 JOB = re.compile(r'^  ([A-Za-z0-9_-]+):\s*$')
 JOB_IF = re.compile(r'^    if:\s*(.*)$')
 RAW_START = re.compile(r'r(#*)"')
+# `#[cfg_attr(miri, ignore)]` only takes effect under Miri. A native `cargo test` runs the test, so it is
+# not ignored in the gate; the Miri nightly skipping it is the point. Other predicates (`not(miri)`,
+# `any(miri, unix)`) do ignore the test natively and are still counted.
+MIRI_ONLY = re.compile(r'\A#\[\s*cfg_attr\(\s*miri\s*,\s*ignore(?![A-Za-z0-9_])')
 
 
 def attributes(text):
@@ -86,6 +91,8 @@ def ignored_tests(text, path):
     found = []
     for line, attr, end in attributes(text):
         if not IGNORE_WORD.search(re.sub(STRING, '""', attr, flags=re.DOTALL)):
+            continue
+        if MIRI_ONLY.match(attr):
             continue
         if attr.startswith(('#[doc', '#[allow', '#[expect', '#[warn', '#[deny')):
             raise ValueError(f'{path}:{line}: attribute mentions `ignore` in a form this check cannot classify')
