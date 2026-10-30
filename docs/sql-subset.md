@@ -208,6 +208,12 @@ with its reason.
 | Constant integer arithmetic | evaluated while planning, so overflow and division by zero fail the statement | folded while binding: `2147483647 + 1` is `22003`, `1 / 0` is `22012`, even inside a branch that a function such as `coalesce(1, 1 / 0)` would never evaluate | cheap and deterministic; PostgreSQL also folds constants, but the cases a short-circuit skips are not matched and are not tested |
 | `CAST` to `numeric(p, s)` or `varchar(n)` | applies the modifier | refused with `0A000` | the plan does not carry type modifiers yet |
 | Parameter typing | a parameter takes the type of its first use; a conflicting later use is `42P08` | same, and a parameter that already has a type is an operand of that type in later comparisons, arithmetic and `coalesce` | |
+| `CREATE TABLE t ()` | creates a table with no columns | refused with `42601` (a table needs at least one column) | a zero-column row has no use in the subset ([#657](https://github.com/moncifem/latticedb/issues/657)) |
+| Identifier longer than 63 bytes | truncated to 63 bytes with a notice | refused with `54001` | refusing instead of truncating looks intended; two long names could otherwise collide |
+| A table in a schema that does not exist, on a read | `42P01` | `3F000` | not matched; the lookup order differs |
+| A column default that does not fit its column (`a INT DEFAULT 2147483648`) | the table is created and the first insert that uses the default fails (`22003`) | `CREATE TABLE` fails with `22003` | the default is checked when the table is defined |
+| A numeric constant of more than 38 digits, and a float literal in exponent form that large (`1e308` into a `double precision` column) | exact `numeric` of any size; the literal then casts to double | `22003` | the decimal type holds 38 digits ([#691](https://github.com/moncifem/latticedb/issues/691)); `'1e308'::float8` works |
+| `double precision % integer` | `42883` (no such operator) | computed | the operator is accepted for any two numbers |
 | Joins, `GROUP BY`, aggregates, `DISTINCT`, subqueries, DDL, session statements | supported | `0A000` (`LSQL-0002`) until the plan has operators for them | staged delivery |
 
 ### Contract with the host catalog
