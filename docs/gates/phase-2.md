@@ -12,8 +12,16 @@ a completed Phase 2 gate. Requirements and exit criteria are in
 - A versioned catalog, a row-write codec and their seeded power-cut tests.
 - Secondary index primitives maintained internally with row writes and rebuilt from row history.
   Exact-key lookup and consistency checks work at current and historical snapshots. Definitions are
-  caller-supplied on each open, not catalog-managed yet (ADR 0014).
-- A declared SQL subset. This is a target contract, not an implemented SQL interface.
+  persisted in the catalog (ADR 0019, PR #209), not supplied by the caller on each open.
+- The declared SQL subset (`docs/sql-subset.md`) for single-table statements: parser, binder, plan and executor (PRs #196, #318, #401), with durable table definitions across restart (RFC 0012; #573, #560). Joins, aggregates, GROUP BY, DISTINCT and subqueries are not implemented.
+
+## Status on main, 2026-10-30
+
+- Durable single-table SQL. `CREATE TABLE` writes its definition in the same change set under WAL capability bit 3 and LCIX v3 (RFC 0012, ADR 0028; commits 475acb62, 375716bf, 7ef7a76d). Rows, tables and column definitions come back after a restart (psql scripts `restart_a` and `restart_b`).
+- RFC 0012 and ADR 0028 are accepted (Option A, 2026-10-30). The seven-day comment hold was first kept (commit 705d7cb9, 2026-10-30 15:51 UTC: "not waived"). The owner then waived it in chat on 2026-10-30. The waiver is recorded in `docs/gates/phase-1-review.md` (475acb62, 16:00 UTC), in RFC 0012 and in ADR 0028 (375716bf, 20:01 UTC). The repository does not record the time of the chat answer. Code that writes the format merged on 2026-10-30 (475acb62, 0aa405ce, 375716bf, 7ef7a76d). The sequence is tracked in #712.
+- Executor: single-table `SELECT` with `ORDER BY`, `LIMIT` and `OFFSET`, `INSERT`, `UPDATE`, `DELETE`, `CREATE TABLE`, `DROP TABLE`, transaction control, and index scans for primary key and `UNIQUE` predicates. Known differences from PostgreSQL are listed in `tests/drivers/psql/known` and `docs/sql-subset.md`.
+- Server: PostgreSQL wire v3 with simple and extended query and text results; SCRAM-SHA-256 over TLS and loopback trust; cancellation; a SIGTERM and SIGINT stop (service mode, #584); the container image with its smoke test (#587); the `lattice account` credential tool (#582).
+- Not on `main`: joins, aggregates, `GROUP BY`, `DISTINCT`, subqueries (#380, #592 to #597); `ALTER TABLE` and online schema change (#609, #610); SQL `AS OF` and branches (#598 to #601); checkpoints (#602 to #605); binary formats (#608); the driver matrix (#413, #576, #607, #710); the `kill -9` proof with the real binary (#574).
 
 ## Verification for the index slice (P2-07)
 
@@ -142,13 +150,9 @@ limit is format-adjacent and needs independent review.
 Same class, not fixed here: `FeedError::ValueTooLarge` (a value over 16 MiB) still makes
 `events_since_as` fail for every reader, including those who may not read the row. Tracked in issue 488.
 
-## Still missing
+## Still missing (2026-10-30)
 
-Catalog-backed index definitions; completed typed-table integration; checkpoint-based recovery with
-memory/time measurements; vacuum; SQL parser, planner and executor; PostgreSQL wire and driver
-conformance; branches and SQL time travel; online schema changes; and complete Phase 2 simulation,
-benchmark and north-star evidence. The Phase 1 nightly/fuzz history and final gate review also remain
-open. Track partial acceptance on [the roadmap](https://github.com/users/moncifem/projects/1).
+Typed tables from LSL facets (#612, #114); checkpoint-based recovery and its format decision (#602 to #605); SQL joins, aggregates, `GROUP BY`, `DISTINCT` and subqueries (#380, #592 to #597); the driver matrix and binary formats (#413, #576, #607, #608, #710); branches and SQL time travel (#598 to #601); online schema change and `ALTER TABLE` (#609, #610); the vacuum policy (#611); the Phase 2 simulation, benchmark and north-star evidence (#574, #605, #614); and the Phase 1 nightly history and final gate review. The planner decision is ADR 0025. Partial acceptance is tracked on [the project board](https://github.com/users/moncifem/projects/1).
 
 
 ## Merged development adapters and vacuum follow-ups (2026-10-29)

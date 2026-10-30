@@ -36,8 +36,8 @@ has reviewed. No external review, audit or penetration test has been done. In sh
   a filtered change feed leaks the count of hidden writes ([#363](https://github.com/moncifem/latticedb/issues/363));
   feed reads are not fully bounded ([#543](https://github.com/moncifem/latticedb/issues/543)); text
   stored in the database can carry prompt injection to an agent that reads it.
-- The agent gateway and MCP transport are not on `main` yet. When they ship they are planned to listen
-  on loopback only, without TLS, and the threat model lists the DNS-rebinding and browser rows that must
-  hold first.
+- The agent gateway is on `main` behind `--gateway-listen`; it listens on loopback only and has no TLS yet.
+  The MCP transport is not on `main` yet. When it ships it is planned to listen on loopback only, without TLS,
+  and the threat model lists the DNS-rebinding and browser rows that must hold first.
 
 See [docs/alpha.md](docs/alpha.md) for the known-issues list.

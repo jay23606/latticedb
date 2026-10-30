@@ -34,7 +34,7 @@ write-ahead log that survives crashes.
 | SQL | Parser, binder, logical plan and an executor for single-table `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `CREATE TABLE`, `DROP TABLE`. Primary key and `UNIQUE` predicates read a key range or one entry instead of scanning |
 | Server (`latticed`) | PostgreSQL wire v3 (simple and extended query), SCRAM-SHA-256 over TLS or loopback trust, bounded connections, timeouts, cancellation, row policy per account |
 | CRDTs | Registers, observed-remove set, text sequence, tree with moves, with limits on what one hostile peer can make a replica hold |
-| Sync pieces | Change-feed events with stable cursors, sync frame codec, WebSocket codec, principal-bound subscriptions |
+| Sync pieces | Change-feed events with stable cursors, sync frame codec, WebSocket codec, principal-bound subscriptions, an experimental WebSocket gateway (`latticed --gateway-listen`) |
 | SDK pieces | Rust sync client state machine, outbox, plugin contract with a conformance suite, MCP server codec with scoped tools, experimental [TypeScript](clients/typescript) and [Python](clients/python) clients checked against vectors written by the Rust side |
 | Schema language | LSL parser, validator, formatter, compatibility checker, typed-row codec |
 | Tooling | `lattice doctor`, results ledger, scorecards, benchmark gates, a risk gate and serial merger for pull requests |
@@ -46,20 +46,19 @@ write-ahead log that survives crashes.
 - Joins, aggregates, `DISTINCT`, subqueries (they return `0A000`) and binary result formats.
 - A PostgreSQL driver compatibility matrix ([#413](https://github.com/moncifem/latticedb/issues/413)).
 - Authenticated agent permissions: each account is allow-all, deny-all or a list of read, write and ddl bits per table, supplied by the host in a file. No row predicates, roles or policy language yet (Phase 4).
-- A sync server. The sync and SDK pieces are not connected to the listener yet.
+- A production sync server. The WebSocket gateway (`latticed --gateway-listen`) is on `main` and experimental: loopback only, no TLS, read only, rows only.
 - The connected team workspace (work items, docs, specs and the links between them) and everything after it.
 - A stable release. Nightly builds exist, with checksums, SBOMs and build provenance, and the first
   alpha pre-release is described in the [alpha guide](docs/alpha.md); no tag claims a phase gate.
-- A usable agent gateway. An experimental WebSocket sync gateway (loopback only, no TLS, read only) and a
-  transport-independent MCP tool backend are on `main`, but no MCP transport serves the tools, so an agent
-  client should use the PostgreSQL wire protocol (see [docs/alpha.md](docs/alpha.md#connect-an-agent-client)).
+- A usable agent gateway. The experimental WebSocket gateway (loopback only, no TLS, read only) and the MCP tool backend (`lattice_read`, `lattice_write`, `lattice_subscribe`) are on `main`, but no MCP transport serves the tools, so an agent client should use the PostgreSQL wire protocol (see [docs/alpha.md](docs/alpha.md#connect-an-agent-client)).
 
 ## Progress toward the product
 
 Twelve phases, each with a written specification and an exit gate. The owner signs gates; no page
-claims one passed before that. Phases 2 and 3 run ahead of the open earlier gates under a
-[documented waiver](docs/gates/phase-1-review.md) that forbids release tags and exit-criteria claims
-for them.
+claims one passed before that. Phase 2 runs ahead of the open Phase 1 gate under a
+[documented waiver](docs/gates/phase-1-review.md) that forbids a Phase 2 release tag and Phase 2 exit-criteria
+claims until that gate is signed. Phase 3 started on the same conditions, as
+[recorded in its gate page](docs/gates/phase-3.md); the waiver itself covers Phase 2 only.
 
 ```mermaid
 flowchart LR
@@ -80,7 +79,7 @@ flowchart LR
 | 0 Repository and conventions | Done | [phase-0](docs/gates/phase-0.md) |
 | 1 Foundations and evaluation | Built. Gate open: 2 of 7 clean nightly runs recorded, Linux runtime numbers and two-maintainer sign-off pending | [phase-1](docs/gates/phase-1.md) |
 | 2 Storage engines and SQL | Storage, wire, auth, parser and single-table executor with durable table definitions exist. Joins and driver matrix open | [phase-2](docs/gates/phase-2.md) |
-| 3 Sync, CRDTs and SDKs | Building blocks that need no server exist. Live sync not started | [phase-3](docs/gates/phase-3.md) |
+| 3 Sync, CRDTs and SDKs | Building blocks exist. An experimental WebSocket sync gateway and an MCP tool backend are on `main`; no MCP transport yet; no live sync is production-ready | [phase-3](docs/gates/phase-3.md) |
 | 4 to 12 | Identity and policy, blobs and S3, schema packs, search, intelligence, role packs, cluster, optional models, 1.0 | [spec](docs/spec/README.md) |
 
 Full detail: [roadmap](docs/roadmap.md) and [milestones](https://github.com/moncifem/latticedb/milestones).

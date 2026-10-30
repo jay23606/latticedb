@@ -62,8 +62,7 @@ must verify the certificate (libpq `sslmode=verify-full`); channel binding is no
 per-table list of read, write and ddl bits); an unlisted account is denied. File formats and the limits
 are in the [listener guide](../crates/latticed/README.md#configured-scram-over-tls).
 
-The `lattice account` tool ([#683](https://github.com/moncifem/latticedb/pull/683), issue
-[#582](https://github.com/moncifem/latticedb/issues/582)) is on `main`. It creates the verifier file, the
+The `lattice account` tool (issue [#582](https://github.com/moncifem/latticedb/issues/582), commit `a3ca61f1`) is on `main`. It creates the verifier file, the
 decoy secret, the policy file and bearer-token files (see the
 [listener guide](../crates/latticed/README.md#provisioning-with-lattice-account)); it edits files and does not
 talk to a running server. The SCRAM-over-TLS path is covered by Rust integration tests
@@ -175,16 +174,16 @@ is the whole agent surface on `main`.
 
 What is not shipped, so no agent client can use it yet:
 
-- A usable sync gateway. A WebSocket gateway ([#680](https://github.com/moncifem/latticedb/pull/680)) is on
+- A usable sync gateway. A WebSocket gateway (issue [#524](https://github.com/moncifem/latticedb/issues/524), commit `e03b319a`) is on
   `main` behind `--gateway-listen`, with bearer-token authentication
   ([ADR 0031](adr/0031-bearer-token-authentication.md)). It is experimental: loopback only, plaintext (there
   is no TLS on the gateway port, so a non-loopback address is refused), rows only and read only, with no
-  idle deadline, no per-principal byte budget and no credential reload. It is not covered by the quickstart
+  idle deadline and no per-principal byte budget. Bearer-token files are reloaded when they change and revoked
+  connections are closed ([#577](https://github.com/moncifem/latticedb/issues/577)). It is not covered by the quickstart
   smoke test.
 - MCP over HTTP or stdio. `lattice-sdk` contains the MCP message codec, tool schemas and a grant layer
   ([mcp-v0.md](mcp-v0.md)). The transport-independent tool backend in `latticed` serves `lattice_read`,
-  `lattice_write` and `lattice_subscribe` ([#687](https://github.com/moncifem/latticedb/pull/687) and
-  [#708](https://github.com/moncifem/latticedb/pull/708)); `lattice_subscribe` is a long poll that waits at most 30 seconds. No MCP
+  `lattice_write` and `lattice_subscribe` (issues [#526](https://github.com/moncifem/latticedb/issues/526) and [#579](https://github.com/moncifem/latticedb/issues/579); commits `8932717f` and `81953029`); `lattice_subscribe` is a long poll that waits at most 30 seconds. No MCP
   transport serves these tools yet: no listener, token header or process exposes them to a client.
 - `lattice watch`.
 
@@ -236,8 +235,7 @@ optional models plugin; Windows.
 | [#675](https://github.com/moncifem/latticedb/issues/675) | An unknown type name answers `0A000` instead of `42704`. |
 | [#360](https://github.com/moncifem/latticedb/issues/360) | No SCRAM channel binding; a client that skips certificate verification can be relayed. |
 | [#361](https://github.com/moncifem/latticedb/issues/361) | No security event log and no failed-authentication backoff for pgwire. |
-| No TLS on the gateway | When the gateway ships it listens on loopback only and has no TLS; do not expose it. The pgwire listener can use TLS (SCRAM mode). |
-| Token reload | When a gateway uses bearer tokens, they will be read at start only; changing them will need a restart. Nothing reads them today. |
+| No TLS on the gateway | The gateway listens on loopback only and has no TLS ([#578](https://github.com/moncifem/latticedb/issues/578)); do not expose it. The pgwire listener can use TLS (SCRAM mode). |
 | MCP transport | No HTTP or stdio transport is shipped (above). |
 | Containers | The image's entrypoint passes `--stdin-control off` and prints usage with no arguments. A published port needs SCRAM over TLS. `tests/image/smoke.sh` (CI job `image-smoke`) tests the amd64 image only; the `nightly` image predates this entrypoint until the next nightly build. See [Run in a container](#run-in-a-container). |
 | Platforms | No Windows (no signal handling or installer). Linux needs glibc as stated in the release notes. |
