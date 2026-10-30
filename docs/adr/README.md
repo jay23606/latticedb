@@ -29,3 +29,4 @@
 | [0028](0028-durable-sql-table-definitions.md) | ADR 0028: Durable SQL table definitions in a guarded compound change | accepted |
 | [0029](0029-author-id-registry.md) | ADR 0029: Assign author ids to accounts from a local registry file | proposed |
 | [0030](0030-shared-protocol-crate.md) | ADR 0030: A shared protocol crate for the sync wire types | proposed |
+| [0031](0031-bearer-token-authentication.md) | ADR 0031: Bearer-token authentication for the HTTP and WebSocket front doors | accepted |

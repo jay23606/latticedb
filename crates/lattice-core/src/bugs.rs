@@ -176,6 +176,9 @@ planted_bugs! {
     /// Startup does not check the author registry against the author ids in the retained log, so a
     /// missing or older registry restarts its counter at ids that history already carries.
     AuthorRegistryLogCheckSkipped,
+    /// Only the first bytes of a bearer token's secret reach its verifier, so a token that shares
+    /// that prefix authenticates (authentication).
+    TokenAcceptsPrefix,
 }
 
 impl Bug {
@@ -252,6 +255,9 @@ impl Bug {
         Bug::GrantReadOnlyTreatedAsWrite,
         Bug::GrantTableMatchByPrefix,
     ];
+    /// Bearer-token defect, detected by the prefix witness in `lattice-api::bearer`.
+    pub const BEARER: [Bug; 1] = [Bug::TokenAcceptsPrefix];
+
     /// Guarded-WAL admission defects, exercised by independent context witnesses.
     pub const ADMISSION: [Bug; 2] = [Bug::RequiredGuardOmitted, Bug::GuardRewriteUnstaged];
 
@@ -308,6 +314,7 @@ impl Bug {
         &Bug::PRINCIPAL,
         &Bug::FEED_SOURCE,
         &Bug::TABLE_GRANTS,
+        &Bug::BEARER,
         &Bug::EXEC_INDEX,
         &Bug::CRDT_PEER,
         &Bug::ADMISSION,

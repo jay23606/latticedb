@@ -161,3 +161,10 @@ path = "fuzz_targets/websocket_frame.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bearer_verify"
+path = "fuzz_targets/bearer_verify.rs"
+test = false
+doc = false
+bench = false

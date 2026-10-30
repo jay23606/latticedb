@@ -156,6 +156,146 @@ pub fn lattice_api::backpressure::SubscriberQueue::queued_bytes(&self) -> usize
 pub fn lattice_api::backpressure::SubscriberQueue::state(&self) -> lattice_api::backpressure::State
 impl core::fmt::Debug for lattice_api::backpressure::SubscriberQueue
 pub fn lattice_api::backpressure::SubscriberQueue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub mod lattice_api::bearer
+pub enum lattice_api::bearer::AuthError
+pub lattice_api::bearer::AuthError::Malformed
+pub lattice_api::bearer::AuthError::Missing
+pub lattice_api::bearer::AuthError::Rejected(lattice_api::bearer::RejectReason)
+impl core::clone::Clone for lattice_api::bearer::AuthError
+pub fn lattice_api::bearer::AuthError::clone(&self) -> Self
+impl core::cmp::Eq for lattice_api::bearer::AuthError
+impl core::cmp::PartialEq for lattice_api::bearer::AuthError
+pub fn lattice_api::bearer::AuthError::eq(&self, &Self) -> bool
+impl core::error::Error for lattice_api::bearer::AuthError
+impl core::fmt::Debug for lattice_api::bearer::AuthError
+pub fn lattice_api::bearer::AuthError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for lattice_api::bearer::AuthError
+pub fn lattice_api::bearer::AuthError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for lattice_api::bearer::AuthError
+impl core::marker::StructuralPartialEq for lattice_api::bearer::AuthError
+pub enum lattice_api::bearer::RejectReason
+pub lattice_api::bearer::RejectReason::Credential
+pub lattice_api::bearer::RejectReason::Expired
+pub lattice_api::bearer::RejectReason::Revoked
+impl core::clone::Clone for lattice_api::bearer::RejectReason
+pub fn lattice_api::bearer::RejectReason::clone(&self) -> Self
+impl core::cmp::Eq for lattice_api::bearer::RejectReason
+impl core::cmp::PartialEq for lattice_api::bearer::RejectReason
+pub fn lattice_api::bearer::RejectReason::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_api::bearer::RejectReason
+pub fn lattice_api::bearer::RejectReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for lattice_api::bearer::RejectReason
+impl core::marker::StructuralPartialEq for lattice_api::bearer::RejectReason
+pub enum lattice_api::bearer::StoreError
+pub lattice_api::bearer::StoreError::BadFraming
+pub lattice_api::bearer::StoreError::DuplicateId
+pub lattice_api::bearer::StoreError::InvalidAccount
+pub lattice_api::bearer::StoreError::InvalidExpiry
+pub lattice_api::bearer::StoreError::Malformed(usize)
+pub lattice_api::bearer::StoreError::OverlapNotBounded
+pub lattice_api::bearer::StoreError::TooLarge
+pub lattice_api::bearer::StoreError::TooManyActive
+pub lattice_api::bearer::StoreError::TooManyEntries
+impl core::clone::Clone for lattice_api::bearer::StoreError
+pub fn lattice_api::bearer::StoreError::clone(&self) -> Self
+impl core::cmp::Eq for lattice_api::bearer::StoreError
+impl core::cmp::PartialEq for lattice_api::bearer::StoreError
+pub fn lattice_api::bearer::StoreError::eq(&self, &Self) -> bool
+impl core::error::Error for lattice_api::bearer::StoreError
+impl core::fmt::Debug for lattice_api::bearer::StoreError
+pub fn lattice_api::bearer::StoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for lattice_api::bearer::StoreError
+pub fn lattice_api::bearer::StoreError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for lattice_api::bearer::StoreError
+impl core::marker::StructuralPartialEq for lattice_api::bearer::StoreError
+pub enum lattice_api::bearer::TokenStatus
+pub lattice_api::bearer::TokenStatus::Active
+pub lattice_api::bearer::TokenStatus::Revoked
+impl core::clone::Clone for lattice_api::bearer::TokenStatus
+pub fn lattice_api::bearer::TokenStatus::clone(&self) -> Self
+impl core::cmp::Eq for lattice_api::bearer::TokenStatus
+impl core::cmp::PartialEq for lattice_api::bearer::TokenStatus
+pub fn lattice_api::bearer::TokenStatus::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_api::bearer::TokenStatus
+pub fn lattice_api::bearer::TokenStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for lattice_api::bearer::TokenStatus
+impl core::marker::StructuralPartialEq for lattice_api::bearer::TokenStatus
+pub struct lattice_api::bearer::BearerToken
+impl lattice_api::bearer::BearerToken
+pub fn lattice_api::bearer::BearerToken::expose_secret(&self) -> &str
+pub fn lattice_api::bearer::BearerToken::id(&self) -> lattice_api::bearer::TokenId
+impl core::fmt::Debug for lattice_api::bearer::BearerToken
+pub fn lattice_api::bearer::BearerToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for lattice_api::bearer::BearerToken
+pub fn lattice_api::bearer::BearerToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct lattice_api::bearer::CredentialStore
+impl lattice_api::bearer::CredentialStore
+pub fn lattice_api::bearer::CredentialStore::empty() -> Self
+pub fn lattice_api::bearer::CredentialStore::entries(&self) -> impl core::iter::traits::iterator::Iterator<Item = &lattice_api::bearer::TokenEntry>
+pub fn lattice_api::bearer::CredentialStore::insert(&mut self, lattice_api::bearer::TokenEntry) -> core::result::Result<(), lattice_api::bearer::StoreError>
+pub fn lattice_api::bearer::CredentialStore::is_empty(&self) -> bool
+pub fn lattice_api::bearer::CredentialStore::len(&self) -> usize
+pub fn lattice_api::bearer::CredentialStore::parse(&str) -> core::result::Result<Self, lattice_api::bearer::StoreError>
+pub fn lattice_api::bearer::CredentialStore::render(&self) -> alloc::string::String
+impl core::clone::Clone for lattice_api::bearer::CredentialStore
+pub fn lattice_api::bearer::CredentialStore::clone(&self) -> Self
+impl core::default::Default for lattice_api::bearer::CredentialStore
+pub fn lattice_api::bearer::CredentialStore::default() -> Self
+impl core::fmt::Debug for lattice_api::bearer::CredentialStore
+pub fn lattice_api::bearer::CredentialStore::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct lattice_api::bearer::FailureLimiter
+impl lattice_api::bearer::FailureLimiter
+pub const lattice_api::bearer::FailureLimiter::MAX_TRACKED: usize
+pub fn lattice_api::bearer::FailureLimiter::is_blocked(&mut self, core::net::ip_addr::IpAddr, u64) -> bool
+pub fn lattice_api::bearer::FailureLimiter::new(usize, u64) -> Self
+pub fn lattice_api::bearer::FailureLimiter::record_failure(&mut self, core::net::ip_addr::IpAddr, u64)
+pub fn lattice_api::bearer::FailureLimiter::record_success(&mut self, core::net::ip_addr::IpAddr)
+impl core::fmt::Debug for lattice_api::bearer::FailureLimiter
+pub fn lattice_api::bearer::FailureLimiter::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct lattice_api::bearer::TokenEntry
+impl lattice_api::bearer::TokenEntry
+pub fn lattice_api::bearer::TokenEntry::account(&self) -> &str
+pub fn lattice_api::bearer::TokenEntry::created(&self) -> u64
+pub fn lattice_api::bearer::TokenEntry::expires(&self) -> core::option::Option<u64>
+pub fn lattice_api::bearer::TokenEntry::id(&self) -> lattice_api::bearer::TokenId
+pub fn lattice_api::bearer::TokenEntry::status(&self) -> lattice_api::bearer::TokenStatus
+impl core::clone::Clone for lattice_api::bearer::TokenEntry
+pub fn lattice_api::bearer::TokenEntry::clone(&self) -> Self
+impl core::cmp::Eq for lattice_api::bearer::TokenEntry
+impl core::cmp::PartialEq for lattice_api::bearer::TokenEntry
+pub fn lattice_api::bearer::TokenEntry::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_api::bearer::TokenEntry
+pub fn lattice_api::bearer::TokenEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for lattice_api::bearer::TokenEntry
+pub struct lattice_api::bearer::TokenId(_)
+impl core::clone::Clone for lattice_api::bearer::TokenId
+pub fn lattice_api::bearer::TokenId::clone(&self) -> Self
+impl core::cmp::Eq for lattice_api::bearer::TokenId
+impl core::cmp::Ord for lattice_api::bearer::TokenId
+pub fn lattice_api::bearer::TokenId::cmp(&self, &Self) -> core::cmp::Ordering
+impl core::cmp::PartialEq for lattice_api::bearer::TokenId
+pub fn lattice_api::bearer::TokenId::eq(&self, &Self) -> bool
+impl core::cmp::PartialOrd for lattice_api::bearer::TokenId
+pub fn lattice_api::bearer::TokenId::partial_cmp(&self, &Self) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for lattice_api::bearer::TokenId
+pub fn lattice_api::bearer::TokenId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for lattice_api::bearer::TokenId
+pub fn lattice_api::bearer::TokenId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for lattice_api::bearer::TokenId
+impl core::marker::StructuralPartialEq for lattice_api::bearer::TokenId
+pub const lattice_api::bearer::ID_BYTES: usize
+pub const lattice_api::bearer::MAX_ACTIVE_PER_ACCOUNT: usize
+pub const lattice_api::bearer::MAX_ENTRIES: usize
+pub const lattice_api::bearer::MAX_HEADER_BYTES: usize
+pub const lattice_api::bearer::MAX_OVERLAP_SECS: u64
+pub const lattice_api::bearer::MAX_STORE_BYTES: usize
+pub const lattice_api::bearer::SALT_BYTES: usize
+pub const lattice_api::bearer::SECRET_BYTES: usize
+pub const lattice_api::bearer::STORE_HEADER: &str
+pub const lattice_api::bearer::TOKEN_LEN: usize
+pub const lattice_api::bearer::TOKEN_PREFIX: &str
+pub fn lattice_api::bearer::issue(&str, u64, core::option::Option<u64>, &mut impl lattice_seams::Rng + ?core::marker::Sized) -> core::result::Result<(lattice_api::bearer::BearerToken, lattice_api::bearer::TokenEntry), lattice_api::bearer::StoreError>
+pub fn lattice_api::bearer::verify_bearer(core::option::Option<&[u8]>, &lattice_api::bearer::CredentialStore, u64) -> core::result::Result<lattice_api::principal::Principal, lattice_api::bearer::AuthError>
 pub mod lattice_api::cancel
 pub enum lattice_api::cancel::CancelError
 pub lattice_api::cancel::CancelError::ExpiryOverflow

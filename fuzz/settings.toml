@@ -96,3 +96,7 @@ basis = "at most 16 proposals with names of at most 64 bytes, far below 16 KiB, 
 [targets.websocket_frame]
 max_len = 1048640
 basis = "the test decodes frames with a 1 MiB payload cap plus a 14-byte header (lattice-api websocket) plus slack"
+
+[targets.bearer_verify]
+max_len = 4096
+basis = "the input is a header (only 128 bytes are looked at) and a credential file; 4 KiB holds the header limit, many entries and the over-limit branches (the 256 KiB file cap is reached by unit tests)"

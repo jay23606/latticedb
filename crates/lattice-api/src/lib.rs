@@ -22,6 +22,8 @@ pub mod auth;
 /// The sync frame types and codec live in `lattice-proto` so the SDK shares them; this keeps the old path.
 pub use lattice_proto::sync;
 
+pub mod bearer;
+
 pub mod subscribe;
 
 pub mod feed_source;

@@ -64,11 +64,7 @@ impl Accounts {
                 continue;
             }
             let (name, encoded) = line.split_once('\t').ok_or(ScramError::Malformed)?;
-            if name.is_empty()
-                || name.len() > 63
-                || name.chars().any(char::is_control)
-                || entries.len() == MAX_ACCOUNTS
-            {
+            if !valid_account_name(name) || entries.len() == MAX_ACCOUNTS {
                 return Err(ScramError::OutOfBounds);
             }
             let encoded = encoded
@@ -102,7 +98,7 @@ impl Accounts {
         name: &str,
         rng: &mut (impl Rng + ?Sized),
     ) -> Result<(ScramServer, Option<Principal>), ScramError> {
-        if name.is_empty() || name.len() > 63 || name.chars().any(char::is_control) {
+        if !valid_account_name(name) {
             return Err(ScramError::Malformed);
         }
         let known = self.entries.get_key_value(name);
@@ -131,6 +127,11 @@ impl Accounts {
         mac.update(name.as_bytes());
         Ok(Zeroizing::new(mac.finalize().into_bytes().into()))
     }
+}
+/// The one account namespace: SCRAM accounts and bearer-token accounts (ADR 0031) name the same
+/// principal with the same rule, 1 to 63 bytes without control characters.
+pub(crate) fn valid_account_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 63 && !name.chars().any(char::is_control)
 }
 fn decode_key(encoded: &str) -> Result<Zeroizing<[u8; 32]>, ScramError> {
     let mut key = Zeroizing::new([0; 32]);

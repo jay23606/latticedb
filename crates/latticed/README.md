@@ -359,3 +359,11 @@ frozen format.
 Not wired yet: the five-driver matrix (libpq, psycopg, pgx, JDBC, node-postgres), binary result
 formats, and a persisted schema. Text parameters of the extended protocol are tested. The tests in `tests/sql_binary.rs` use a plain client that frames
 messages itself, over loopback trust and over verified TLS with SCRAM.
+
+`load_credential_store` and `write_credential_store` read and replace the bearer-token credential file
+([ADR 0031](../../docs/adr/0031-bearer-token-authentication.md)). The loader refuses a file that group or others
+can access (anything but mode 0600 or 0400), a directory they can write to, a file over 256 KiB and any
+malformed content, and on platforms without Unix mode bits it refuses every file until an ACL check exists
+(#577). The writer creates a 0600 temporary file next to the target, syncs it, renames it over the target
+and syncs the directory. No command-line flag or listener uses them yet.
+

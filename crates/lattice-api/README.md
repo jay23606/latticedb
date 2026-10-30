@@ -68,3 +68,14 @@ and refuses to start on a damaged, colliding, missing or older-than-the-log file
 reach it.
 
 `websocket` is a sans-I/O RFC 6455 server-side codec for the future sync gateway: the HTTP upgrade request (strict, bounded, origin hook, `lattice.sync.v1` subprotocol), the accept key, frame decode and encode, message reassembly with size caps and UTF-8 checks, ping/pong and close handling, and timers on a caller-supplied logical clock. It does no I/O and is not connected to a listener, TLS or authentication yet ([ADR 0027](../../docs/adr/0027-sync-transport-websocket-first.md), proposed).
+
+`bearer` is the credential layer for the HTTP and WebSocket front doors ([ADR 0031](../../docs/adr/0031-bearer-token-authentication.md)):
+tokens of the fixed form `lat_<16 hex id>_<43 base64url characters>` (256-bit secret), issued from random
+words by `bearer::issue`; a strict, bounded credential file (`CredentialStore::parse` and `render`) that holds only
+a salted SHA-256 verifier per token, with at most two active tokens per account and a bounded rotation overlap;
+`verify_bearer(header, store, now)`, which returns the same `Principal::account` a SCRAM login of that account
+gets and gives unknown and wrong tokens one error; and `FailureLimiter`, a per-address count of failed
+attempts. The verifier logs nothing and no token, salt or verifier appears in `Debug`, `Display` or errors.
+Nothing calls it yet: the HTTP endpoint, reload, revocation of live connections and the credential tool are
+#524, #577 and #582. No end-to-end timing claim is made.
+
