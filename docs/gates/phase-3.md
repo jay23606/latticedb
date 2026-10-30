@@ -177,8 +177,30 @@ from the row store's retained committed versions. One local run of `cargo test -
 computed model (filtered by a value-based read policy in a second test); 8 kill-and-reopen histories re-emitted
 identical events and resumed with no gap and no duplicate; three planted emitter defects (skipped event, reordered
 entity events, inclusive resume) were each rejected by the oracle in more than 100 cases. A cursor at or below
-the vacuum floor returns `CursorTooOld`. Author and turn are not recorded by the row store, so events carry author 0
-and no turn. The full `cargo xtask ci` gate and the rest of the engines suite were not run locally.
+the vacuum floor returns `CursorTooOld`. Row events carried author 0 when that evidence was recorded; the next
+paragraph supersedes that for commits made through the executor. The full `cargo xtask ci` gate and the rest of the
+engines suite were not run locally.
+Verification evidence, not an exit criterion: row commits record who wrote (issue #520, part of #518). No byte format
+changes: `formats/changeset-v1.md` already has the 16 byte `author` field and the change feed repeats it
+(`formats/change-feed-v1.md`), so recording an author is a use of existing fields (`RowTx::with_author`, read back by
+`feed_emit` from the log, rebuilt on recovery, forgotten below the vacuum floor with the rest of the commit metadata).
+Turn is still not recorded for row commits (no session turn exists for SQL). The author id is injective per account:
+`lattice_engines::authors::AuthorRegistry` assigns ids from a counter at first use, from 256 up (0 is unknown or legacy,
+1 is the local-development principal, 2..=255 are reserved), and syncs `authors.reg` beside the log before an id is
+handed out. A renamed account keeps its id only through `rename`; a retired account's id is never reissued and a later
+account with the same name is a new account; a registry file with a repeated live name, a repeated or decreasing id or
+a malformed line refuses startup. The id comes from the authenticated principal in `ExecHandler` (account name from
+the credential check, or the fixed development id) and from nothing a client sends. One local run of
+`cargo test -p lattice-engines --lib authors`, `-p lattice-engines --lib feed_emit`, `-p lattice-exec --test sessions author`
+and `-p lattice-api --lib exec_handler exec_host` passed: events name the right author for alternating principals before
+and after a kill and reopen, the same account keeps its id across a host restart, a proptest over generated names
+including near-collisions finds no shared id, legacy author 0 still reads, and SQL text, `application_name` and the
+startup `user` do not change the author. Two planted defects are caught by those tests: `AuthorFromClient` (author read
+from the statement) and `AuthorIdTruncatedHash` (ids collide). Not done: the `authors.reg` file is a new local sidecar,
+experimental and unfrozen (it is not in the WAL, the change set or the feed, and has no RFC); account delete and
+rename have no operator command, only the library calls; the MCP write path (#526) and the arbiter must pass the
+principal's id the same way when they land; the filtered-feed leak (#363) is untouched. The full `cargo xtask ci` gate was
+not run locally.
 Verification evidence, not an exit criterion: `lattice-api::backpressure` (WP38, issue #240) is a pure module
 with bounded per-subscriber queues (event count and byte budget), an in-flight window, overflow with a resume
 cursor (the last acknowledged event) and an O(N) fan-out hub that copies each payload once and shares it. One

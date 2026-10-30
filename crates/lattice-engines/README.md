@@ -32,6 +32,18 @@ catalog snapshot. It is table-level only: no row predicates, roles or expression
 policy language. The text format and its semantics are in the [latticed README](../latticed/README.md).
 See [the Phase 2 status](../../docs/gates/phase-2.md).
 
+## Author ids
+
+A row commit can name who wrote it: `RowTx::with_author` puts a 128 bit id into the change set's existing
+`author` field (no byte change; see `formats/changeset-v1.md`), `RowStore::author_at` and the change feed read it
+back, and recovery rebuilds it from the log. A commit without one, and all history from before this, has author 0.
+`authors::AuthorRegistry` assigns ids to account names: 0 is unknown, 1 is the local-development principal,
+2..=255 are reserved, accounts count up from 256 in order of first use. The registry is an append-only text file,
+`authors.reg`, beside the log (experimental, not frozen, not part of the WAL): a `lattice-authors v1` line, then
+`A<TAB>id<TAB>name` (assign), `R<TAB>id<TAB>new name` (rename, id kept) and `D<TAB>id` (retire, id never reissued).
+A line is written and synced before its id is used; a torn last line is cut at open; a repeated live name, a repeated
+or decreasing id or a malformed line fails the open. The caller passes an authenticated account name, never client text.
+
 ## Testing the checks
 
 `cargo test -p lattice-engines --test storage_bugs` checks ten distinct planted storage defects

@@ -157,6 +157,13 @@ Primary keys are order-preserving byte strings; a table without a key gets a pro
 `0x8000_0000 | table_id << 4 | k`, so a row policy sees them as rows too. This layout is not a
 frozen format; it needs an RFC and an ADR before any persistence claim.
 
+## Who commits
+
+`ActorPolicy::with_author(id)` attributes every commit under that policy (row writes and DDL) to the id the host
+assigned to the authenticated principal; `ExecSession::set_author` rebinds it. Nothing the statement says is read
+as an author. Without it commits are by author 0 ("unknown"). The ids come from
+`lattice_engines::authors::AuthorRegistry`; `lattice-api` supplies them per connection.
+
 ## Constant queries
 
 `SELECT` without `FROM` runs over a one-row source that reads no table, so it takes no row policy and
