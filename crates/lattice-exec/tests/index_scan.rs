@@ -1002,3 +1002,86 @@ fn an_expression_that_mentions_a_column_never_narrows_even_when_it_would_not_rea
         );
     }
 }
+
+#[test]
+fn a_constant_on_the_left_narrows_like_one_on_the_right() {
+    let mut f = fixture();
+    let mut s = common::admin();
+    setup_t(&mut f.db, &mut s);
+    ok(
+        &mut f.db,
+        &mut s,
+        "INSERT INTO t VALUES (1, 1, 5), (2, 2, 0), (3, 3, 7)",
+    );
+    // `c < id` is `id > c`: the comparison turns around with the operands. Expected rows follow from
+    // the ids 1, 2 and 3.
+    let cases: [(&str, &[&str], AccessPath); 8] = [
+        ("1 < id", &["2", "3"], AccessPath::PrimaryKeyRange),
+        ("1 <= id", &["1", "2", "3"], AccessPath::PrimaryKeyRange),
+        ("2 > id", &["1"], AccessPath::PrimaryKeyRange),
+        ("2 >= id", &["1", "2"], AccessPath::PrimaryKeyRange),
+        ("2 = id", &["2"], AccessPath::PrimaryKeyPoint),
+        ("1 + 1 = id", &["2"], AccessPath::PrimaryKeyPoint),
+        ("2 <> id", &["1", "3"], AccessPath::FullScan),
+        ("1 < id AND 3 > id", &["2"], AccessPath::PrimaryKeyRange),
+    ];
+    for (pred, want, path) in cases {
+        let sql = format!("SELECT id FROM t WHERE {pred} ORDER BY id");
+        let got: Vec<String> = rows(&mut f.db, &mut s, &sql)
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(got, want, "{pred}");
+        assert_eq!(f.db.last_access_paths(), vec![path], "{pred}");
+    }
+}
+
+#[test]
+fn between_narrows_a_scan_but_not_between_does_not() {
+    let mut f = fixture();
+    let mut s = common::admin();
+    setup_t(&mut f.db, &mut s);
+    ok(
+        &mut f.db,
+        &mut s,
+        "INSERT INTO t VALUES (1, 1, 5), (2, 2, 0), (3, 3, 7)",
+    );
+    let got = rows(
+        &mut f.db,
+        &mut s,
+        "SELECT id FROM t WHERE id BETWEEN 1 AND 2",
+    );
+    assert_eq!(got, [["1"], ["2"]]);
+    assert_eq!(f.db.last_access_paths(), vec![AccessPath::PrimaryKeyRange]);
+    let got = rows(
+        &mut f.db,
+        &mut s,
+        "SELECT id FROM t WHERE id NOT BETWEEN 1 AND 2",
+    );
+    assert_eq!(got, [["3"]]);
+    assert_eq!(f.db.last_access_paths(), vec![AccessPath::FullScan]);
+}
+
+#[test]
+fn a_long_conjunction_stops_narrowing_at_the_planner_depth() {
+    let mut f = fixture();
+    let mut s = common::admin();
+    setup_t(&mut f.db, &mut s);
+    ok(
+        &mut f.db,
+        &mut s,
+        "INSERT INTO t VALUES (1, 1, 5), (2, 2, 0)",
+    );
+    // `id = 1` heads a left-nested chain of `n` more `AND` terms, so it sits `n` levels down and its
+    // operands one level further. The planner looks at most 250 levels in (`MAX_DEPTH`): the operands
+    // are at level 250 for n = 249 and at 251 for n = 250, where it gives up and reads the table.
+    for (n, path) in [
+        (10, AccessPath::PrimaryKeyPoint),
+        (249, AccessPath::PrimaryKeyPoint),
+        (250, AccessPath::FullScan),
+    ] {
+        let sql = format!("SELECT id FROM t WHERE id = 1{}", " AND v = v".repeat(n));
+        assert_eq!(rows(&mut f.db, &mut s, &sql), [["1"]], "n = {n}");
+        assert_eq!(f.db.last_access_paths(), vec![path], "n = {n}");
+    }
+}
