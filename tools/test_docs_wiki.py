@@ -6,20 +6,26 @@ import docs_summary as ds
 import docs_wiki as dw
 from test_docs_summary import write
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PAGE_NAMES = [
+    "Agents-and-live-collaboration", "Architecture-overview", "Getting-started", "Gates-and-board",
+    "Glossary", "Home", "How-to-contribute", "Roadmap", "SQL-subset", "Security-model", "Verification",
+]
+
 
 def fixture(root: Path) -> None:
-    write(root, "README.md", "![b](docs/assets/b.png)\n\n# Lattice\n\n[road](docs/roadmap.md) [lic](LICENSE) [c](CONTRIBUTING.md#setup)\n")
     write(root, "LICENSE", "x")
     write(root, "CONTRIBUTING.md", "# Contributing\n\nSee `docs/x.md` and [gl](docs/glossary.md).\n\n## Setup\n")
+    write(root, "docs/wiki/home.md", "![b](../assets/b.png)\n\n# Lattice\n\n[road](../roadmap.md) [lic](../../LICENSE) [c](../../CONTRIBUTING.md#setup)\n")
+    write(root, "docs/wiki/getting-started.md", "# Getting started\n\nSee [home](home.md).\n")
+    write(root, "docs/wiki/architecture.md", "# Architecture\n\n## Layers\n\ntext\n\n## Later\n\n```\n## not a heading\n```\n")
+    for name in ("sql", "agents", "security", "verification"):
+        write(root, f"docs/wiki/{name}.md", f"# {name}\n")
     write(root, "docs/roadmap.md", "# Roadmap\n\n[gate](gates/phase-1.md)\n")
     write(root, "docs/glossary.md", "# Glossary\n")
     write(root, "docs/gates/phase-1.md", "# Phase 1 status\n")
     write(root, "docs/gates/phase-10.md", "# Phase 10 status\n")
     write(root, "docs/gates/phase-2.md", "# Phase 2 status\n")
-    arch = "# Arch\n\nintro\n\n"
-    for i in range(1, 7):
-        arch += f"## {i}. Section\n\ntext {i}\n\n```\n## not a heading\n```\n\n"
-    write(root, "docs/ARCHITECTURE.md", arch)
 
 
 class DocsWikiTests(unittest.TestCase):
@@ -36,8 +42,7 @@ class DocsWikiTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(
             sorted(files),
-            ["Architecture-overview.md", "Gates-and-board.md", "Glossary.md", "Home.md",
-             "How-to-contribute.md", "Roadmap.md", "_Sidebar.md"],
+            sorted([f"{name}.md" for name in PAGE_NAMES] + ["_Sidebar.md"]),
         )
         for name, content in files.items():
             if name != "_Sidebar.md":
@@ -51,17 +56,18 @@ class DocsWikiTests(unittest.TestCase):
         self.assertIn("(How-to-contribute#setup)", home)
         self.assertIn(f"({ds.REPO_URL}/blob/main/LICENSE)", home)
 
+    def test_wiki_source_links_resolve_to_wiki_pages(self):
+        files, _ = dw.generate(self.root)
+        self.assertIn("See [home](Home).", files["Getting-started.md"])
+
     def test_roadmap_links_to_gate_become_urls(self):
         files, _ = dw.generate(self.root)
         self.assertIn(f"({ds.REPO_URL}/blob/main/docs/gates/phase-1.md)", files["Roadmap.md"])
 
-    def test_architecture_excerpt_counts_only_real_headings(self):
+    def test_architecture_page_is_the_whole_source(self):
         files, _ = dw.generate(self.root)
         arch = files["Architecture-overview.md"]
-        self.assertIn("## 4. Section", arch)
-        self.assertNotIn("## 5. Section", arch)
-        self.assertIn("text 4", arch)
-        self.assertNotIn("text 5", arch)
+        self.assertIn("## Later", arch)
         self.assertIn("## not a heading", arch)
 
     def test_gates_page_is_numerically_ordered(self):
@@ -71,13 +77,13 @@ class DocsWikiTests(unittest.TestCase):
         self.assertLess(page.index("phase-2.md"), page.index("phase-10.md"))
         self.assertIn(dw.BOARD_URL, page)
 
-    def test_anchor_beyond_the_excerpt_goes_to_github(self):
-        write(self.root, "docs/roadmap.md", "# Roadmap\n\n[a](ARCHITECTURE.md#5-section) [b](ARCHITECTURE.md#4-section)\n")
+    def test_anchor_missing_from_the_wiki_page_goes_to_github(self):
+        write(self.root, "docs/roadmap.md", "# Roadmap\n\n[a](wiki/architecture.md#missing) [b](wiki/architecture.md#layers)\n")
         files, errors = dw.generate(self.root)
         self.assertEqual(errors, [])
         road = files["Roadmap.md"]
-        self.assertIn(f"({ds.REPO_URL}/blob/main/docs/ARCHITECTURE.md#5-section)", road)
-        self.assertIn("(Architecture-overview#4-section)", road)
+        self.assertIn(f"({ds.REPO_URL}/blob/main/docs/wiki/architecture.md#missing)", road)
+        self.assertIn("(Architecture-overview#layers)", road)
 
     def test_symlinked_gate_page_is_skipped(self):
         (self.root / "docs" / "gates" / "phase-9.md").symlink_to(self.root / "docs" / "gates" / "phase-1.md")
@@ -106,6 +112,11 @@ class DocsWikiTests(unittest.TestCase):
     def test_strip_leading_images_keeps_other_text(self):
         text = "![a](x.png)\nkeep me\n\n# T\n"
         self.assertEqual(dw.strip_leading_images(text), "keep me\n# T\n")
+
+    def test_real_sources_generate_without_errors(self):
+        files, errors = dw.generate(REPO_ROOT)
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(files), sorted([f"{name}.md" for name in PAGE_NAMES] + ["_Sidebar.md"]))
 
 
 if __name__ == "__main__":

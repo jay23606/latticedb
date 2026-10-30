@@ -182,10 +182,10 @@ What is not shipped, so no agent client can use it yet:
   idle deadline, no per-principal byte budget and no credential reload. It is not covered by the quickstart
   smoke test.
 - MCP over HTTP or stdio. `lattice-sdk` contains the MCP message codec, tool schemas and a grant layer
-  ([mcp-v0.md](mcp-v0.md)), and the transport-independent tool backend for `lattice_read` and
-  `lattice_write` ([#687](https://github.com/moncifem/latticedb/pull/687)) is on `main`. No MCP transport
-  serves it: no listener, token header or process exposes the tools to a client, and `lattice_subscribe` is
-  not built.
+  ([mcp-v0.md](mcp-v0.md)). The transport-independent tool backend in `latticed` serves `lattice_read`,
+  `lattice_write` and `lattice_subscribe` ([#687](https://github.com/moncifem/latticedb/pull/687) and
+  [#708](https://github.com/moncifem/latticedb/pull/708)); `lattice_subscribe` is a long poll that waits at most 30 seconds. No MCP
+  transport serves these tools yet: no listener, token header or process exposes them to a client.
 - `lattice watch`.
 
 No MCP client has been run against `latticed`, so this page gives no client configuration and lists

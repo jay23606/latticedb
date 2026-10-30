@@ -7,8 +7,8 @@ and writes SUMMARY.md there. It exits non-zero when a relative link does not res
 
 Staged pages: the repository README (as "Overview") and CONTRIBUTING.md, every Markdown file under
 docs/ and the Markdown files under formats/. Excluded: docs/site (build output of the older single-page
-viewer), docs/assets (copied as files, never as pages), SUMMARY.md, formats/corpus and any file whose
-first line is a "generated" HTML comment.
+viewer), docs/wiki (sources of the wiki mirror, see tools/docs_wiki.py), docs/assets (copied as files,
+never as pages), SUMMARY.md, formats/corpus and any file whose first line is a "generated" HTML comment.
 
 Link rules, applied to inline links, images, reference definitions and href/src attributes outside code:
   - external links (a scheme such as https:) and pure fragments (#anchor) are left alone;
@@ -58,7 +58,7 @@ ARCHITECTURE_PAGES = ["docs/ARCHITECTURE.md", "docs/ENGINEERING.md", "docs/sql-s
 POLICY_PAGES = ["docs/review-policy.md", "docs/dependency-policy.md"]
 OVERVIEW_PAGES = ["README.md", "docs/glossary.md"]
 
-EXCLUDED_DIRS = ("docs/site/", "formats/corpus/")
+EXCLUDED_DIRS = ("docs/site/", "docs/wiki/", "formats/corpus/")
 GENERATED_MARKER = "<!-- generated"
 
 

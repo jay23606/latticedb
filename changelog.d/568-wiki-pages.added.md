@@ -1,0 +1,1 @@
+The wiki mirror now has pages for getting started, the architecture layers, the SQL subset, agents and live collaboration, the security model and verification, generated from `docs/wiki/` and the reviewed documents. The wiki repository itself is still created by the owner (see `docs/site-setup.md`).

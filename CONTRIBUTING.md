@@ -31,7 +31,8 @@ A dev container is provided in `.devcontainer/`.
 ## Documentation
 
 `docs/` is the single reviewed source; the site and the wiki are generated from it, so change the
-documents in a pull request and never edit the wiki. The site is meant to live at
+documents in a pull request and never edit the wiki. The wiki pages written for the wiki itself live in
+`docs/wiki/`, and `tools/docs_wiki.py` lists which source becomes which page. The site is meant to live at
 https://moncifem.github.io/latticedb/ but is **not live until the owner enables GitHub Pages**
 (`docs/site-setup.md` lists the owner steps). The `docs-site` check builds it on every pull request
 that touches the documents and fails on a broken relative link. To check locally:

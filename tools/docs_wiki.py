@@ -6,8 +6,9 @@ the repository's wiki git repository. Every page starts with a banner saying whe
 links are rewritten: links to another mirrored page become wiki links, every other link becomes an
 absolute GitHub URL. A link that does not resolve is an error (exit 1).
 
-Pages: Home (README), Roadmap, Architecture overview (the first sections of ARCHITECTURE.md),
-How to contribute, Glossary, Gates and board (generated), plus _Sidebar.
+Pages: Home, Getting started, Architecture overview, SQL subset, Agents and live collaboration,
+Security model, Verification, Roadmap, How to contribute, Glossary, Gates and board (generated), plus
+_Sidebar. The first six are written for the wiki in docs/wiki/; the others are reviewed documents.
 
 Stdlib only. Tests: tools/test_docs_wiki.py.
 """
@@ -25,21 +26,31 @@ import docs_summary as ds
 BANNER = "Generated from docs/ in the main repository, edit there."
 BOARD_URL = "https://github.com/users/moncifem/projects/1"
 SITE_URL = "https://moncifem.github.io/latticedb/"
-ARCH_SECTIONS_KEPT = 4  # level-2 sections of ARCHITECTURE.md kept in the overview
 
-# wiki page name -> source file (None: generated)
+# wiki page name -> source file (None: generated). The wiki sources live in docs/wiki/ and are
+# excluded from the documentation site by tools/docs_summary.py.
 PAGES = {
-    "Home": "README.md",
+    "Home": "docs/wiki/home.md",
+    "Getting-started": "docs/wiki/getting-started.md",
+    "Architecture-overview": "docs/wiki/architecture.md",
+    "SQL-subset": "docs/wiki/sql.md",
+    "Agents-and-live-collaboration": "docs/wiki/agents.md",
+    "Security-model": "docs/wiki/security.md",
+    "Verification": "docs/wiki/verification.md",
     "Roadmap": "docs/roadmap.md",
-    "Architecture-overview": "docs/ARCHITECTURE.md",
     "How-to-contribute": "CONTRIBUTING.md",
     "Glossary": "docs/glossary.md",
     "Gates-and-board": None,
 }
 LABELS = {
     "Home": "Home",
-    "Roadmap": "Roadmap",
+    "Getting-started": "Getting started",
     "Architecture-overview": "Architecture overview",
+    "SQL-subset": "SQL subset",
+    "Agents-and-live-collaboration": "Agents and live collaboration",
+    "Security-model": "Security model",
+    "Verification": "Verification",
+    "Roadmap": "Roadmap",
     "How-to-contribute": "How to contribute",
     "Glossary": "Glossary",
     "Gates-and-board": "Gates and board",
@@ -59,20 +70,6 @@ def strip_leading_images(text: str) -> str:
             head = [x for x in lines[:i] if x.strip() and not re.match(r"^\s*!\[[^\]]*\]\([^)]*\)\s*$", x)]
             return "\n".join(head + lines[i:]) if head else "\n".join(lines[i:])
     return text
-
-
-def architecture_excerpt(text: str) -> str:
-    """Everything before the (ARCH_SECTIONS_KEPT + 1)th level-2 heading outside code fences."""
-    out, seen, in_fence = [], 0, False
-    for line in text.split("\n"):
-        if re.match(r"^\s*(```|~~~)", line):
-            in_fence = not in_fence
-        if not in_fence and line.startswith("## "):
-            seen += 1
-            if seen > ARCH_SECTIONS_KEPT:
-                break
-        out.append(line)
-    return "\n".join(out).rstrip() + "\n"
 
 
 def heading_slugs(text: str) -> set[str]:
@@ -164,8 +161,6 @@ def generate(root: Path) -> tuple[dict[str, str], list[str]]:
         text = (root / src).read_text(encoding="utf-8")
         if name == "Home":
             text = strip_leading_images(text)
-        if name == "Architecture-overview":
-            text = architecture_excerpt(text)
         texts[name] = text
     anchors = {src: heading_slugs(texts[name]) for name, src in PAGES.items() if src}
     for name, src in PAGES.items():
@@ -173,13 +168,7 @@ def generate(root: Path) -> tuple[dict[str, str], list[str]]:
             body = gates_page(root)
             files[f"{name}.md"] = banner("docs/gates") + body
             continue
-        text = texts[name]
-        if name == "Architecture-overview":
-            text += (
-                f"\nThis is the opening of the design document. Read the whole of it in "
-                f"[`{src}`]({ds.github_url(root, src)}).\n"
-            )
-        text = ds.rewrite_links(text, make_fixer(root, src, wiki_of, errors, anchors))
+        text = ds.rewrite_links(texts[name], make_fixer(root, src, wiki_of, errors, anchors))
         files[f"{name}.md"] = banner(src) + text.rstrip("\n") + "\n"
     side = ["**Lattice**", ""]
     for name in PAGES:

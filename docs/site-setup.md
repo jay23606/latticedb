@@ -54,12 +54,14 @@ answers "Repository not found", which is what it answers today), prints a notice
 ## How the pieces fit
 
 - `tools/docs_summary.py` copies `docs/`, the README, CONTRIBUTING and `formats/` into `target/docs-src`
-  (never into `docs/`), rewrites relative links, writes `SUMMARY.md` in the fixed order overview, roadmap,
+  (never into `docs/`; `docs/wiki/` is left out because it holds the wiki's own sources), rewrites relative
+  links, writes `SUMMARY.md` in the fixed order overview, roadmap,
   architecture, specification, gates, ADRs, RFCs, formats, policies, guides, and fails on a broken link.
   Anchors (`#heading`) and external links are not checked.
 - `docs/book.toml` configures mdBook (pinned in `docs-site.yml` with a checked sha256).
-- `tools/docs_wiki.py` writes the wiki pages: Home, Roadmap, Architecture overview, How to contribute,
-  Glossary, Gates and board.
+- `tools/docs_wiki.py` writes the wiki pages: Home, Getting started, Architecture overview, SQL subset,
+  Agents and live collaboration, Security model, Verification, Roadmap, How to contribute, Glossary, and
+  Gates and board. The first six take their text from `docs/wiki/`; the rest are existing documents.
 - `docs/build.py` and the `docs` step of `cargo xtask ci` are the older single-page HTML viewer. They are
   kept unchanged for now because the gate calls them; retiring them is a separate change to `xtask`.
 
