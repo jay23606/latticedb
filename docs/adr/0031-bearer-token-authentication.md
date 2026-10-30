@@ -207,3 +207,8 @@ Decided here, implemented and tested in [#577](https://github.com/moncifem/latti
 - The credential tool ([#582](https://github.com/moncifem/latticedb/issues/582)), reload, revocation and
   the permission check per OS ([#577](https://github.com/moncifem/latticedb/issues/577)) and the endpoint
   ([#524](https://github.com/moncifem/latticedb/issues/524)) build on this file format.
+- `latticed` now depends directly on `libc` (`=0.2.191`, default features off), only for the `O_NONBLOCK` and
+  `O_NOFOLLOW` constants of the loader. It was already in `Cargo.lock` through other crates, so the lockfile
+  gains one line and no crate arrives. No `unsafe` is added (`latticed` forbids it). `cargo deny check licenses
+  bans sources` is clean; `libc` is MIT OR Apache-2.0 and has a build script that probes the compiler. It is
+  not in the security-critical set of `docs/dependency-policy.md`.
