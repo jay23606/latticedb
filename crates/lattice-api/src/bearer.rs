@@ -334,11 +334,9 @@ pub enum RejectReason {
     Expired,
 }
 impl fmt::Display for AuthError {
+    /// One text for every variant, so no message tells a caller which check failed.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Missing => "missing bearer credentials",
-            Self::Malformed | Self::Rejected(_) => "invalid bearer credentials",
-        })
+        f.write_str("invalid bearer credentials")
     }
 }
 impl std::error::Error for AuthError {}

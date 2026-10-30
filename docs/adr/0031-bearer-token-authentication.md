@@ -66,7 +66,7 @@ lattice-bearer-tokens v1
   be after the creation time.
 - Every line, including the last, ends in `\n`: a truncated file is refused. No blank lines, comments,
   carriage returns, extra fields, upper-case hex or repeated ids.
-- Bounds, checked before parsing: 256 KiB, 1,024 entries (revoked ones included; the longest possible
+- Bounds, checked before parsing: 256 KiB, 1,024 entries (revoked ones included; they cannot be pruned until the credential tool adds retire or compact, #582; the longest possible
   1,024 lines are about 220 KiB). A revoked entry stays so its id is never reissued and so a stolen,
   revoked token can be recognised in the log.
 - Version: the header line. A format change is `v2`, refused by `v1` readers. This is operator
@@ -74,7 +74,7 @@ lattice-bearer-tokens v1
   the line grammar needs a new ADR.
 - Rotation rules are part of the grammar: at most two `active` entries per account, and when there are two
   the older one must expire no later than seven days after the newer one was created. The program that
-  rotates sets that expiry. A third active token, or an overlap with no end, is a refused file.
+  rotates sets that expiry. A third active token, or an overlap with no end, is a refused file. An expired token still counts toward the two-active limit until it is revoked. Equal creation seconds are ordered by id.
 
 Location and handling. The host will name the file on its command line (a `--bearer-tokens FILE` flag, like
 `--scram-verifiers`, added with the gateway; no flag exists yet) and the file lives outside the data directory, so a copy or backup of the data does not carry
@@ -82,7 +82,7 @@ credentials. On Unix it must be a regular file with mode 0600 (0400 is accepted)
 and others cannot write to (create with 0700); `latticed::load_credential_store` refuses anything broader, and the gateway calls it at start and at every
 reload. Only mode bits are checked: file ownership is not. Writers replace the file atomically: a 0600
 temporary file in the same directory is written, `fsync`ed, renamed over the target, and the directory is
-`fsync`ed (`latticed::write_credential_store`). Writers are serialized by the caller; this ADR does not
+`fsync`ed (`latticed::write_credential_store`). Temporary names are unique per write and the writer removes only a file it created; it applies the same directory check as the loader, and the loader opens with `O_NONBLOCK | O_NOFOLLOW` so a FIFO or symlink at the path is refused. Writers are serialized by the caller; this ADR does not
 define a lock. On Windows both load and write refuse until an owner-only ACL check exists
 ([#577](https://github.com/moncifem/latticedb/issues/577)): failing closed is better than reading an
 unchecked credential file.
@@ -105,7 +105,7 @@ the exact shape, at most 128 bytes in all.
 
 - Unknown id and wrong secret run the same hash and the same constant-time comparison over the 32 verifier
   bytes (`subtle`), the unknown case against fixed decoy values, and return the same value and text:
-  `invalid bearer credentials`. Shape errors return earlier, because the shape is public.
+  `invalid bearer credentials` (one `Display` text for every `AuthError`, a missing header included). Shape errors return earlier, because the shape is public.
 - A revoked or expired token is told apart (`RejectReason::Revoked`, `Expired`) only after its secret
   verified, so the distinction is available to someone who holds the token and to nobody else. The client
   still gets the single 401 answer; the distinction is for the host's own event log.
@@ -120,7 +120,7 @@ the exact shape, at most 128 bytes in all.
 The verifier does not log and does not count. It returns `AuthError`, which the host feeds to a
 `FailureLimiter` keyed by client address (IPv6 by /64, IPv4-mapped as IPv4, like the handshake limiter):
 10 failures per address in 60 seconds, after which the host refuses further attempts from that address
-with 429 without verifying until the window passes. A success clears the address. The table holds at most
+with 429 without verifying until the window passes. A success clears the address, so the failure budget resets on success. The table holds at most
 1,024 addresses and fails open when full of live failures: an attacker who fills it gains uncounted
 guesses against a 256-bit secret, while failing closed would let that attacker lock real clients out. The
 limiter is a resource and log-noise bound, not what protects a token. The host builds the security event
@@ -148,7 +148,7 @@ Decided here, implemented and tested in [#577](https://github.com/moncifem/latti
 1. Read the token from the `Authorization: Bearer` header only. Never from a query string, a cookie, a
    path, a request body or a WebSocket subprotocol value; a request carrying `access_token` or similar in
    its URL is refused, and URLs are never logged with credentials (there are none to log).
-2. Refuse a request with more than one `Authorization` header.
+2. Refuse a request with more than one `Authorization` header (the verifier takes one value and cannot see repeats; the host must).
 3. Off loopback, require TLS (ADR 0021 applies to the gateway as to the pgwire listener). A token over
    plaintext on a non-loopback address is refused at start by configuration, not per request. On loopback
    plaintext is allowed for development, and the `LocalDevelopment` principal (ADR 0026) is never

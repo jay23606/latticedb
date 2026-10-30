@@ -8,9 +8,12 @@
 //! bits are checked. On other platforms both functions refuse: there is no ACL check yet (#577), and
 //! a credential file must not be read unchecked.
 
-use crate::require_private_file;
-use lattice_api::bearer::{CredentialStore, MAX_STORE_BYTES};
-use std::io::{self, Read, Write};
+use lattice_api::bearer::CredentialStore;
+#[cfg(unix)]
+use lattice_api::bearer::MAX_STORE_BYTES;
+use std::io;
+#[cfg(unix)]
+use std::io::{Read, Write};
 use std::path::Path;
 
 /// Reads and parses the credential file at `path`.
@@ -28,9 +31,15 @@ pub fn load_credential_store(path: &Path) -> io::Result<CredentialStore> {
     }
     #[cfg(unix)]
     {
-        let file = std::fs::File::open(path)?;
-        require_private_file(&file)?;
+        use std::os::unix::fs::OpenOptionsExt;
         require_private_directory(path)?;
+        // O_NONBLOCK so a FIFO at the path cannot block the open forever, O_NOFOLLOW so a symlink
+        // is refused; the regular-file check then runs on the open descriptor.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+            .open(path)?;
+        crate::require_private_file(&file)?;
         let mut bytes = Vec::new();
         file.take(MAX_STORE_BYTES as u64 + 1)
             .read_to_end(&mut bytes)?;
@@ -83,26 +92,33 @@ pub fn write_credential_store(path: &Path, store: &CredentialStore) -> io::Resul
         if text.len() > MAX_STORE_BYTES {
             return Err(io::Error::other("credential file would be too large"));
         }
+        require_private_directory(path)?;
         let dir = parent_of(path);
         let name = path
             .file_name()
             .ok_or_else(|| io::Error::other("credential path has no file name"))?;
         let mut temporary = name.to_os_string();
-        temporary.push(format!(".tmp{}", std::process::id()));
+        // Unique per write; `create_new` below refuses a name that already exists.
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        temporary.push(format!(".tmp{}-{serial}", std::process::id()));
         let temporary = dir.join(temporary);
+        // Only a file this call created is ever removed.
+        let mut created = false;
         let result = (|| {
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
                 .open(&temporary)?;
+            created = true;
             file.write_all(text.as_bytes())?;
             file.sync_all()?;
             drop(file);
             std::fs::rename(&temporary, path)?;
             std::fs::File::open(dir)?.sync_all()
         })();
-        if result.is_err() {
+        if result.is_err() && created {
             let _ = std::fs::remove_file(&temporary);
         }
         result
@@ -253,6 +269,43 @@ mod tests {
         assert!(load_credential_store(&path).is_err());
         // A directory is not a credential file.
         assert!(load_credential_store(&dir).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_fifo_or_symlink_at_the_path_is_refused_without_blocking() {
+        let dir = directory("fifo");
+        let fifo = dir.join("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(load_credential_store(&fifo).is_err());
+        let real = dir.join("real");
+        std::fs::write(&real, format!("{STORE_HEADER}\n")).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(load_credential_store(&real).is_ok());
+        assert!(load_credential_store(&link).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_writer_checks_the_directory_and_never_touches_other_files() {
+        let dir = directory("writer");
+        let path = dir.join("tokens");
+        let other = dir.join("tokens.tmp1-0");
+        std::fs::write(&other, b"not ours").unwrap();
+        write_credential_store(&path, &one_token_store()).unwrap();
+        write_credential_store(&path, &one_token_store()).unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"not ours");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(write_credential_store(&path, &CredentialStore::empty()).is_err());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
