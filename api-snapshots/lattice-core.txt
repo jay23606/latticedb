@@ -72,6 +72,11 @@ pub lattice_core::bugs::Bug::FenceNotRebuilt
 pub lattice_core::bugs::Bug::FsyncErrorSwallowed
 pub lattice_core::bugs::Bug::FsyncFailureNotPoisoning
 pub lattice_core::bugs::Bug::GapTailTruncated
+pub lattice_core::bugs::Bug::GatewayAuthFailureNotCounted
+pub lattice_core::bugs::Bug::GatewayConnectionCapIgnored
+pub lattice_core::bugs::Bug::GatewayDuplicateAuthorizationAccepted
+pub lattice_core::bugs::Bug::GatewayQueryStringAccepted
+pub lattice_core::bugs::Bug::GatewayRevalidationSkipped
 pub lattice_core::bugs::Bug::GrantReadOnlyTreatedAsWrite
 pub lattice_core::bugs::Bug::GrantTableMatchByPrefix
 pub lattice_core::bugs::Bug::GuardRewriteUnstaged
@@ -127,6 +132,7 @@ pub const lattice_core::bugs::Bug::EXEC_INDEX: [lattice_core::bugs::Bug; 2]
 pub const lattice_core::bugs::Bug::FEED_BOUND: [lattice_core::bugs::Bug; 3]
 pub const lattice_core::bugs::Bug::FEED_SOURCE: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::FENCE_ORDER: [lattice_core::bugs::Bug; 1]
+pub const lattice_core::bugs::Bug::GATEWAY: [lattice_core::bugs::Bug; 5]
 pub const lattice_core::bugs::Bug::GROUPS: &'static [&'static [lattice_core::bugs::Bug]]
 pub const lattice_core::bugs::Bug::HLC_SNAPSHOT: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::KEY_LIMIT: [lattice_core::bugs::Bug; 1]

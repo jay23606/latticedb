@@ -55,8 +55,7 @@ trickles the request head would otherwise hold a connection open) and bound the 
 in that phase. The default frame cap equals the message cap, so a maximal sync frame is accepted as one
 unfragmented message.
 
-The first slice is only the codec; there is no listener, no TLS or authentication wiring and no
-integration test over a real socket yet, so issue #242 stays open. Per-frame and per-message bounds are
+The first slice was only the codec. The second (issue #524, part 1) adds a loopback listener in `latticed` with bearer-token authentication at the upgrade and real-socket tests; there is still no TLS on it (so a non-loopback address is refused, #578), so issue #242 stays open. Per-frame and per-message bounds are
 in the codec; connection counts, aggregate memory and queue bounds remain host policy. WebSocket runs on
 TCP, so a lost packet stalls every subscription on that connection; clients that need isolation open
 more than one connection. The permessage-deflate extension is not negotiated, which avoids compression

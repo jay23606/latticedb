@@ -10,6 +10,7 @@
 use lattice_api::auth::{Accounts, DecoySecret, MAX_CREDENTIAL_BYTES};
 use lattice_api::exec_host::{Grant, HostLimits, MAX_POLICY_BYTES, PolicyFileError, PolicyTable};
 use latticed::stop::{self, DEFAULT_STOP_TIMEOUT, ForcedBy, StopCause, StopOutcome};
+use latticed::ws::{GatewayAuth, GatewayConfig};
 use latticed::{
     Authentication, ServerConfig, ServerHandle, SqlConfig, SqlServer, TlsConfig,
     require_private_file,
@@ -38,6 +39,9 @@ fn run() -> Result<Exit, String> {
     let mut development_policy: Option<String> = None;
     let mut account_policies: Option<String> = None;
     let mut limits = HostLimits::default();
+    let mut gateway = GatewayConfig::default();
+    let mut gateway_listen = false;
+    let mut gateway_tokens: Option<String> = None;
     let mut stdin_control = true;
     let mut stop_timeout = DEFAULT_STOP_TIMEOUT;
     let mut args = std::env::args().skip(1);
@@ -48,7 +52,7 @@ fn run() -> Result<Exit, String> {
         }
         if option == "--help" || option == "-h" {
             println!(
-                "latticed [--listen IP:PORT] [--max-connections N] [--read-timeout-ms N] [--write-timeout-ms N] [--idle-timeout-ms N] [--response-timeout-ms N]\nLoopback development trust by default. Without --data-dir only SELECT 1 is answered. SQL: --data-dir DIR serves SQL from a durable data directory (statement ceiling --statement-timeout-max-ms N, default 30000; budget --statement-memory-bytes N, default 67108864; staged writes of one transaction --transaction-bytes N, default 268435456). Row policy is explicit: with development-trust pass --development-policy allow-all|deny-all; with scram-tls pass --account-policies FILE (one 'account<TAB>allow-all|deny-all' per line; unlisted accounts are denied). Committed rows and table names survive a restart; column definitions do not yet (#379). SCRAM requires --auth scram-tls --tls-cert FILE --tls-key FILE --scram-verifiers FILE --scram-decoy-secret FILE. Optional --startup-timeout-ms N bounds startup/TLS/authentication. SIGTERM and SIGINT stop it cleanly; a second signal, or --stop-timeout-ms N (default 30000) elapsing, abandons a stop that does not finish. Stdin control is --stdin-control on|off (default on): with on, the line 'shutdown' on stdin stops the server and so does end-of-file, so run it with stdin held open; under a supervisor or container pass --stdin-control off, which never reads stdin. Exit status: 0 clean stop, 1 failure, 2 forced stop. Without --idle-timeout-ms the read timeout also disconnects idle sessions. The TLS key and decoy secret files must not be accessible to group or others (mode 0600)."
+                "latticed [--listen IP:PORT] [--max-connections N] [--read-timeout-ms N] [--write-timeout-ms N] [--idle-timeout-ms N] [--response-timeout-ms N]\nLoopback development trust by default. Without --data-dir only SELECT 1 is answered. SQL: --data-dir DIR serves SQL from a durable data directory (statement ceiling --statement-timeout-max-ms N, default 30000; budget --statement-memory-bytes N, default 67108864; staged writes of one transaction --transaction-bytes N, default 268435456). Row policy is explicit: with development-trust pass --development-policy allow-all|deny-all; with scram-tls pass --account-policies FILE (one 'account<TAB>allow-all|deny-all' per line; unlisted accounts are denied). Committed rows and table names survive a restart; column definitions do not yet (#379). SCRAM requires --auth scram-tls --tls-cert FILE --tls-key FILE --scram-verifiers FILE --scram-decoy-secret FILE. Sync gateway (WebSocket, protocol lattice.sync.v1, path /sync, requires --data-dir; loopback only until TLS exists on it): --gateway-listen IP:PORT enables it; --gateway-tokens FILE makes it require 'Authorization: Bearer' tokens from a credential file (mode 0600), otherwise it serves the loopback development principal and only with development-trust; --gateway-max-connections N (default 32) and --gateway-handshake-timeout-ms N (default 5000) bound it. Optional --startup-timeout-ms N bounds startup/TLS/authentication. SIGTERM and SIGINT stop it cleanly; a second signal, or --stop-timeout-ms N (default 30000) elapsing, abandons a stop that does not finish. Stdin control is --stdin-control on|off (default on): with on, the line 'shutdown' on stdin stops the server and so does end-of-file, so run it with stdin held open; under a supervisor or container pass --stdin-control off, which never reads stdin. Exit status: 0 clean stop, 1 failure, 2 forced stop. Without --idle-timeout-ms the read timeout also disconnects idle sessions. The TLS key and decoy secret files must not be accessible to group or others (mode 0600)."
             );
             return Ok(Exit::Clean);
         }
@@ -77,6 +81,26 @@ fn run() -> Result<Exit, String> {
                     return Err("invalid stop timeout: must be positive".into());
                 }
                 stop_timeout = Duration::from_millis(ms);
+            }
+            "--gateway-listen" => {
+                gateway.address = value
+                    .parse()
+                    .map_err(|e| format!("invalid gateway address: {e}"))?;
+                gateway_listen = true;
+            }
+            "--gateway-tokens" => gateway_tokens = Some(value),
+            "--gateway-max-connections" => {
+                gateway.max_connections = value
+                    .parse()
+                    .map_err(|e| format!("invalid gateway connection limit: {e}"))?;
+                gateway.max_handshakes = gateway.max_handshakes.min(gateway.max_connections);
+            }
+            "--gateway-handshake-timeout-ms" => {
+                gateway.handshake_timeout = Duration::from_millis(
+                    value
+                        .parse()
+                        .map_err(|e| format!("invalid gateway handshake timeout: {e}"))?,
+                )
             }
             "--development-policy" => development_policy = Some(value),
             "--account-policies" => account_policies = Some(value),
@@ -150,12 +174,30 @@ fn run() -> Result<Exit, String> {
             _ => return Err(format!("unknown option {option}")),
         }
     }
+    if (gateway_listen || gateway_tokens.is_some()) && data_dir.is_none() {
+        return Err("--gateway-listen and --gateway-tokens require --data-dir".into());
+    }
+    if gateway_tokens.is_some() && !gateway_listen {
+        return Err("--gateway-tokens requires --gateway-listen".into());
+    }
+    if gateway_listen {
+        gateway.auth = match gateway_tokens.as_deref() {
+            Some(path) => GatewayAuth::Bearer(
+                latticed::load_credential_store(std::path::Path::new(path))
+                    .map_err(|e| format!("{path}: {e}"))?,
+            ),
+            None if auth_mode == "development-trust" => GatewayAuth::LocalDevelopment,
+            None => {
+                return Err("--gateway-listen needs --gateway-tokens with --auth scram-tls".into());
+            }
+        };
+    }
     if data_dir.is_none() && (development_policy.is_some() || account_policies.is_some()) {
         return Err("--development-policy and --account-policies require --data-dir".into());
     }
     match auth_mode.as_str() {
         "development-trust" => {
-            if account_policies.is_some() {
+            if account_policies.is_some() && gateway_tokens.is_none() {
                 return Err("--account-policies requires --auth scram-tls".into());
             }
             if data_dir.is_some() && development_policy.is_none() {
@@ -234,13 +276,14 @@ fn run() -> Result<Exit, String> {
                 })?;
                 policies = policies.with_accounts(accounts);
             }
-            let server = SqlServer::start(
+            let server = SqlServer::start_with_gateway(
                 config,
                 SqlConfig {
                     data_dir: dir.into(),
                     policies,
                     limits,
                 },
+                gateway_listen.then_some(gateway),
             )
             .map_err(|e| e.to_string())?;
             let unattached = server.unattached_tables().len();
@@ -261,8 +304,12 @@ fn run() -> Result<Exit, String> {
     // before the line below, which is what a supervisor or test waits for before signalling us.
     stop::install_stop_signal_handlers()
         .map_err(|e| format!("cannot install signal handlers: {e}"))?;
+    let sync = server
+        .gateway_addr()
+        .map(|a| format!("; sync gateway on {a}"))
+        .unwrap_or_default();
     println!(
-        "latticed listening on {} ({mode}; {detail})",
+        "latticed listening on {} ({mode}; {detail}{sync})",
         server.local_addr()
     );
     // With stdin control on, a reader thread forwards the line `shutdown` and end-of-file. With it
@@ -328,6 +375,13 @@ impl Running {
         match self {
             Running::Placeholder(s) => s.local_addr(),
             Running::Sql(s) => s.local_addr(),
+        }
+    }
+
+    fn gateway_addr(&self) -> Option<std::net::SocketAddr> {
+        match self {
+            Running::Placeholder(_) => None,
+            Running::Sql(s) => s.gateway_addr(),
         }
     }
 

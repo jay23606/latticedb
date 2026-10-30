@@ -200,6 +200,21 @@ planted_bugs! {
     /// The SQL definition decoder sorts columns by name, so the row layout (declaration order,
     /// layout rule 1) and the key positions no longer match what was written.
     SqlDefColumnsSorted,
+    /// The gateway takes the first of several `Authorization` headers instead of refusing the
+    /// request, so a proxy and the server can disagree about which credential was presented
+    /// (authentication).
+    GatewayDuplicateAuthorizationAccepted,
+    /// The gateway accepts an upgrade request whose target carries a query string, where a client
+    /// would put a token that then lands in access logs and referrers (credential exposure).
+    GatewayQueryStringAccepted,
+    /// A refused bearer token is not counted against the client address, so guessing is never
+    /// rate limited (authentication).
+    GatewayAuthFailureNotCounted,
+    /// The gateway admits a connection past its configured cap (resource exhaustion).
+    GatewayConnectionCapIgnored,
+    /// A live gateway connection is never checked again against the current credential store, so a
+    /// revoked token keeps its stream (authentication).
+    GatewayRevalidationSkipped,
 }
 
 impl Bug {
@@ -291,6 +306,15 @@ impl Bug {
     /// Commit-notifier defects, detected by the notifier and host witnesses in `lattice-api`.
     pub const NOTIFY: [Bug; 2] = [Bug::NotifyWaitIgnoresPublished, Bug::NotifyBeforeDurable];
 
+    /// Gateway transport defects, detected by the witnesses in `latticed::ws`.
+    pub const GATEWAY: [Bug; 5] = [
+        Bug::GatewayDuplicateAuthorizationAccepted,
+        Bug::GatewayQueryStringAccepted,
+        Bug::GatewayAuthFailureNotCounted,
+        Bug::GatewayConnectionCapIgnored,
+        Bug::GatewayRevalidationSkipped,
+    ];
+
     /// Guarded-WAL admission defects, exercised by independent context witnesses.
     pub const ADMISSION: [Bug; 3] = [
         Bug::RequiredGuardOmitted,
@@ -365,6 +389,7 @@ impl Bug {
         &Bug::RECOVERY_ORDER,
         &Bug::NON_PREFIX,
         &Bug::AUTHOR,
+        &Bug::GATEWAY,
     ];
 }
 

@@ -9,6 +9,7 @@
 //! restart every recovered table is unknown to SQL: `SELECT` answers `42P01` and `CREATE TABLE` of the
 //! same name answers `42P07`. The server reports the number of such tables at startup.
 
+use crate::ws::{CommitWake, GatewayConfig, GatewayHandle};
 use crate::{ServerConfig, ServerHandle};
 use lattice_api::exec_host::{ExecHost, HostLimits, PolicyTable};
 use std::io;
@@ -33,6 +34,7 @@ pub struct SqlServer {
     // Declared first so the listener stops (and its connections drop their proxies) before the
     // database thread does. `None` only while `shutdown` has taken it.
     server: Option<ServerHandle>,
+    gateway: Option<GatewayHandle>,
     addr: SocketAddr,
     host: Arc<ExecHost>,
 }
@@ -77,20 +79,47 @@ fn create_data_dir(path: &Path) -> io::Result<()> {
 impl SqlServer {
     /// Opens (and recovers) the database, then binds the listener. A bind or recovery failure
     /// returns before any client is served, and a directory in use by another process is refused.
-    pub fn start(config: ServerConfig, mut sql: SqlConfig) -> io::Result<Self> {
+    pub fn start(config: ServerConfig, sql: SqlConfig) -> io::Result<Self> {
+        Self::start_with_gateway(config, sql, None)
+    }
+
+    /// As [`SqlServer::start`], and when `gateway` is given also serves the sync protocol over
+    /// WebSocket from the same database (issue #524). Both listeners stop together.
+    pub fn start_with_gateway(
+        config: ServerConfig,
+        mut sql: SqlConfig,
+        gateway: Option<GatewayConfig>,
+    ) -> io::Result<Self> {
         create_data_dir(&sql.data_dir)?;
         // A connection has at most one request in the queue; the host adds one wake-up and one stop.
         // The rest is slack: nothing blocks when the queue is full, it answers `53300`.
-        sql.limits.queue_depth = config.max_connections + crate::CONTROL_CONNECTION_RESERVE + 16;
+        sql.limits.queue_depth = config.max_connections
+            + crate::CONTROL_CONNECTION_RESERVE
+            + 16
+            + gateway.as_ref().map_or(0, |g| g.max_connections);
         let host = Arc::new(
             ExecHost::start_dir(sql.data_dir, sql.policies, sql.limits)
                 .map_err(io::Error::other)?,
         );
         let factory = Arc::clone(&host);
         let server = ServerHandle::start_with_handler(config, move || factory.handler())?;
+        let gateway = match gateway {
+            None => None,
+            Some(cfg) => {
+                let feeds = Arc::clone(&host);
+                // One feed source per connection; the commit notifier says when to read.
+                let wake = CommitWake(host.commit_notifier());
+                Some(GatewayHandle::start(
+                    cfg,
+                    move || feeds.feed_source(lattice_api::sync::MAX_EVENTS_PER_FRAME),
+                    Arc::new(wake),
+                )?)
+            }
+        };
         Ok(Self {
             addr: server.local_addr(),
             server: Some(server),
+            gateway,
             host,
         })
     }
@@ -100,10 +129,25 @@ impl SqlServer {
         self.addr
     }
 
+    /// Address of the sync gateway, when one was started.
+    pub fn gateway_addr(&self) -> Option<SocketAddr> {
+        self.gateway.as_ref().map(GatewayHandle::local_addr)
+    }
+
+    /// The gateway, for credential replacement.
+    pub fn gateway(&self) -> Option<&GatewayHandle> {
+        self.gateway.as_ref()
+    }
+
     /// True once the listener has exited or the database thread has ended. A supervisor should treat
     /// an unrequested end as a failed server; `shutdown` then reports why.
     pub fn is_finished(&self) -> bool {
-        self.server.as_ref().is_none_or(ServerHandle::is_finished) || !self.host.is_alive()
+        self.server.as_ref().is_none_or(ServerHandle::is_finished)
+            || self
+                .gateway
+                .as_ref()
+                .is_some_and(GatewayHandle::is_finished)
+            || !self.host.is_alive()
     }
 
     /// Names of recovered tables that SQL cannot address because column definitions are not
@@ -117,10 +161,15 @@ impl SqlServer {
     /// thread delays this by at most `HostLimits::shutdown_grace_ms`, not forever.
     pub fn shutdown(mut self) -> io::Result<()> {
         self.host.begin_shutdown();
+        let gateway = match self.gateway.take() {
+            Some(gateway) => gateway.shutdown(),
+            None => Ok(()),
+        };
         let result = match self.server.take() {
             Some(server) => server.shutdown(),
             None => Ok(()),
         };
+        let result = gateway.and(result);
         let database = self.host.shutdown().map_err(io::Error::other);
         result.and(database)
     }

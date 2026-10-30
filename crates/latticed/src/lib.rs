@@ -36,6 +36,7 @@ mod sql;
 pub mod stop;
 mod tokens;
 mod transport;
+pub mod ws;
 pub use sql::{SqlConfig, SqlServer};
 pub use tokens::{load_credential_store, write_credential_store};
 pub use transport::TlsConfig;

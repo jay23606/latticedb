@@ -365,5 +365,30 @@ messages itself, over loopback trust and over verified TLS with SCRAM.
 can access (anything but mode 0600 or 0400), a directory they can write to, a file over 256 KiB and any
 malformed content, and on platforms without Unix mode bits it refuses every file until an ACL check exists
 (#577). The writer creates a 0600 temporary file next to the target, syncs it, renames it over the target
-and syncs the directory. No command-line flag or listener uses them yet.
+and syncs the directory. `--gateway-tokens` loads the file at start.
+
+## Sync gateway (WebSocket)
+
+Experimental, loopback only, pre-alpha. `latticed --data-dir DIR --development-policy allow-all --gateway-listen 127.0.0.1:5433`
+serves the [sync protocol](../../formats/sync-protocol-v1.md) (rows only, read only) at `ws://ADDR/sync` with the
+subprotocol `lattice.sync.v1`; each sync frame is one binary message, text is closed with 1003. The banner of the
+server names the gateway address.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--gateway-listen IP:PORT` | off | Enables the gateway. Needs `--data-dir`. A non-loopback address is refused: there is no TLS on this port yet (#578). |
+| `--gateway-tokens FILE` | none | Require `Authorization: Bearer lat_...` from this credential file (mode 0600). The connection is the token's account and its table grants (`--account-policies`, which this flag also allows with `--auth development-trust`). Without it the gateway serves the loopback development principal and only with `--auth development-trust`. |
+| `--gateway-max-connections N` | 32 | Connections at once, including upgrades in progress (at most 8 of those). The next one gets `503`. |
+| `--gateway-handshake-timeout-ms N` | 5000 | One absolute budget from accept to the `101` response. |
+
+The token goes in the `Authorization` header only: a request target with a query string gets `400`, two
+`Authorization` headers get `401`, and a missing, malformed, unknown, revoked or expired token all get the same
+`401`; an address with 10 failures in a minute gets `429`. A `Hello` `agent` name is a label and never changes who
+the connection is. Reads wake on the executor's commit notifier and go through the same policy-checked feed as
+the rest of the server; a fallback read every second means a lost wake costs latency only. The connection thread
+looks at the wake between socket reads of up to 20 ms, so a wake adds up to that. A client that stops reading is
+disconnected at the write budget; resume by subscribing again with the last acknowledged cursor. Not done here:
+TLS, an idle deadline (#578), byte budgets per principal (#529), the security event log (#530) and token reload
+and rotation (#577; the embedding API has `GatewayHandle::replace_credentials`, which closes connections whose
+token no longer verifies).
 
