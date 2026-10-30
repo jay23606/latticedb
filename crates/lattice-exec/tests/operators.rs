@@ -941,7 +941,7 @@ fn timestamps_and_dates_outside_the_readable_range_are_refused_when_written() {
 }
 
 #[test]
-fn malformed_zone_offsets_are_text_errors_and_cannot_overflow() {
+fn out_of_range_zone_offsets_are_invalid_displacements_and_cannot_overflow() {
     let mut f = fixture();
     let mut s = common::admin();
     ok(
@@ -953,12 +953,13 @@ fn malformed_zone_offsets_are_text_errors_and_cannot_overflow() {
         "+25",
         "+25:00",
         "+01:60",
+        "+05030",
         "+99999999999999999999",
         "-9223372036854775807:00",
         "+1:-5",
     ] {
         let sql = format!("INSERT INTO t VALUES (1, '2024-01-01 00:00:00{off}')");
-        assert_eq!(err(&mut f.db, &mut s, &sql).sqlstate(), "22007", "{off}");
+        assert_eq!(err(&mut f.db, &mut s, &sql).sqlstate(), "22009", "{off}");
     }
     ok(
         &mut f.db,

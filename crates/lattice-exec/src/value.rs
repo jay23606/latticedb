@@ -217,10 +217,17 @@ fn datetime_failure_code(s: &str) -> &'static str {
     let mut clock_out_of_range = false;
     if !rest.is_empty() {
         let Some((clock, _)) = split_offset(rest) else {
-            return "22007";
+            return if offset_out_of_range(rest) {
+                "22009"
+            } else {
+                "22007"
+            };
         };
         fn whole(p: &str) -> &str {
             p.split_once('.').map_or(p, |(w, _)| w)
+        }
+        if clock.contains(['+', '-']) && offset_out_of_range(clock) {
+            return "22009";
         }
         let parts: Vec<&str> = clock.split(':').collect();
         if !(2..=3).contains(&parts.len()) || !parts.iter().all(|p| digits(whole(p))) {
@@ -276,44 +283,77 @@ pub(crate) fn parse_timestamp(s: &str) -> Option<i64> {
     {
         return None;
     }
-    if !frac.bytes().all(|b| b.is_ascii_digit())
-        || frac.get(6..).is_some_and(|x| x.bytes().any(|b| b != b'0'))
-    {
-        // PostgreSQL rounds beyond microseconds; the subset refuses them.
+    if !frac.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    let mut us: i64 = 0;
-    for (i, b) in frac.bytes().take(6).enumerate() {
-        us += i64::from(b - b'0') * 10i64.pow(5 - u32::try_from(i).ok()?);
-    }
+    // PostgreSQL reads the fraction as a double and rounds it to the nearest microsecond (ties to even,
+    // on the double's value), so a seventh digit rounds instead of being refused, and `.9999995` carries
+    // into the next second.
+    let us: i64 = if frac.is_empty() {
+        0
+    } else {
+        let seconds: f64 = format!("0.{frac}").parse().ok()?;
+        let micros_f = (seconds * 1_000_000.0).round_ties_even();
+        // At most 1,000,000 (a carry): the digits are a fraction below one.
+        micros_f as i64
+    };
     micros = micros.checked_add(h * 3_600_000_000 + mi * 60_000_000 + sec * 1_000_000 + us)?;
     micros = micros.checked_sub(offset_minutes.checked_mul(60_000_000)?)?;
     Some(micros)
 }
 
+/// The numeric fields of a trailing `+hh[:mm]` offset, or a colon-less one (`+h`, `+hh`, `+hmm`,
+/// `+hhmm`, ...): hours and minutes as typed, the sign, and the text before the offset. `None` when
+/// there is no such offset or it is not numeric.
+fn offset_fields(s: &str) -> Option<(&str, i64, i64, i64)> {
+    let at = s.rfind(['+', '-'])?;
+    let (body, off) = s.split_at(at);
+    let sign = if off.starts_with('-') { -1 } else { 1 };
+    let off = off.get(1..)?;
+    let (hh, mm): (i64, i64) = match off.split_once(':') {
+        Some((a, b)) => (a.parse().ok()?, b.parse().ok()?),
+        // PostgreSQL reads a colon-less offset of three or more digits as one number n, with hours
+        // n / 100 and minutes n % 100: `+0530` and `+530` are 5:30, and `+05030` is 50 hours.
+        None if off.len() >= 3 => {
+            let n: i64 = off.parse().ok()?;
+            (n / 100, n % 100)
+        }
+        None => (off.parse().ok()?, 0),
+    };
+    Some((body, sign, hh, mm))
+}
+
+/// Most PostgreSQL accepts in a zone offset: 15 hours 59 minutes either side of UTC.
+const MAX_OFFSET_HOURS: i64 = 15;
+
 fn split_offset(s: &str) -> Option<(&str, i64)> {
     if let Some(body) = s.strip_suffix(['Z', 'z']) {
         return Some((body.trim_end(), 0));
     }
-    if let Some(at) = s.rfind(['+', '-']) {
-        let (body, off) = s.split_at(at);
-        let sign = if off.starts_with('-') { -1 } else { 1 };
-        let off = off.get(1..)?;
-        let (hh, mm) = match off.split_once(':') {
-            Some((a, b)) => (a, b),
-            None if off.len() > 2 => (off.get(..2)?, off.get(2..)?),
-            None => (off, "0"),
-        };
-        let (hh, mm): (i64, i64) = (hh.parse().ok()?, mm.parse().ok()?);
-        // Offsets are at most 24 hours and 59 minutes; larger or negative-looking fields are text
-        // errors, and the arithmetic cannot overflow.
-        if !(0..=24).contains(&hh) || !(0..=59).contains(&mm) {
+    if s.rfind(['+', '-']).is_some() {
+        let (body, sign, hh, mm) = offset_fields(s)?;
+        // Larger or negative-looking fields are errors, and the arithmetic cannot overflow.
+        if !(0..=MAX_OFFSET_HOURS).contains(&hh) || !(0..=59).contains(&mm) {
             return None;
         }
         let minutes = hh.checked_mul(60)?.checked_add(mm)?;
         return Some((body.trim_end(), sign * minutes));
     }
     Some((s, 0))
+}
+
+/// Whether the sign-led tail of `s` is made only of digits, colons, signs and dots, so that an offset
+/// which failed to parse failed on its value (PostgreSQL's `22009`, invalid time zone displacement)
+/// and not on its spelling (`22007`).
+fn offset_out_of_range(s: &str) -> bool {
+    let Some(at) = s.find(['+', '-']) else {
+        return false;
+    };
+    let tail = s.get(at + 1..).unwrap_or("");
+    tail.starts_with(|c: char| c.is_ascii_digit())
+        && tail
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b':' | b'+' | b'-' | b'.'))
 }
 
 /// Days of a date as microseconds, for comparing a date with a timestamp.
