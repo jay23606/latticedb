@@ -10,7 +10,8 @@ The header is 32 bytes: ASCII `LATCAP02` (8), little-endian u32 version 2, u16 l
 u16 reserved zero, u64 required capabilities, u32 reserved zero, then u32 CRC32C of the preceding
 28 bytes. Required capability bits: bit 0 (value 1) is managed compound replay; bit 1 (value 2) is
 unknown; bit 2 (value 4) is unassigned; bit 3 (value 8, `SQL_DEFINITIONS`) is durable SQL table
-definitions (RFC 0012, pull request 414, proposed; nothing sets it yet).
+definitions (RFC 0012; `RowStore::commit_with_definitions` sets it together with bit 0 on the append that
+carries the first definition, see `formats/sql-definition-v1.md`).
 Zero and unknown bits refuse, so every reader built before bit 3 refuses a mask containing it. Records keep the
 unchanged v1 encoding and start at offset 32. Existing v1 headers/records remain byte-unchanged.
 

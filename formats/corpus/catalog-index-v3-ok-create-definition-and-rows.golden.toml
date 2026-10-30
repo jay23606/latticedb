@@ -1,0 +1,4 @@
+format = "catalog-index"
+version = 3
+status = "proposed"
+description = "Independent Python framing, RFC 0012; accepted LCIX version 3 envelope: create-definition-and-rows"

@@ -11,7 +11,9 @@ Allowed workspace dependencies: lattice-abi, lattice-seams, lattice-lsl.
 **Recovery.** Only an incomplete or checksum-failing tail of the newest segment is truncated. A complete, checksum-valid record with an unexpected LSN (a gap or a repeat), even as the last frame, makes recovery refuse the log and leaves the files untouched; `scrub` reports it as `MidLogDamage`.
 
 **Guarded WAL capabilities.** `admission::KNOWN_CAPABILITIES` is `MANAGED_COMPOUND` (1) and `SQL_DEFINITIONS` (8,
-RFC 0012). Bit 3 is defined and refused by older readers, but nothing sets it yet; values 2 and 4 stay refused.
+RFC 0012). Older readers refuse bit 3; `lattice-engines` sets it with the first SQL definition (together with bit 0)
+and lists it as supported in managed mode only. Values 2 and 4 stay refused. `Kernel::required_capabilities` reports
+the cumulative mask of the current segment.
 Format: `formats/wal-admission-v2.md`.
 
 **CRDTs.** `crdt`, `crdt_text` and `crdt_tree` converge on any set of valid operations. For input from an

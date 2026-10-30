@@ -62,6 +62,10 @@ pub lattice_core::bugs::Bug::CrdtKeyBudgetSkipped
 pub lattice_core::bugs::Bug::CrdtNodeBindingSkipped
 pub lattice_core::bugs::Bug::DdlPolicySkipped
 pub lattice_core::bugs::Bug::DedupeNotRebuilt
+pub lattice_core::bugs::Bug::DefinitionDropIgnored
+pub lattice_core::bugs::Bug::DefinitionDroppedOnReplay
+pub lattice_core::bugs::Bug::DefinitionForMissingTableAccepted
+pub lattice_core::bugs::Bug::DefinitionOfExistingTableAccepted
 pub lattice_core::bugs::Bug::DuplicateBeforeFence
 pub lattice_core::bugs::Bug::DurableLsnOvershoot
 pub lattice_core::bugs::Bug::ExecIndexPolicySkipped
@@ -72,6 +76,7 @@ pub lattice_core::bugs::Bug::FeedScanBudgetIgnored
 pub lattice_core::bugs::Bug::FeedSourcePolicyDropped
 pub lattice_core::bugs::Bug::FenceIgnored
 pub lattice_core::bugs::Bug::FenceNotRebuilt
+pub lattice_core::bugs::Bug::FormatUpgradeUnchecked
 pub lattice_core::bugs::Bug::FsyncErrorSwallowed
 pub lattice_core::bugs::Bug::FsyncFailureNotPoisoning
 pub lattice_core::bugs::Bug::GapTailTruncated
@@ -82,6 +87,7 @@ pub lattice_core::bugs::Bug::GatewayQueryStringAccepted
 pub lattice_core::bugs::Bug::GatewayRevalidationSkipped
 pub lattice_core::bugs::Bug::GrantReadOnlyTreatedAsWrite
 pub lattice_core::bugs::Bug::GrantTableMatchByPrefix
+pub lattice_core::bugs::Bug::GuardBitNotRequested
 pub lattice_core::bugs::Bug::GuardRewriteUnstaged
 pub lattice_core::bugs::Bug::HlcCounterStuck
 pub lattice_core::bugs::Bug::HlcRegress
@@ -113,6 +119,7 @@ pub lattice_core::bugs::Bug::RowReadOwnWriteIgnored
 pub lattice_core::bugs::Bug::RowRecoveryDropsDeletes
 pub lattice_core::bugs::Bug::RowScanUpperBoundIncluded
 pub lattice_core::bugs::Bug::RowTombstoneSkipped
+pub lattice_core::bugs::Bug::SecondDefinitionReplaces
 pub lattice_core::bugs::Bug::SetTagLimitSkipped
 pub lattice_core::bugs::Bug::SkipFsync
 pub lattice_core::bugs::Bug::SkipRecoverySync
@@ -153,6 +160,7 @@ pub const lattice_core::bugs::Bug::PRINCIPAL: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::RECOVERY_ORDER: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::ROW: [lattice_core::bugs::Bug; 4]
 pub const lattice_core::bugs::Bug::SQLDEF: [lattice_core::bugs::Bug; 1]
+pub const lattice_core::bugs::Bug::SQL_DEFINITIONS: [lattice_core::bugs::Bug; 7]
 pub const lattice_core::bugs::Bug::STORAGE: [lattice_core::bugs::Bug; 10]
 pub const lattice_core::bugs::Bug::TABLE_GRANTS: [lattice_core::bugs::Bug; 2]
 pub const lattice_core::bugs::Bug::VACUUM: [lattice_core::bugs::Bug; 1]
@@ -975,6 +983,7 @@ pub fn lattice_core::kernel::Kernel<I, C, R>::prepare(&mut self, lattice_core::t
 pub fn lattice_core::kernel::Kernel<I, C, R>::publish(&self, lattice_core::txn::Txn<lattice_core::txn::Applied>) -> lattice_core::kernel::Receipt
 pub fn lattice_core::kernel::Kernel<I, C, R>::read_from(&self, u64, usize) -> core::result::Result<(alloc::vec::Vec<lattice_core::record::Record>, u64), lattice_core::log::LogError>
 pub fn lattice_core::kernel::Kernel<I, C, R>::read_from_with_context(&self, u64, usize) -> core::result::Result<alloc::vec::Vec<(lattice_core::record::Record, lattice_core::admission::RecoveryContext)>, lattice_core::log::LogError>
+pub fn lattice_core::kernel::Kernel<I, C, R>::required_capabilities(&self) -> u64
 pub fn lattice_core::kernel::Kernel<I, C, R>::scrub(&self) -> core::result::Result<lattice_core::scrub::ScrubReport, lattice_core::log::LogError>
 pub fn lattice_core::kernel::Kernel<I, C, R>::settle(&mut self) -> core::result::Result<usize, lattice_core::txn::TxnError>
 pub fn lattice_core::kernel::Kernel<I, C, R>::sync(&mut self, alloc::vec::Vec<lattice_core::txn::Txn<lattice_core::txn::Logged>>) -> core::result::Result<alloc::vec::Vec<lattice_core::txn::Txn<lattice_core::txn::Durable>>, lattice_core::txn::TxnError>
@@ -1807,6 +1816,7 @@ pub fn lattice_core::kernel::Kernel<I, C, R>::prepare(&mut self, lattice_core::t
 pub fn lattice_core::kernel::Kernel<I, C, R>::publish(&self, lattice_core::txn::Txn<lattice_core::txn::Applied>) -> lattice_core::kernel::Receipt
 pub fn lattice_core::kernel::Kernel<I, C, R>::read_from(&self, u64, usize) -> core::result::Result<(alloc::vec::Vec<lattice_core::record::Record>, u64), lattice_core::log::LogError>
 pub fn lattice_core::kernel::Kernel<I, C, R>::read_from_with_context(&self, u64, usize) -> core::result::Result<alloc::vec::Vec<(lattice_core::record::Record, lattice_core::admission::RecoveryContext)>, lattice_core::log::LogError>
+pub fn lattice_core::kernel::Kernel<I, C, R>::required_capabilities(&self) -> u64
 pub fn lattice_core::kernel::Kernel<I, C, R>::scrub(&self) -> core::result::Result<lattice_core::scrub::ScrubReport, lattice_core::log::LogError>
 pub fn lattice_core::kernel::Kernel<I, C, R>::settle(&mut self) -> core::result::Result<usize, lattice_core::txn::TxnError>
 pub fn lattice_core::kernel::Kernel<I, C, R>::sync(&mut self, alloc::vec::Vec<lattice_core::txn::Txn<lattice_core::txn::Logged>>) -> core::result::Result<alloc::vec::Vec<lattice_core::txn::Txn<lattice_core::txn::Durable>>, lattice_core::txn::TxnError>

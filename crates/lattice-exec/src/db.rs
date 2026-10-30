@@ -314,6 +314,7 @@ fn authorize_ddl(policy: &ActorPolicy, tables: &[CatalogOp]) -> Result<(), ExecE
     if policy.authorize_ddl(DdlRef {
         tables,
         indexes: &[],
+        definitions: &[],
     }) {
         Ok(())
     } else {

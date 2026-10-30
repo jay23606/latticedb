@@ -559,8 +559,8 @@ unassigned-capability}.golden` (masks 8, 9 and 4) come from `tools/wal-admission
 its own CRC32C; the existing fixtures are byte-identical. `Bug::SqlDefinitionsBitDropped` (group
 `Bug::ADMISSION`) is caught by a literal required-mask witness with a clean control.
 
-**Not done.** Nothing sets bit 3: no writer, engine or `RowStore` requests or advertises it, and no
-definition payload exists. The frozen old-reader hosted job (issue 559) is separate and not run here.
+**Not done.** The frozen old-reader hosted job (issue 559) is separate and not run here. Since issue 572 the
+engine sets and lists the bit (see "SQL definitions in the engine" below).
 The owner waived the RFC 0012 seven-day comment hold in chat on 2026-10-30. No phase-gate claim.
 
 ## SQL table definition codec (RFC 0012 work package 2, issue 556)
@@ -578,11 +578,44 @@ single-bit mutation either refused or re-encoding to the mutated bytes, arbitrar
 `SqlDefColumnsSorted` (group `Bug::SQLDEF`) caught by the layout witness; the fuzz target `sqldef_decode` (seeds in
 `fuzz/seeds/sqldef_decode`, limits in `fuzz/settings.toml`) is in the nightly, weekly and 24-hour matrices.
 
-**Not done.** Nothing in the row store, the catalog or the executor calls the codec: LCIX version 3, WAL capability
-bit 3, the catalog rules, `RowStore` commit and replay, caps and the upgrade setting are later work packages, so no
-directory contains a definition and no reader needs to refuse one. The fuzz target was neither built nor run here; its
-runs, the 10,000-case and nightly property volumes, mutation testing of `sqldef.rs` and the independent review of this
-format are left to CI and to the review that follows. No Phase 2 exit criterion is claimed.
+**Not done.** The fuzz target was neither built nor run here; its runs, the 10,000-case and nightly property
+volumes, mutation testing of `sqldef.rs` and the independent review of this format are left to CI and to the review
+that follows. No Phase 2 exit criterion is claimed. The codec is now called by the catalog and the row store (next
+section).
+
+## SQL definitions in the engine (RFC 0012 work packages 3 and 4, issue 572)
+
+`lattice-engines::catalog` encodes and decodes the LCIX version 3 envelope (version 1 plus a definition block before
+the row block; a change without definitions stays version 1, byte for byte). `Catalog` keeps one definition per table id
+(defining LSN, dropped LSN, shared structure) and enforces on commit and on replay, all or nothing: the table is live after
+the same change, it has no earlier definition (the id is never reused), the structure is valid. `RowStore::commit_with_definitions`
+writes it under required capabilities 1 and 8 in one append, so the guard is durable before the record; recovery and
+`CatalogStore` list both bits, refuse a version 3 payload in a segment without mask 9, and refuse the directory on any invalid
+block. The first definition in a directory that holds records and lacks bit 3 fails with `FormatUpgradeRequired` unless
+`RowStore::set_allow_format_upgrade(true)`; a new empty directory needs nothing.
+
+Evidence (all in `cargo test -p lattice-engines --test sql_definitions`, 21 tests): an old reader (zero support, managed-only,
+callback mode) refuses a directory with a definition before any callback and without changing a byte, with the header mask read
+from the bytes as a literal 9; a change without definitions requests only bit 0; replay refusals for a version 3 envelope
+with no definition, a definition for a missing or dropped table, a second definition and an unguarded segment; independent
+LCIX version 3 vectors (3 accepted, 9 refused, strict prefixes and single-bit flips) from `formats/generate_sql_definition_golden.py`;
+a `CatalogStore` projection with `AS OF` history after drop and rename; the upgrade setting in a rows-only and a managed directory;
+and a power-cut sweep over 20 workloads (five shapes of table creation, with and without a legacy prefix, large and rolling
+segments) cut at every mutating storage operation: the outcome is no table or the table, its definition and its rows, never
+one without the others, acknowledged changes are kept, no definition survives without bit 3 in a header, and a second recovery
+agrees. Planted bugs (group `Bug::SQL_DEFINITIONS`, each with a clean control): `DefinitionDroppedOnReplay`, `GuardBitNotRequested`
+(also caught by the sweep), `SecondDefinitionReplaces`, `DefinitionForMissingTableAccepted`, `DefinitionOfExistingTableAccepted`,
+`DefinitionDropIgnored`, `FormatUpgradeUnchecked` (seven). The fuzz target `sqldef_decode` also decodes whole envelopes (selector 2 mod 3, new seeds).
+
+**Not done.** The executor does not call this: `lattice-exec` still keeps definitions in memory and `latticed` still reports
+unattached tables (issues 573 and 574). Not implemented from RFC 0012: the commit-time liveness check for row writes to a
+defined table and its marker tables (rule 5), the catalog-wide caps (owner decision 7 is open), vacuum pruning of dropped
+definitions, and `adopt_table`: definition-only adoption of an existing table is not implemented and is refused
+(`CatalogError::DefinitionNotInCreate`), so a definition can only arrive with the `Create` that the DDL grant judged;
+`TableGrantPolicy::authorize_ddl` also checks every definition by the created name or the existing id. The
+engine does not check rows against the definition (it cannot name SQL types); the executor does. The frozen-reader hosted job,
+the fuzz run, mutation testing of the new code, the 10,000-case and nightly property volumes and the independent review of the
+final diff are left to CI and the review that follows. No Phase 2 exit criterion, phase gate or release is claimed.
 
 ## psql script suite against the real binary (P2-17, issue 575)
 

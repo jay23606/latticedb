@@ -9,17 +9,27 @@
 //! the UTF-8 name. Those version 1 bytes remain unchanged. The separately identified `LCIX`
 //! version 1 envelope adds managed index definitions and optional row mutations at one commit LSN;
 //! it does not reuse the reserved typed-catalog version 2. See RFC 0005 for upgrade restrictions.
+//!
+//! `LCIX` version 3 (RFC 0012, ADR 0028) is version 1 plus one block of SQL table definitions between
+//! the index operations and the row mutations. It is written only when a change carries a definition,
+//! and only under required capabilities 1 and 8 together, so a build that does not know bit 3 refuses
+//! the directory before it reads the record. A table has at most one definition for the life of its
+//! id; it is written with the `Create` and never changed, and a drop keeps it for reads `AS OF` an
+//! earlier snapshot.
 
 use crate::index::{IndexKey, ManagedIndexDef, ManagedIndexes};
 use crate::rowops::{self, RowWrite};
+use crate::sqldef::{self, DefineTable, SqlDefError, SqlTableDef};
 use lattice_abi::{Classify, ErrorClass};
-use lattice_core::admission::MANAGED_COMPOUND;
+use lattice_core::admission::{MANAGED_COMPOUND, SQL_DEFINITIONS};
+use lattice_core::bugs::{self, Bug};
 use lattice_core::changeset::ChangeSet;
 use lattice_core::record::RecordType;
 use lattice_core::{Config, Kernel, Receipt, TxnError};
 use lattice_seams::{Clock, Io, Rng};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
 
 /// The first bytes of every catalog payload.
 pub const MAGIC: [u8; 4] = *b"LCAT";
@@ -58,6 +68,8 @@ pub struct DdlRef<'a> {
     pub tables: &'a [CatalogOp],
     /// Managed index operations in the change.
     pub indexes: &'a [IndexOp],
+    /// SQL table definitions written by the change.
+    pub definitions: &'a [DefineTable],
 }
 
 /// Why a catalog change or payload was refused.
@@ -99,6 +111,13 @@ pub enum CatalogError {
     TooLarge,
     /// A nested field is structurally valid but not the canonical compound representation.
     BadCompound(&'static str),
+    /// A table already has a definition; a definition is written once and never changes.
+    AlreadyDefined(u32),
+    /// A definition for a table that this change does not create. Defining an existing table
+    /// (adoption) is not implemented.
+    DefinitionNotInCreate(u32),
+    /// A definition, or a definition block, that the SQL definition codec refuses.
+    BadDefinition(SqlDefError),
 }
 
 impl fmt::Display for CatalogError {
@@ -231,13 +250,17 @@ pub enum IndexOp {
     },
 }
 
-/// One atomic metadata and optional row mutation under the LCIX v1 envelope.
+/// One atomic metadata and optional row mutation under the LCIX envelope: version 1, or version 3
+/// when `definitions` is not empty.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompoundChange {
     /// Existing canonical LCAT v1 table operations, applied before checking index references.
     pub tables: Vec<CatalogOp>,
     /// Managed definition operations, in their submitted order.
     pub indexes: Vec<IndexOp>,
+    /// SQL table definitions, in ascending table id. Not empty means LCIX version 3, which needs
+    /// required capabilities 1 and 8 in its segment.
+    pub definitions: Vec<DefineTable>,
     /// Row mutations, in their submitted order; the last write to a key wins.
     pub rows: Vec<RowWrite>,
 }
@@ -259,7 +282,7 @@ fn put_block(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), CatalogError> {
 
 /// Encodes the compound format. Existing LCAT and LROW bytes are unchanged.
 pub fn encode_compound(change: &CompoundChange) -> Result<Vec<u8>, CatalogError> {
-    if change.tables.is_empty() && change.indexes.is_empty() {
+    if change.tables.is_empty() && change.indexes.is_empty() && change.definitions.is_empty() {
         return Err(CatalogError::Empty);
     }
     if change.tables.len() > MAX_INDEX_OPS || change.indexes.len() > MAX_INDEX_OPS {
@@ -276,7 +299,7 @@ pub fn encode_compound(change: &CompoundChange) -> Result<Vec<u8>, CatalogError>
         rowops::encode(&change.rows).map_err(|_| CatalogError::TooLarge)?
     };
     let mut out = INDEX_MAGIC.to_vec();
-    out.push(1);
+    out.push(if change.definitions.is_empty() { 1 } else { 3 });
     put_block(&mut out, &tables)?;
     out.extend_from_slice(
         &u32::try_from(change.indexes.len())
@@ -311,6 +334,11 @@ pub fn encode_compound(change: &CompoundChange) -> Result<Vec<u8>, CatalogError>
             }
         }
     }
+    if !change.definitions.is_empty() {
+        out.extend_from_slice(
+            &sqldef::encode_ops(&change.definitions).map_err(CatalogError::BadDefinition)?,
+        );
+    }
     put_block(&mut out, &rows)?;
     if out.len() > lattice_core::record::MAX_PAYLOAD {
         return Err(CatalogError::TooLarge);
@@ -327,10 +355,11 @@ pub fn decode_compound(payload: &[u8]) -> Result<CompoundChange, CatalogError> {
     if r.take(4)? != INDEX_MAGIC {
         return Err(CatalogError::BadCompound("magic"));
     }
-    match r.u8()? {
-        1 => {}
+    let with_definitions = match r.u8()? {
+        1 => false,
+        3 => true,
         version => return Err(CatalogError::UnsupportedVersion(version)),
-    }
+    };
     let table_len = r.u32()? as usize;
     let tables = if table_len == 0 {
         Vec::new()
@@ -384,6 +413,14 @@ pub fn decode_compound(payload: &[u8]) -> Result<CompoundChange, CatalogError> {
             other => return Err(CatalogError::BadKind(other)),
         });
     }
+    let definitions = if with_definitions {
+        let (definitions, used) =
+            sqldef::decode_ops_prefix(r.rest).map_err(CatalogError::BadDefinition)?;
+        r.take(used)?;
+        definitions
+    } else {
+        Vec::new()
+    };
     let row_len = r.u32()? as usize;
     let rows = if row_len == 0 {
         Vec::new()
@@ -398,14 +435,27 @@ pub fn decode_compound(payload: &[u8]) -> Result<CompoundChange, CatalogError> {
     if !r.rest.is_empty() {
         return Err(CatalogError::Trailing);
     }
-    if tables.is_empty() && indexes.is_empty() {
+    if tables.is_empty() && indexes.is_empty() && definitions.is_empty() {
         return Err(CatalogError::Empty);
     }
     Ok(CompoundChange {
         tables,
         indexes,
+        definitions,
         rows,
     })
+}
+
+/// Capabilities a replaying consumer must see in the segment of an LCIX version 3 payload.
+pub(crate) const DEFINITION_SEGMENT: u64 = MANAGED_COMPOUND | SQL_DEFINITIONS;
+
+/// The definitions replay keeps from a decoded payload. Only the planted bug drops them.
+pub(crate) fn replayed_definitions(definitions: &[DefineTable]) -> &[DefineTable] {
+    if bugs::active(Bug::DefinitionDroppedOnReplay) {
+        &[]
+    } else {
+        definitions
+    }
 }
 
 /// The tables that exist at one version: id to name.
@@ -417,6 +467,15 @@ thread_local! {
     pub(crate) static CATALOG_CLONES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+/// The one definition of a table: when it was written, when its table was dropped, and the shared
+/// structure. It is never replaced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DefinitionRecord {
+    defined_at: u64,
+    dropped_at: Option<u64>,
+    definition: Arc<SqlTableDef>,
+}
+
 /// Every version of the catalog.
 #[derive(Debug, Default)]
 pub struct Catalog {
@@ -426,6 +485,8 @@ pub struct Catalog {
     used: BTreeSet<u32>,
     index_versions: Vec<(u64, ManagedIndexes)>,
     used_indexes: BTreeSet<u32>,
+    /// SQL definitions by table id; dropped ones stay for reads `AS OF` an earlier snapshot.
+    definitions: BTreeMap<u32, DefinitionRecord>,
 }
 
 impl Clone for Catalog {
@@ -437,6 +498,7 @@ impl Clone for Catalog {
             used: self.used.clone(),
             index_versions: self.index_versions.clone(),
             used_indexes: self.used_indexes.clone(),
+            definitions: self.definitions.clone(),
         }
     }
 }
@@ -562,7 +624,20 @@ impl Catalog {
         ops: &[CatalogOp],
         changes: &[IndexOp],
     ) -> Result<(Tables, ManagedIndexes), CatalogError> {
+        self.check_compound(ops, changes, &[])
+    }
+
+    /// [`Catalog::check_change`] for a change that also writes SQL table definitions. Every
+    /// definition must be structurally valid, belong to a table that is live after the same change's
+    /// table operations, and be the first one that table has ever had.
+    pub fn check_compound(
+        &self,
+        ops: &[CatalogOp],
+        changes: &[IndexOp],
+        definitions: &[DefineTable],
+    ) -> Result<(Tables, ManagedIndexes), CatalogError> {
         let tables = self.check_tables(ops)?;
+        self.check_definitions(ops, &tables, definitions)?;
         let mut indexes = self.indexes();
         let mut created = BTreeSet::new();
         for change in changes {
@@ -607,6 +682,79 @@ impl Catalog {
         Ok((tables, indexes))
     }
 
+    fn check_definitions(
+        &self,
+        ops: &[CatalogOp],
+        tables: &Tables,
+        definitions: &[DefineTable],
+    ) -> Result<(), CatalogError> {
+        if definitions.len() > sqldef::MAX_DEFINITIONS {
+            return Err(CatalogError::BadDefinition(SqlDefError::TooManyDefinitions));
+        }
+        let mut seen = BTreeSet::new();
+        for def in definitions {
+            let id = def.table_id;
+            if id > sqldef::MAX_TABLE_ID {
+                return Err(CatalogError::BadDefinition(SqlDefError::BadTableId(id)));
+            }
+            def.definition
+                .validate()
+                .map_err(CatalogError::BadDefinition)?;
+            if !tables.contains_key(&id) && !bugs::active(Bug::DefinitionForMissingTableAccepted) {
+                return Err(CatalogError::NoSuchTable(id));
+            }
+            let again =
+                self.definitions.contains_key(&id) && !bugs::active(Bug::SecondDefinitionReplaces);
+            if again || !seen.insert(id) {
+                return Err(CatalogError::AlreadyDefined(id));
+            }
+            // Definition-only adoption of an existing table is not implemented: it needs the
+            // applied-LSN precondition and row verification of `adopt_table`, and a policy cannot
+            // tell whose table it is from a definition alone.
+            let created_here = ops
+                .iter()
+                .any(|op| matches!(op, CatalogOp::Create { table, .. } if *table == id));
+            if !created_here && !bugs::active(Bug::DefinitionOfExistingTableAccepted) {
+                return Err(CatalogError::DefinitionNotInCreate(id));
+            }
+        }
+        Ok(())
+    }
+
+    /// The definition of a live table, or `None` when the table is undefined (a raw table, or one
+    /// created before definitions were durable) or is not live.
+    pub fn definition(&self, table: u32) -> Option<&SqlTableDef> {
+        self.definitions
+            .get(&table)
+            .filter(|record| record.dropped_at.is_none())
+            .map(|record| record.definition.as_ref())
+    }
+
+    /// The definition table `table` had as of `lsn`: written at or before it, and not dropped yet.
+    /// Rows of a dropped table stay decodable for snapshots taken before the drop.
+    pub fn definition_as_of(&self, table: u32, lsn: u64) -> Option<&SqlTableDef> {
+        self.definitions
+            .get(&table)
+            .filter(|record| {
+                record.defined_at <= lsn && record.dropped_at.is_none_or(|dropped| dropped > lsn)
+            })
+            .map(|record| record.definition.as_ref())
+    }
+
+    /// Definitions of every live table, by table id.
+    pub fn definitions(&self) -> BTreeMap<u32, &SqlTableDef> {
+        self.definitions
+            .iter()
+            .filter(|(_, record)| record.dropped_at.is_none())
+            .map(|(id, record)| (*id, record.definition.as_ref()))
+            .collect()
+    }
+
+    /// The LSN at which table `table` was defined, dropped or not.
+    pub fn defined_at(&self, table: u32) -> Option<u64> {
+        self.definitions.get(&table).map(|record| record.defined_at)
+    }
+
     /// Applies table and index metadata atomically at a single committed LSN.
     pub fn apply_change(
         &mut self,
@@ -614,14 +762,44 @@ impl Catalog {
         ops: &[CatalogOp],
         changes: &[IndexOp],
     ) -> Result<(), CatalogError> {
+        self.apply_compound(lsn, ops, changes, &[])
+    }
+
+    /// [`Catalog::apply_change`] with SQL table definitions. Nothing is published unless every
+    /// table, index and definition rule holds.
+    pub fn apply_compound(
+        &mut self,
+        lsn: u64,
+        ops: &[CatalogOp],
+        changes: &[IndexOp],
+        definitions: &[DefineTable],
+    ) -> Result<(), CatalogError> {
         if lsn <= self.applied_lsn() {
             return Err(CatalogError::OutOfOrder);
         }
-        let (tables, indexes) = self.check_change(ops, changes)?;
+        let (tables, indexes) = self.check_compound(ops, changes, definitions)?;
         for op in ops {
-            if let CatalogOp::Create { table, .. } = op {
-                self.used.insert(*table);
+            match op {
+                CatalogOp::Create { table, .. } => {
+                    self.used.insert(*table);
+                }
+                CatalogOp::Drop { table } if !bugs::active(Bug::DefinitionDropIgnored) => {
+                    if let Some(record) = self.definitions.get_mut(table) {
+                        record.dropped_at = Some(lsn);
+                    }
+                }
+                _ => {}
             }
+        }
+        for def in definitions {
+            self.definitions.insert(
+                def.table_id,
+                DefinitionRecord {
+                    defined_at: lsn,
+                    dropped_at: None,
+                    definition: Arc::new(def.definition.clone()),
+                },
+            );
         }
         for change in changes {
             if let IndexOp::Create(def) = change {
@@ -673,9 +851,11 @@ impl Classify for StoreError {
 }
 
 impl<I: Io, C: Clock, R: Rng> CatalogStore<I, C, R> {
-    /// Opens the log and rebuilds the catalog projection, explicitly admitting managed compounds.
-    /// Every LCIX envelope is decoded completely and must carry the managed segment capability;
-    /// row mutations are intentionally left to RowStore's projection.
+    /// Opens the log and rebuilds the catalog projection, explicitly admitting managed compounds and
+    /// SQL definitions. Every LCIX envelope is decoded completely and must carry the managed segment
+    /// capability, and one that carries definitions must also carry bit 3; row mutations are
+    /// intentionally left to RowStore's projection: the envelope is decoded and validated completely (the
+    /// row block included, so a malformed one refuses) but the rows are dropped, never applied or kept.
     pub fn open(io: I, clock: C, rng: R, config: &Config) -> Result<Self, StoreError> {
         let mut catalog = Catalog::new();
         let mut failure: Option<StoreError> = None;
@@ -684,7 +864,7 @@ impl<I: Io, C: Clock, R: Rng> CatalogStore<I, C, R> {
             clock,
             rng,
             config,
-            MANAGED_COMPOUND,
+            DEFINITION_SEGMENT,
             |r, context| {
                 if failure.is_some() || RecordType::from_u8(r.rtype) != Some(RecordType::ChangeSet)
                 {
@@ -709,7 +889,20 @@ impl<I: Io, C: Clock, R: Rng> CatalogStore<I, C, R> {
                         return;
                     }
                     match decode_compound(&cs.payload).and_then(|change| {
-                        catalog.apply_change(r.lsn, &change.tables, &change.indexes)
+                        if !change.definitions.is_empty()
+                            && context.required_capabilities & DEFINITION_SEGMENT
+                                != DEFINITION_SEGMENT
+                        {
+                            return Err(CatalogError::BadCompound(
+                                "definitions in a segment without capability 8",
+                            ));
+                        }
+                        catalog.apply_compound(
+                            r.lsn,
+                            &change.tables,
+                            &change.indexes,
+                            replayed_definitions(&change.definitions),
+                        )
                     }) {
                         Ok(()) => {}
                         Err(e) => {
@@ -770,6 +963,7 @@ impl<I: Io, C: Clock, R: Rng> CatalogStore<I, C, R> {
         let payload = encode_compound(&CompoundChange {
             tables: tables.clone(),
             indexes: indexes.clone(),
+            definitions: Vec::new(),
             rows: Vec::new(),
         })
         .map_err(StoreError::Invalid)?;

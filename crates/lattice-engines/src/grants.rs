@@ -327,12 +327,28 @@ impl PolicyEvaluator for TableGrantPolicy {
             }
             CatalogOp::Drop { table } => self.change_of(*table).ddl,
         });
+        // A definition is governed like the table it describes: by the name it is created under in
+        // this change, or by the grant on its existing id. Nothing is allowed on the wildcard of a
+        // placeholder id unless the grant says so.
+        let definitions = change.definitions.iter().all(|def| {
+            change
+                .tables
+                .iter()
+                .find_map(|op| match op {
+                    CatalogOp::Create { table, name } if *table == def.table_id => Some(name),
+                    _ => None,
+                })
+                .map_or_else(
+                    || self.change_of(def.table_id).ddl,
+                    |name| self.grants.access(name).ddl,
+                )
+        });
         let indexes = change.indexes.iter().all(|op| match op {
             IndexOp::Create(def) => self.change_of(def.table).ddl,
             // The index id does not say which table it covers, so only `*` may drop one.
             IndexOp::Drop { .. } => self.grants.wildcard().ddl,
         });
-        tables && indexes
+        tables && indexes && definitions
     }
 }
 
@@ -549,6 +565,45 @@ mod tests {
     }
 
     #[test]
+    fn a_definition_is_governed_like_the_table_it_describes() {
+        use crate::sqldef::{Column, DefineTable, SqlTableDef, SqlType};
+        let def = |table_id| DefineTable {
+            table_id,
+            definition: SqlTableDef {
+                columns: vec![Column {
+                    name: "id".into(),
+                    ty: SqlType::Integer,
+                    varchar_limit: 0,
+                    not_null: false,
+                    default: None,
+                }],
+                primary_key: None,
+                uniques: Vec::new(),
+            },
+        };
+        let create = |table, name: &str| CatalogOp::Create {
+            table,
+            name: name.to_string(),
+        };
+        let g = TableGrants::parse("mine=d").unwrap();
+        let p = TableGrantPolicy::resolve(&g, &tables(), ident);
+        let ask = |ops: &[CatalogOp], defs: &[DefineTable]| {
+            p.authorize_ddl(DdlRef {
+                tables: ops,
+                indexes: &[],
+                definitions: defs,
+            })
+        };
+        // A same-change create and definition is judged by the created name.
+        assert!(ask(&[create(99, "mine")], &[def(99)]));
+        assert!(!ask(&[create(99, "other")], &[def(99)]));
+        // The bypass shape: a create the actor may do, a definition for a table it has no grant on.
+        assert!(!ask(&[create(99, "mine")], &[def(1)]));
+        assert!(!ask(&[create(99, "mine")], &[def(99), def(1)]));
+        assert!(!ask(&[], &[def(1)]), "a definition alone is denied");
+    }
+
+    #[test]
     fn ddl_is_decided_by_name_and_wildcard() {
         let create = |name: &str| {
             vec![CatalogOp::Create {
@@ -560,6 +615,7 @@ mod tests {
             p.authorize_ddl(DdlRef {
                 tables: ops,
                 indexes: &[],
+                definitions: &[],
             })
         };
         let rw_only = TableGrants::parse("notes=rw").unwrap();
@@ -614,6 +670,7 @@ mod tests {
             p.authorize_ddl(DdlRef {
                 tables: &[],
                 indexes: &idx_drop,
+                definitions: &[],
             })
         };
         assert!(ask_idx(&p));
@@ -700,7 +757,7 @@ mod tests {
             prop_assert_eq!(g.access(probe).any(), expected.0 || expected.1 || expected.2);
             prop_assert_eq!(TableGrants::parse(&g.to_string()).unwrap(), g);
             // DDL: create by name, drop and rename by the table's own entry, an id with no name by `*`.
-            let ask = |ops: &[CatalogOp]| p.authorize_ddl(DdlRef { tables: ops, indexes: &[] });
+            let ask = |ops: &[CatalogOp]| p.authorize_ddl(DdlRef { tables: ops, indexes: &[], definitions: &[] });
             let star_ddl = wildcard.is_some_and(|w| w.2);
             prop_assert_eq!(ask(&[CatalogOp::Create { table: 0, name: probe.to_string() }]), expected.2);
             prop_assert_eq!(ask(&[CatalogOp::Drop { table: 5 }]), expected.2);

@@ -63,7 +63,7 @@ basis = "nesting is capped at depth 16; no byte cap, 64 KiB covers lists and lon
 
 [targets.sqldef_decode]
 max_len = 131200
-basis = "a definition body is capped at 64 KiB and a block holds up to 1024 of them; two maximal bodies in one block take 4 + 2 * (9 + 65,536) bytes plus the selector byte (131,095), so 131,200 reaches the body cap, its over-limit branch and a block of two maximal bodies, with no measured largest input"
+basis = "a definition body is capped at 64 KiB and a block holds up to 1024 of them; two maximal bodies in one block take 4 + 2 * (9 + 65,536) bytes plus the selector byte (131,095), so 131,200 reaches the body cap, its over-limit branch and a block of two maximal bodies, with no measured largest input; a selector of 2 decodes a whole LCIX envelope, whose definition block is the same size class"
 
 [targets.sync_frame]
 max_len = 1048640

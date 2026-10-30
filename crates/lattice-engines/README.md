@@ -79,10 +79,24 @@ row delete that hides writes stamped at or before it. It has no byte encoding an
 row store, the catalog or sync yet; the stored form of CRDT state is an open question in the RFC.
 Run its tests with `cargo test -p lattice-engines --lib merge`.
 
-## SQL definition codec (not wired)
+## Durable SQL table definitions (engine slice)
 
-`sqldef` (work package 2 of RFC 0012, in pull request 414, proposed; format
-[`sql-definition-v1.md`](../../formats/sql-definition-v1.md)) is a pure codec: types, a canonical encoder, a strict
-bounded decoder and a structural validator for the definition of one SQL table, and the block of definition
-operations an LCIX version 3 envelope will carry. Nothing in the catalog, the row store or the executor calls it yet.
-Run its tests with `cargo test -p lattice-engines --lib sqldef` and `cargo test -p lattice-engines --test sqldef_golden`.
+`sqldef` (RFC 0012, proposed format [`sql-definition-v1.md`](../../formats/sql-definition-v1.md)) is a pure codec:
+types, a canonical encoder, a strict bounded decoder and a structural validator for the definition of one SQL table,
+and the block of definition operations. The catalog carries that block in an LCIX version 3 envelope, in the same
+change set as the `Create`, under WAL required capabilities 1 and 8. `RowStore::commit_with_definitions` writes it
+and installs the guard in the same append, so builds that do not list bit 3 refuse the directory before any callback
+or repair. Recovery validates the block (the table is live, it is the table's first definition, structure holds) and a
+bad one refuses `open`. `Catalog::definition`, `definition_as_of`, `definitions` and `defined_at` expose what the log
+holds, and `CatalogStore` projects them without a row store (it decodes and validates the whole envelope, rows included, but applies no rows). A table has one definition for the life of its id;
+dropping the table keeps it for reads as of an earlier snapshot.
+
+The first definition in a directory that already holds records and lacks bit 3 is refused with
+`RowError::FormatUpgradeRequired` unless the host calls `RowStore::set_allow_format_upgrade(true)`; there is no
+downgrade, so take a verified backup first. A new, empty directory needs no setting.
+
+Not done here: the executor does not call any of this yet (`lattice-exec` still keeps definitions in memory),
+the commit-time check that a row write targets a live table, the catalog-wide caps, vacuum pruning of dropped
+definitions and `adopt_table` (a definition for a table the same change does not create is refused with
+`CatalogError::DefinitionNotInCreate`; definition-only adoption is not implemented).
+Run the tests with `cargo test -p lattice-engines --lib sqldef`, `--test sqldef_golden` and `--test sql_definitions`.

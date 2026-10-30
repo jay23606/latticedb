@@ -647,6 +647,12 @@ impl<I: Io, C: Clock, R: Rng> Kernel<I, C, R> {
     pub fn durable_lsn(&self) -> u64 {
         self.log.durable_lsn()
     }
+
+    /// Cumulative required engine capabilities of the segment the next record goes to. An engine
+    /// reads it to tell a directory that already carries a guard bit from one that does not.
+    pub fn required_capabilities(&self) -> u64 {
+        self.log.required_capabilities()
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,4 @@
+format = "catalog-index"
+version = 3
+status = "proposed"
+description = "Independent Python framing, RFC 0012; LCIX version 3 envelope a decoder must refuse: version-1-with-definition-block"

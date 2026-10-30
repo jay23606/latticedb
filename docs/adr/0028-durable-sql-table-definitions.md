@@ -4,10 +4,10 @@ Status: accepted
 
 Requirement P2-01, P2-02. Design discussion: [RFC 0012](../rfc/0012-durable-sql-table-definitions.md).
 Accepted by the owner in chat on 2026-10-30 (Option A, upgrade through an explicit "allow format upgrade"
-setting). The RFC's seven-day comment period (ends 2026-11-06) was not waived: code that writes the new
-format may be developed on branches, but merging it waits for the end of the period or an explicit owner
-waiver. Nothing is implemented yet. Pre-alpha name-only directories are not promised a migration, so
-adoption is a later package.
+setting). The owner waived the RFC's seven-day comment period (ends 2026-11-06) in chat on 2026-10-30.
+The engine slice (issue 572) is implemented: the codec, LCIX version 3, capability bit 3 on the writer,
+replay validation and the catalog projection. The executor, `latticed` and simulator work are later
+packages. Pre-alpha name-only directories are not promised a migration, so adoption is a later package.
 
 ## Context
 

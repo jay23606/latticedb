@@ -1,7 +1,7 @@
 # RFC 0012: Durable SQL table definitions
 
 Status: accepted
-Comment period ends: 2026-11-06 (not waived; see Acceptance)
+Comment period ends: 2026-11-06 (waived by the owner on 2026-10-30; see Acceptance)
 Decision ADR: ADR 0028
 
 ## Acceptance
@@ -17,11 +17,16 @@ unique constraint whose column set equals the primary key's or another unique's,
 identifier canonicality is "no byte `A`-`Z`; other UTF-8 kept as written, no Unicode folding" (an earlier
 "ASCII-only" wording was wrong). They are not part of the owner's answer and may be changed.
 
-The seven-day comment period was not waived. It still runs until 2026-11-06. Code that writes the new
-format may be developed and reviewed on branches before then, but merging it waits for the end of the
-period or an explicit owner waiver. The RFC 0008 `.guard` amendment (issue 307) and the catalog caps and
-read rule (decision 7) have no owner answer yet. This acceptance does not accept a checkpoint format,
-select a release or sign a phase gate.
+The owner waived the seven-day comment period in chat on 2026-10-30, so the code that writes the new
+format may merge. The RFC 0008 `.guard` amendment (issue 307) is merged and used unchanged; the catalog
+caps and read rule (decision 7) have no owner answer yet and the caps are not implemented. This acceptance
+does not accept a checkpoint format, select a release or sign a phase gate.
+
+Implementation status (issue 572, engine slice): LCIX version 3, capability bit 3 on the writer, replay
+validation, the catalog history and `CatalogStore` projection, the allow-format-upgrade setting and the
+power-cut sweep are in `lattice-engines`. Not implemented: the commit-time liveness check for row writes
+(rule 5, including marker tables), the catalog-wide caps, vacuum pruning of dropped definitions, `adopt_table`
+and the executor, `latticed` and simulator work packages. The catalog refuses a definition for a table the same change does not create (rule 2's adoption path waits for `adopt_table`).
 
 ## Motivation
 
@@ -586,8 +591,8 @@ struct layout the disk format.
    layout rule 1, capability bit 3, value 8).
 2. Issue 379 does not wait for RFC 0001 / PR 291, RFC 0001's numbers stay reserved for it, and this
    proposal takes bit 3: ANSWERED by the acceptance of Option A.
-3. Keep or waive the seven-day comment period (ends 2026-11-06): OPEN. Not waived; merging the writing
-   code waits for the end of the period or an explicit waiver.
+3. Keep or waive the seven-day comment period (ends 2026-11-06): ANSWERED 2026-10-30, waived by the
+   owner in chat.
 4. Upgrade policy for existing directories: ANSWERED, explicit "allow format upgrade" setting.
 5. Pre-alpha name-only directories: ANSWERED, no migration is promised; adoption leaves the first slice.
 6. OPEN: whether the checkpoint requirements above can be added to RFC 0002's discussion now.

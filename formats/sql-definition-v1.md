@@ -1,10 +1,11 @@
 # Format: SQL table definition v1
 
-Status: proposed. Written from RFC 0012 (Option A, accepted by the owner on 2026-10-30; the RFC and
-ADR 0028 are in pull request 414). The RFC's seven-day comment period runs until 2026-11-06 and has
-not been waived, so these bytes are not frozen and no writer produces them yet. Nothing on `main`
-calls the codec: the envelope that carries it (LCIX version 3), the WAL capability bit 3 that guards
-it and the catalog rules are separate work packages. The codec is `lattice-engines::sqldef`.
+Status: proposed. Written from RFC 0012 (Option A, accepted by the owner on 2026-10-30, who also
+waived the seven-day comment period in chat that day). The bytes are not frozen until the owner freezes
+the format; no release carries them. The codec is `lattice-engines::sqldef`. The envelope that carries
+a definition block (LCIX version 3), the WAL capability bit 3 that guards it and the catalog rules are
+implemented in `lattice-engines::catalog` and `RowStore::commit_with_definitions` (issue 572) and are
+described under "LCIX version 3 envelope" below.
 
 A definition records how the typed SQL layer reads the rows of one table. It does not contain the
 table name (that comes from the catalog operation) or the table id (the definition block carries it).
@@ -103,6 +104,47 @@ The unit an envelope carries is a block of definition operations, in ascending t
 
 Other tags are refused; the tag space is left for later kinds (views, sequences).
 
+## LCIX version 3 envelope
+
+Version 3 is the existing LCIX version 1 layout with one more block, between the index operations and the
+row mutations. Version 2 is not used (RFC 0001 reserves it). All integers are little endian.
+
+| Field | Encoding |
+|---|---|
+| magic, version | `LCIX`, u8 = 3 |
+| table operations | u32 length and canonical LCAT version 1 bytes; 0 means none |
+| index operations | u32 count (at most 4096) and the operations, as in version 1 |
+| definition operations | the definition block above: u32 count (1 through 1024) and the operations |
+| row mutations | u32 length and canonical LROW version 1 bytes; 0 means none |
+
+A change without definitions is encoded as version 1, byte for byte as before, so a directory that never
+defines a SQL table never needs the new capability. Version 3 is canonical only when the definition count is
+at least one; the envelope codec allows a version 3 payload with no table operation, but the catalog refuses it
+(see the replay rules). The decoder is strict: a successful decode re-encodes to exactly the input.
+
+Capability: a version 3 payload must sit in a segment whose required capabilities contain bit 0 (managed
+compound) and bit 3 (`SQL_DEFINITIONS`), mask 9. The writer asks for both on the append that carries the
+first definition, so the guard is durable before the record. A consumer that lists both bits replays it;
+one that does not refuses the directory before any callback or repair (`formats/wal-admission-v2.md`).
+A CRC-valid payload that claims version 3 and fails to decode or validate refuses recovery; it is never
+skipped. A version 3 payload in a segment without mask 9 refuses recovery.
+
+Replay rules, enforced the same way before append and on recovery, all or nothing per change set:
+
+- a definition needs its table created by a `Create` in the same change set. Definition-only adoption of an
+  existing table is not implemented and is refused (it needs `adopt_table`'s applied-LSN precondition and row
+  verification, and a DDL policy cannot tell whose table it is from a definition alone). The decoder still
+  accepts a version 3 envelope without table operations; the catalog rule refuses it;
+- a table has at most one definition for the life of its id; a second one, in the same change or later, is
+  refused, and a dropped table's id is never reused;
+- dropping a table marks its definition dropped at that LSN and keeps it, so reads as of an earlier
+  snapshot can still decode rows; `Rename` leaves it untouched.
+
+Upgrade: the first definition in a directory that already holds records and does not carry bit 3 needs the
+host's explicit allow-format-upgrade setting (`RowStore::set_allow_format_upgrade`). Without it the commit
+fails with `FormatUpgradeRequired` and writes nothing. A new, empty directory needs no setting. There is no
+downgrade: take a verified backup first.
+
 ## Versioning and compatibility
 
 The definition version and the layout rule are separate bytes so either can change without the other.
@@ -133,7 +175,10 @@ files in `corpus/` carry a `.golden.toml` with status `proposed` until the owner
 | `sql-definition-v1-ops-ok-*` | Blocks of two definitions and of the largest table id |
 | `sql-definition-v1-reject-*` | One input per body rule: version, layout rule, column count, type and default tags, flags, names, duplicate columns, default mismatches and ranges, non-canonical numeric and NaN, key positions, nullable and numeric keys, constraint names, sixteen uniques, trailing bytes, lengths past the end |
 | `sql-definition-v1-ops-reject-*` | One input per block rule: empty, 1025 operations, operation tag, table id over the limit, not ascending, duplicate id, body over 64 KiB, lengths past the end, trailing bytes |
+| `catalog-index-v3-ok-*` | Whole LCIX version 3 envelopes: a create with its definition, the same with a row, and a definition-only change for two existing tables |
+| `catalog-index-v3-reject-*` | Version 3 with zero definitions or no definition block, versions 2 and 4, a definition block in a version 1 envelope, a count past the end, ids not ascending, an unknown operation tag, a trailing byte |
 
-`crates/lattice-engines/tests/sqldef_golden.rs` pairs each file with a literal expected outcome. Every
+`crates/lattice-engines/tests/sqldef_golden.rs` pairs each definition file, and
+`crates/lattice-engines/tests/sql_definitions.rs` each envelope file, with a literal expected outcome. Every
 strict prefix of every accepted body and block is refused, and every single-bit flip of them is refused or re-encodes to the flipped bytes. The size boundaries (1024 and 1025 columns, 255 and 256 byte names, 65,536 and 65,537 byte bodies, 1024 and 1025 operations) are tested in the same file. The fuzz target `sqldef_decode` is seeded by
 `fuzz/seeds/generate_sqldef_seeds.py` from the same vectors.

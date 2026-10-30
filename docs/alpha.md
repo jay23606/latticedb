@@ -92,9 +92,10 @@ Committed rows and table names are recovered from the log. Column definitions ar
 table cannot be queried: `SELECT` answers `42P01` and `CREATE TABLE` of the same name answers `42P07`.
 `latticed` prints `N recovered table(s) have no column definitions` at startup. The smoke test asserts
 exactly this. The fix is the durable-definitions chain ([#379](https://github.com/moncifem/latticedb/issues/379),
-[#573](https://github.com/moncifem/latticedb/issues/573); the engine piece is in the open pull request
-[#694](https://github.com/moncifem/latticedb/pull/694)). Until it lands, use a new table name after each
-restart, or treat the data directory as scratch.
+[#573](https://github.com/moncifem/latticedb/issues/573)). Its engine piece, which persists the
+definitions under WAL capability bit 3, is on `main` ([#694](https://github.com/moncifem/latticedb/pull/694)),
+but the executor does not call it yet, so the behaviour above still holds. Until the chain lands, use a new
+table name after each restart, or treat the data directory as scratch.
 
 ## Connect an agent client
 

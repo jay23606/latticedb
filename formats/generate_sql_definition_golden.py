@@ -10,6 +10,10 @@ expected value is derived by running the code under test. Run from any directory
 Files named `sql-definition-v1-ok-*` are accepted bodies, `-ops-ok-*` accepted definition blocks and
 `-reject-*` / `-ops-reject-*` inputs a conforming decoder must refuse. The Rust test
 `crates/lattice-engines/tests/sqldef_golden.rs` pairs each file with its literal expected outcome.
+
+Files named `catalog-index-v3-*` are whole LCIX version 3 envelopes (the definition block between the
+index operations and the row mutations); `crates/lattice-engines/tests/sql_definitions.rs` pairs them
+with literal expected outcomes.
 """
 import argparse
 import struct
@@ -244,6 +248,55 @@ def reject_blocks():
     }
 
 
+def lcat_create(table_id, name):
+    """Canonical LCAT version 1 with one Create operation."""
+    return b"LCAT" + u8(1) + u32(1) + u8(1) + u32(table_id) + sized(name.encode())
+
+
+def lrow_put(table_id, key, value):
+    """Canonical LROW version 1 with one put."""
+    return b"LROW" + u8(1) + u32(1) + u32(table_id) + sized(key) + u8(1) + sized(value)
+
+
+def lcix(version, tables=b"", index_count=0, definitions=b"", rows=b"", tail=b""):
+    """LCIX envelope: magic, version, table block, index count, definition block, row block."""
+    return b"LCIX" + u8(version) + sized(tables) + u32(index_count) + definitions + sized(rows) + tail
+
+
+def envelope_ok():
+    d = block([define_op(7, MINIMAL)])
+    return {
+        "create-and-definition": lcix(3, tables=lcat_create(7, "items"), definitions=d),
+        "create-definition-and-rows": lcix(
+            3,
+            tables=lcat_create(7, "items"),
+            definitions=d,
+            rows=lrow_put(7, b"a", b"x"),
+        ),
+        "definition-only": lcix(3, definitions=block([define_op(5, MINIMAL), define_op(9, composite())])),
+    }
+
+
+def envelope_reject():
+    d = block([define_op(7, MINIMAL)])
+    good = lcix(3, tables=lcat_create(7, "items"), definitions=d)
+    return {
+        # A change without definitions is version 1; version 3 needs at least one.
+        "zero-definitions": lcix(3, tables=lcat_create(7, "items"), definitions=u32(0)),
+        "version-2": lcix(2, tables=lcat_create(7, "items"), definitions=d),
+        "version-4": lcix(4, tables=lcat_create(7, "items"), definitions=d),
+        # Version 1 keeps its layout: a definition block there is read as the row length and fails.
+        "version-1-with-definition-block": lcix(1, tables=lcat_create(7, "items"), definitions=d),
+        "definition-count-past-end": lcix(3, tables=lcat_create(7, "items"), definitions=u32(2) + d[4:]),
+        "definition-ids-not-ascending": lcix(
+            3, definitions=block([define_op(9, MINIMAL), define_op(5, MINIMAL)])
+        ),
+        "definition-unknown-op-tag": lcix(3, definitions=block([define_op(7, MINIMAL, tag=2)])),
+        "definition-block-missing": b"LCIX" + u8(3) + sized(lcat_create(7, "items")) + u32(0) + sized(b""),
+        "trailing-byte": good + b"\x00",
+    }
+
+
 def files():
     out = {}
     for name, data in ok_bodies().items():
@@ -254,10 +307,21 @@ def files():
         out[f"sql-definition-v1-ops-ok-{name}"] = (data, f"accepted definition block: {name}")
     for name, data in reject_blocks().items():
         out[f"sql-definition-v1-ops-reject-{name}"] = (data, f"definition block a decoder must refuse: {name}")
+    for name, data in envelope_ok().items():
+        out[f"catalog-index-v3-ok-{name}"] = (data, f"accepted LCIX version 3 envelope: {name}")
+    for name, data in envelope_reject().items():
+        out[f"catalog-index-v3-reject-{name}"] = (data, f"LCIX version 3 envelope a decoder must refuse: {name}")
     return out
 
 
-def meta(description):
+def meta(description, stem=""):
+    if stem.startswith("catalog-index-v3"):
+        return (
+            'format = "catalog-index"\n'
+            "version = 3\n"
+            f'status = "{STATUS}"\n'
+            f'description = "Independent Python framing, RFC 0012; {description}"\n'
+        )
     return (
         'format = "sql-definition"\n'
         "version = 1\n"
@@ -272,7 +336,7 @@ def main():
     args = parser.parse_args()
     bad = []
     for stem, (data, description) in files().items():
-        for suffix, content in ((".golden", data), (".golden.toml", meta(description).encode())):
+        for suffix, content in ((".golden", data), (".golden.toml", meta(description, stem).encode())):
             path = CORPUS / (stem + suffix)
             if args.check:
                 if not path.exists() or path.read_bytes() != content:

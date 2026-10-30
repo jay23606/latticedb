@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Seeds for the sqldef_decode fuzz target, framed by the independent golden generator (no Rust codec).
 
-Each seed is one selector byte read by fuzz_targets/sqldef_decode.rs (even: definition body, odd:
-definition block) followed by the payload. --check verifies tracked bytes without writing them.
+Each seed is one selector byte read by fuzz_targets/sqldef_decode.rs (0: definition body, 1:
+definition block, 2: whole LCIX envelope, the selector taken modulo 3) followed by the payload. --check verifies tracked bytes without writing them.
 """
 import argparse
 import importlib.util
@@ -26,6 +26,7 @@ BODY_REJECTS = [
     "default-length-past-end",
     "column-count-past-end",
 ]
+ENVELOPE_REJECTS = ["zero-definitions", "version-2", "definition-ids-not-ascending", "trailing-byte"]
 BLOCK_REJECTS = ["empty", "not-ascending", "duplicate-id", "table-id-over-limit", "body-over-64kib", "count-past-end"]
 
 
@@ -41,6 +42,11 @@ def seeds():
     rejects = GOLDEN.reject_blocks()
     for name in BLOCK_REJECTS:
         out[f"sqldef_decode/block-reject-{name}"] = b"\x01" + rejects[name]
+    for name, data in GOLDEN.envelope_ok().items():
+        out[f"sqldef_decode/envelope-{name}"] = b"\x02" + data
+    rejects = GOLDEN.envelope_reject()
+    for name in ENVELOPE_REJECTS:
+        out[f"sqldef_decode/envelope-reject-{name}"] = b"\x02" + rejects[name]
     return out
 
 

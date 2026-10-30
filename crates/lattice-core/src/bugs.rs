@@ -239,6 +239,25 @@ planted_bugs! {
     /// The MCP backend writes stored row text outside the fixed untrusted envelope, so an agent
     /// cannot tell data from the server's own words (prompt injection, N-11).
     McpRowTextOutsideEnvelope,
+    /// Recovery decodes the definition blocks of the log but does not keep them in the catalog,
+    /// so a table created with a definition comes back without one.
+    DefinitionDroppedOnReplay,
+    /// A commit that carries definitions requests only the managed-compound capability, so its
+    /// segment guard lacks bit 3 and an older reader would replay definitions it cannot read.
+    GuardBitNotRequested,
+    /// The catalog accepts a second definition for a table and keeps the newer one, although a
+    /// definition is written once at creation and never changes.
+    SecondDefinitionReplaces,
+    /// The catalog accepts a definition for a table that is not live after the same change.
+    DefinitionForMissingTableAccepted,
+    /// Dropping a table leaves its definition marked live in the current catalog.
+    DefinitionDropIgnored,
+    /// A definition for a table the same change does not create is accepted (adoption of an
+    /// existing table, which is not implemented and would bypass the create-time DDL grant).
+    DefinitionOfExistingTableAccepted,
+    /// The first definition in a directory written before bit 3 existed is accepted without the
+    /// explicit format-upgrade setting.
+    FormatUpgradeUnchecked,
 }
 
 impl Bug {
@@ -282,6 +301,18 @@ impl Bug {
 
     /// SQL definition codec defects, detected by the layout witness in `lattice-engines::sqldef`.
     pub const SQLDEF: [Bug; 1] = [Bug::SqlDefColumnsSorted];
+
+    /// Durable SQL definition defects (RFC 0012), detected by the witnesses in
+    /// `lattice-engines/tests/sql_definitions.rs`.
+    pub const SQL_DEFINITIONS: [Bug; 7] = [
+        Bug::DefinitionOfExistingTableAccepted,
+        Bug::DefinitionDroppedOnReplay,
+        Bug::GuardBitNotRequested,
+        Bug::SecondDefinitionReplaces,
+        Bug::DefinitionForMissingTableAccepted,
+        Bug::DefinitionDropIgnored,
+        Bug::FormatUpgradeUnchecked,
+    ];
 
     /// Strict HLC snapshot defects, detected by the focused retention witness.
     pub const HLC_SNAPSHOT: [Bug; 1] = [Bug::HlcSnapshotClamped];
@@ -427,6 +458,7 @@ impl Bug {
         &Bug::HLC_SNAPSHOT,
         &Bug::KEY_LIMIT,
         &Bug::SQLDEF,
+        &Bug::SQL_DEFINITIONS,
         &Bug::FENCE_ORDER,
         &Bug::RECOVERY_ORDER,
         &Bug::NON_PREFIX,

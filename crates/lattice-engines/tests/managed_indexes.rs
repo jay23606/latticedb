@@ -73,6 +73,7 @@ fn golden_change() -> CompoundChange {
             name: "items".into(),
         }],
         indexes: vec![IndexOp::Create(definition(9, 7, IndexKey::WholeValue))],
+        definitions: Vec::new(),
         rows: vec![
             ((7, b"a".to_vec()), Some(b"x".to_vec())),
             ((7, b"b".to_vec()), None),
@@ -1026,6 +1027,7 @@ fn row_count_does_not_inherit_the_index_operation_limit() {
     let change = CompoundChange {
         tables: vec![table(7)],
         indexes: Vec::new(),
+        definitions: Vec::new(),
         rows: (0u32..4097)
             .map(|id| ((7, id.to_le_bytes().to_vec()), None))
             .collect(),

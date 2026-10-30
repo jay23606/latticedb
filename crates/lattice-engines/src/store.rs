@@ -28,8 +28,9 @@ use crate::limits::{
 };
 use crate::mvcc::{MvccError, Snapshot, Table, Tx};
 use crate::rowops::{self, RowKey, RowOpsError};
+use crate::sqldef::DefineTable;
 use lattice_abi::{Classify, ErrorClass, Hlc};
-use lattice_core::admission::MANAGED_COMPOUND;
+use lattice_core::admission::{MANAGED_COMPOUND, SQL_DEFINITIONS};
 use lattice_core::bugs::{self, Bug};
 use lattice_core::changeset::{ChangeSet, ChangeSetId};
 use lattice_core::record::RecordType;
@@ -127,6 +128,9 @@ pub enum RowError {
     PermissionDenied,
     /// The catalog or managed index definition change is invalid; nothing was written.
     InvalidCatalog(CatalogError),
+    /// The first SQL definition would turn a data directory written by an earlier build into one
+    /// those builds cannot open, and the explicit format-upgrade setting is off. Nothing was written.
+    FormatUpgradeRequired,
     /// The writes do not fit the payload format.
     Encode(RowOpsError),
     /// A row key is longer than [`rowops::MAX_KEY_BYTES`], the bound the change feed can carry.
@@ -163,6 +167,11 @@ impl fmt::Display for RowError {
             RowError::Corrupt(why) => write!(f, "row data corrupt: {why}"),
             RowError::InvalidIndexes(why) => write!(f, "invalid index definitions: {why}"),
             RowError::InvalidCatalog(error) => write!(f, "invalid catalog change: {error}"),
+            RowError::FormatUpgradeRequired => f.write_str(
+                "this data directory was written before SQL table definitions existed; writing the \
+                 first one makes it unreadable by earlier builds and has no downgrade. Take a \
+                 verified backup, then enable the allow-format-upgrade setting",
+            ),
             RowError::Encode(e) => write!(f, "cannot encode writes: {e:?}"),
             RowError::KeyTooLong { len, max } => {
                 write!(f, "row key of {len} bytes exceeds the {max} byte limit")
@@ -185,6 +194,7 @@ impl Classify for RowError {
             | RowError::Limit(_)
             | RowError::InvalidIndexes(_)
             | RowError::PermissionDenied
+            | RowError::FormatUpgradeRequired
             | RowError::InvalidCatalog(_) => ErrorClass::Rejected,
         }
     }
@@ -289,6 +299,9 @@ pub struct RowStore<I: Io, C: Clock, R: Rng> {
     /// The author of each retained commit that has one. Commits by `AUTHOR_UNKNOWN` (all history
     /// from before authors were recorded) have no entry, so a legacy log costs nothing.
     commit_authors: std::collections::BTreeMap<u64, u128>,
+    /// Whether the host explicitly allowed the first SQL definition to upgrade a directory that
+    /// earlier builds can still open (RFC 0012). Off by default.
+    allow_format_upgrade: bool,
     stale: bool,
 }
 
@@ -324,7 +337,13 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         let mut commit_times: Vec<(Hlc, u64, ChangeSetId)> = Vec::new();
         let mut commit_authors = std::collections::BTreeMap::new();
         let mut failure: Option<RowError> = None;
-        let supported = if legacy_indexes { 0 } else { MANAGED_COMPOUND };
+        // Managed mode understands definitions and validates them at replay; callback mode
+        // advertises nothing, so guarded history refuses before any callback runs.
+        let supported = if legacy_indexes {
+            0
+        } else {
+            catalog::DEFINITION_SEGMENT
+        };
         let (kernel, _, _) = Kernel::open_streaming_with_capabilities(
             io,
             clock,
@@ -362,16 +381,30 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                         let change = catalog::decode_compound(&cs.payload).map_err(|e| {
                             RowError::Corrupt(format!("compound at lsn {}: {e}", r.lsn))
                         })?;
+                        if !change.definitions.is_empty()
+                            && context.required_capabilities & catalog::DEFINITION_SEGMENT
+                                != catalog::DEFINITION_SEGMENT
+                        {
+                            return Err(RowError::Corrupt(format!(
+                                "definitions in a segment without capability 8 at lsn {}",
+                                r.lsn
+                            )));
+                        }
                         // Validate against the recovered catalog by borrow; it is only changed once
                         // every later step of this record has succeeded.
                         let (_, definitions) = catalog
-                            .check_change(&change.tables, &change.indexes)
+                            .check_compound(&change.tables, &change.indexes, &change.definitions)
                             .map_err(|e| {
                                 RowError::Corrupt(format!("catalog at lsn {}: {e}", r.lsn))
                             })?;
                         (
                             change.rows,
-                            Some((change.tables, change.indexes, definitions)),
+                            Some((
+                                change.tables,
+                                change.indexes,
+                                definitions,
+                                change.definitions,
+                            )),
                         )
                     } else if catalog::is_catalog_payload(&cs.payload) {
                         let ops = catalog::decode(&cs.payload).map_err(|e| {
@@ -380,7 +413,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                         let (_, definitions) = catalog.check_change(&ops, &[]).map_err(|e| {
                             RowError::Corrupt(format!("catalog at lsn {}: {e}", r.lsn))
                         })?;
-                        (Vec::new(), Some((ops, Vec::new(), definitions)))
+                        (Vec::new(), Some((ops, Vec::new(), definitions, Vec::new())))
                     } else if rowops::is_row_payload(&cs.payload) {
                         (
                             rowops::decode(&cs.payload).map_err(|e| {
@@ -394,7 +427,8 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                     if bugs::active(Bug::RowRecoveryDropsDeletes) {
                         writes.retain(|(_, value)| value.is_some());
                     }
-                    if let Some((table_ops, index_ops, definitions)) = next_catalog {
+                    if let Some((table_ops, index_ops, definitions, sql_definitions)) = next_catalog
+                    {
                         let definitions = if bugs::active(Bug::ManagedIndexesNotRecovered) {
                             Default::default()
                         } else {
@@ -408,7 +442,12 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                             .apply_catalog(r.lsn, cs.id, changes, definitions)
                             .map_err(mvcc_error)?;
                         catalog
-                            .apply_change(r.lsn, &table_ops, &index_ops)
+                            .apply_compound(
+                                r.lsn,
+                                &table_ops,
+                                &index_ops,
+                                catalog::replayed_definitions(&sql_definitions),
+                            )
                             .map_err(|e| {
                                 RowError::Corrupt(format!("catalog at lsn {}: {e}", r.lsn))
                             })?;
@@ -446,6 +485,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                 commit_lsn,
                 commit_times,
                 commit_authors,
+                allow_format_upgrade: false,
                 stale: false,
             }),
         }
@@ -503,7 +543,36 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
         tables: Vec<CatalogOp>,
         indexes: Vec<IndexOp>,
     ) -> Result<u64, RowError> {
-        if tables.is_empty() && indexes.is_empty() {
+        self.commit_with_definitions(tx, tables, indexes, Vec::new())
+    }
+
+    /// Allows the first SQL table definition to upgrade a data directory that earlier builds can
+    /// still open (RFC 0012, ADR 0028). Writing the definition adds required capability 8 to the
+    /// log; builds that do not list it refuse the directory afterwards and there is no downgrade, so
+    /// the host must have a verified backup. Off by default. A new, empty directory never needs it.
+    pub fn set_allow_format_upgrade(&mut self, allow: bool) {
+        self.allow_format_upgrade = allow;
+    }
+
+    /// Whether [`RowStore::set_allow_format_upgrade`] is on.
+    pub fn allow_format_upgrade(&self) -> bool {
+        self.allow_format_upgrade
+    }
+
+    /// [`RowStore::commit_with_catalog`] that also writes SQL table definitions in the same change
+    /// set (LCIX version 3, required capabilities 1 and 8). Each definition needs its table live
+    /// after the change's table operations and may be the table's first. The guard bit is installed
+    /// by the same append, before the record, so an older reader refuses the directory. A directory
+    /// that already holds records and lacks bit 3 is refused with [`RowError::FormatUpgradeRequired`]
+    /// unless [`RowStore::set_allow_format_upgrade`] is on. Callback mode cannot write definitions.
+    pub fn commit_with_definitions<P: PolicyEvaluator>(
+        &mut self,
+        tx: RowTx<P>,
+        tables: Vec<CatalogOp>,
+        indexes: Vec<IndexOp>,
+        definitions: Vec<DefineTable>,
+    ) -> Result<u64, RowError> {
+        if tables.is_empty() && indexes.is_empty() && definitions.is_empty() {
             return self.commit(tx);
         }
         // DDL needs its own grant: row access never implies it, and an index build reads rows the
@@ -513,6 +582,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
             && !tx.policy.authorize_ddl(DdlRef {
                 tables: &tables,
                 indexes: &indexes,
+                definitions: &definitions,
             })
         {
             return Err(RowError::PermissionDenied);
@@ -525,41 +595,55 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
                 "callback mode cannot write managed compound changes".into(),
             ));
         }
+        if !definitions.is_empty()
+            && self.kernel.durable_lsn() > 0
+            && self.kernel.required_capabilities() & SQL_DEFINITIONS == 0
+            && !self.allow_format_upgrade
+            && !bugs::active(Bug::FormatUpgradeUnchecked)
+        {
+            return Err(RowError::FormatUpgradeRequired);
+        }
         self.check_snapshot(tx.snapshot())?;
         self.authorize_staged(&tx)?;
         if !bugs::active(Bug::RowConflictCheckSkipped) {
             tx.inner.check(&self.table).map_err(mvcc_error)?;
         }
-        let (_, definitions) = self
+        let (_, managed) = self
             .catalog
-            .check_change(&tables, &indexes)
+            .check_compound(&tables, &indexes, &definitions)
             .map_err(RowError::InvalidCatalog)?;
         let RowTx { inner, author, .. } = tx;
         let writes = inner.into_writes();
         check_key_lengths(&writes)?;
         let changes = self
             .indexes
-            .catalog_changes_for(&self.table, &writes, &definitions)
+            .catalog_changes_for(&self.table, &writes, &managed)
             .map_err(mvcc_error)?;
         let payload = catalog::encode_compound(&CompoundChange {
             tables: tables.clone(),
             indexes: indexes.clone(),
+            definitions: definitions.clone(),
             rows: writes.clone(),
         })
         .map_err(RowError::InvalidCatalog)?;
+        let required = if definitions.is_empty() || bugs::active(Bug::GuardBitNotRequested) {
+            MANAGED_COMPOUND
+        } else {
+            catalog::DEFINITION_SEGMENT
+        };
         let id = self.kernel.new_id();
         match self
             .kernel
-            .commit_with_capabilities(change_set(id, payload, author), MANAGED_COMPOUND)
+            .commit_with_capabilities(change_set(id, payload, author), required)
         {
             Ok(Receipt::Recorded { lsn, hlc }) => {
                 let applied = (|| {
                     self.table.apply(lsn, id, writes).map_err(mvcc_error)?;
                     self.indexes
-                        .apply_catalog(lsn, id, changes, definitions)
+                        .apply_catalog(lsn, id, changes, managed)
                         .map_err(mvcc_error)?;
                     self.catalog
-                        .apply_change(lsn, &tables, &indexes)
+                        .apply_compound(lsn, &tables, &indexes, &definitions)
                         .map_err(|e| {
                             RowError::Corrupt(format!("catalog apply after commit: {e}"))
                         })?;
