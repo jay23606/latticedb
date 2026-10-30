@@ -1,0 +1,39 @@
+CREATE TABLE
+INSERT 0 1
+INSERT 0 2
+id|name|qty|ok
+1|bolt|10|t
+2|nut|[null]|f
+3|washer|7|[null]
+(3 rows)
+UPDATE 1
+UPDATE 0
+UPDATE 2
+id|qty|ok
+1|11|t
+2|[null]|f
+3|7|t
+(3 rows)
+DELETE 1
+DELETE 0
+id|name
+1|bolt
+3|washer
+(2 rows)
+id|name|qty
+4|pin|[null]
+(1 row)
+INSERT 0 1
+id|qty
+4|1
+(1 row)
+UPDATE 1
+name
+pin
+(1 row)
+DELETE 1
+DELETE 2
+id|name|qty|ok
+(0 rows)
+DROP TABLE
+ERROR:  42P01

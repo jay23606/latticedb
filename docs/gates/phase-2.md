@@ -583,3 +583,59 @@ bit 3, the catalog rules, `RowStore` commit and replay, caps and the upgrade set
 directory contains a definition and no reader needs to refuse one. The fuzz target was neither built nor run here; its
 runs, the 10,000-case and nightly property volumes, mutation testing of `sqldef.rs` and the independent review of this
 format are left to CI and to the review that follows. No Phase 2 exit criterion is claimed.
+
+## psql script suite against the real binary (P2-17, issue 575)
+
+`tests/drivers/psql/` holds psql scripts that a CI job (`driver-psql`, path-filtered to `latticed`,
+`lattice-api`, `lattice-exec` and the suite itself) runs against the release-built `latticed --data-dir`.
+`run.sh` starts the server (the stdin FIFO and `shutdown` path of the README quickstart), feeds each
+`NN_*.sql` to psql, and diffs stdout and stderr with the checked-in `NN_*.expected`. `scram_tls.sh` builds
+a throwaway CA, a server certificate and a SCRAM verifier (openssl, and PBKDF2/HMAC from the Python
+standard library following RFC 5802 and 7677, not latticed's code) and starts `--auth scram-tls`.
+`selftest.sh` checks the runner can fail. The job fails when no script matched, when the server did not
+start or did not exit 0 after `shutdown`, when a case in `known/` starts to pass or changes to other output, and when the self-test
+cannot turn the run red.
+
+The expected files were written by hand from PostgreSQL's documented psql output and command tags, not
+recorded from `latticed`. As an independent check, each of them (the known cases included) was also run
+once against a real PostgreSQL 17.11 server with psql 17.11 and matched byte for byte. That check is not
+part of CI, which needs no PostgreSQL server.
+
+| Script | Covers | Result |
+|---|---|---|
+| `01_ddl_dml` | `CREATE`/`DROP TABLE`, multi-row `INSERT`, `UPDATE`, `DELETE`, `RETURNING`, command tags with row counts | pass |
+| `02_select` | predicates, `NULL` logic, `IN`/`BETWEEN`/`LIKE`, `ORDER BY ... NULLS`, `LIMIT`/`OFFSET`, `coalesce`, `nullif`, operators | pass |
+| `03_transactions` | commit, rollback, the aborted state (`25P02`) and `COMMIT` answering `ROLLBACK`, recovery of the connection | pass |
+| `04_errors` | `42601`, `42P01`, `42703`, `42P07`, `23502`, `23505`, `22001`, `22003`, `22012`, `22P02` | pass |
+| `05_extended` | psql `\bind`: Parse/Bind/Execute with text parameters, `RETURNING`, errors, an aborted block | pass |
+| `06_types` | smallint, bigint, double, text, varchar, bytea, date, uuid, timestamptz round trip; range, date, uuid errors | pass |
+| `scram_tls.sh` | SCRAM-SHA-256 over TLS with `sslmode=verify-full`: correct password runs SQL; wrong password and unknown account get the same `FATAL: password authentication failed`; untrusted CA, wrong host name and no TLS are refused | pass |
+| `known/restart_a` | write, then `shutdown` exits 0 | pass |
+
+Run locally (not in CI yet at the time of writing): a debug build of `latticed` at `47484d3d` with psql
+18.6 (libpq) and with psql 17.11, loopback and SCRAM over TLS, plus the self-test, all as listed above.
+The CI job prints the exact client version into its step summary; the first CI result and its psql
+version (expected: the client on `ubuntu-latest`, PostgreSQL 16) are recorded here when the run exists.
+
+**Known gaps, listed and not hidden.** Each is a case in `tests/drivers/psql/known/` that must still
+equal the latticed output pinned next to it in a `.latticed` file, checked by hand against the issue. The run turns red when a case starts to match PostgreSQL, and also when its output changes to anything else:
+
+- Restart: after `shutdown` and a start on the same data directory the table is unknown, so the rows
+  written before are not queryable (`known/restart_b`, #573; today `42P01`).
+- `COMMIT` or `ROLLBACK` outside a block and `BEGIN` inside one send no `WARNING` (`25P01`, `25001`)
+  (`known/03_transaction_misuse`, #674).
+- An unknown type name answers `0A000` instead of `42704` (`known/04_unknown_type`, #675).
+
+**Not covered, and why.**
+
+- Cancellation by a psql signal (Ctrl-C): `latticed` has no sleep function and no statement whose
+  duration a script controls, so a signal test would race the statement. Cooperative cancellation is
+  covered by the socket tests in `lattice-api` and `latticed`.
+- The SQLSTATE `28P01` of a refused login: psql shows the SQLSTATE of a query error but not of a
+  connection failure, so `psql_scram_tls_wrong_password_fails_with_28P01` checks libpq's
+  `FATAL:  password authentication failed` and psql exit status 2, not the code.
+- `date - date` and `date + integer` answer `42804` ("arithmetic is not defined for date"); the subset
+  does not list date arithmetic, so no script asserts it.
+- Binary result formats, `PREPARE`/`EXECUTE` (refused by the executor), `COPY`, other clients and
+  drivers (#413, #576). This is one client, libpq's psql, and no driver conformance is claimed. No Phase 2
+  exit criterion is claimed.

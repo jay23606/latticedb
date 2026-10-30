@@ -1,0 +1,11 @@
+id|name
+1|before the restart
+2|also kept
+(2 rows)
+INSERT 0 1
+id
+1
+2
+3
+(3 rows)
+DROP TABLE

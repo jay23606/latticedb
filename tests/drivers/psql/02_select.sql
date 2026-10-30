@@ -1,0 +1,21 @@
+-- Predicates, three-valued logic, ordering, limits and scalar expressions.
+CREATE TABLE s02_t (id INT PRIMARY KEY, grp TEXT, n INT, f DOUBLE PRECISION);
+INSERT INTO s02_t VALUES (1, 'a', 10, 1.5), (2, 'a', NULL, 2.5), (3, 'b', 30, NULL), (4, 'b', 20, 0.5), (5, NULL, 5, 4);
+SELECT id FROM s02_t WHERE n > 5 ORDER BY id;
+SELECT id FROM s02_t WHERE grp = 'a' OR n = 5 ORDER BY id;
+SELECT id FROM s02_t WHERE NOT (n > 5) ORDER BY id;
+SELECT id FROM s02_t WHERE n IS NULL;
+SELECT id FROM s02_t WHERE grp IS NOT NULL AND id IN (1, 3, 5) ORDER BY id;
+SELECT id FROM s02_t WHERE n BETWEEN 10 AND 20 ORDER BY id;
+SELECT id FROM s02_t WHERE grp LIKE 'a%' ORDER BY id;
+SELECT id, n FROM s02_t ORDER BY n DESC NULLS LAST, id;
+SELECT id, n FROM s02_t ORDER BY n NULLS FIRST, id;
+SELECT id FROM s02_t ORDER BY id LIMIT 2 OFFSET 1;
+SELECT id, n * 2 AS dbl, n + 1 AS inc FROM s02_t WHERE id <= 2 ORDER BY id;
+SELECT id, coalesce(n, -1) AS c, nullif(grp, 'a') AS ng FROM s02_t ORDER BY id;
+SELECT upper(grp) || '-' || id::text AS label FROM s02_t WHERE grp IS NOT NULL ORDER BY id;
+SELECT * FROM s02_t WHERE id = 3;
+SELECT f FROM s02_t WHERE id IN (1, 5) ORDER BY id;
+SELECT 1 + 2 AS three, 'x' || 'y' AS xy, 7 / 2 AS idiv, 7 % 3 AS m, 1 = 1 AS yes;
+SELECT length('hello') AS len, lower('ABC') AS low, abs(-4) AS a;
+DROP TABLE s02_t;

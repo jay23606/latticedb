@@ -1,0 +1,7 @@
+CREATE TABLE
+INSERT 0 1
+id|note
+1|over tls
+(1 row)
+ERROR:  42P01
+DROP TABLE

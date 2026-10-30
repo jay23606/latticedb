@@ -4,7 +4,7 @@
 handler answers `SELECT 1` and other SQL returns `0A000`; with `--data-dir` it serves the
 single-table SQL executor over a durable log (see below). Simple and extended query framing are handled by the existing
 session. The default is explicit development trust on loopback. Configured SCRAM mode requires
-TLS and refuses plaintext startup or trust fallback. The five-driver matrix is not established (#413). CancelRequest routes a cooperative token and cannot preempt blocking I/O.
+TLS and refuses plaintext startup or trust fallback. The five-driver matrix is not established (#413); one client, psql, is run against the real binary by `tests/drivers/psql` (see the Phase 2 gate page). CancelRequest routes a cooperative token and cannot preempt blocking I/O.
 
 ```sh
 cargo run -p latticed -- --auth development-trust --listen 127.0.0.1:5432 --max-connections 32

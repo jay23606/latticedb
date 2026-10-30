@@ -1,0 +1,29 @@
+CREATE TABLE
+INSERT 0 1
+i|b|f|t|v|y|d|u|ts|ok
+32767|9223372036854775807|0.1|héllo|abcd|\x00ff41|2024-02-29|a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11|2024-01-02 01:04:05+00|t
+(1 row)
+ERROR:  22003
+ERROR:  22003
+ERROR:  22003
+ERROR:  22008
+ERROR:  22P02
+earlier
+t
+(1 row)
+s
+0.30000000000000004
+(1 row)
+n
+2.75
+(1 row)
+a|b|c|d
+[null]|f|t|[null]
+(1 row)
+twelve_plus_one
+13
+(1 row)
+i|b
+32767|9223372036854775807
+(1 row)
+DROP TABLE

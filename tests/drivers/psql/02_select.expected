@@ -1,0 +1,79 @@
+CREATE TABLE
+INSERT 0 5
+id
+1
+3
+4
+(3 rows)
+id
+1
+2
+5
+(3 rows)
+id
+5
+(1 row)
+id
+2
+(1 row)
+id
+1
+3
+(2 rows)
+id
+1
+4
+(2 rows)
+id
+1
+2
+(2 rows)
+id|n
+3|30
+4|20
+1|10
+5|5
+2|[null]
+(5 rows)
+id|n
+2|[null]
+5|5
+1|10
+4|20
+3|30
+(5 rows)
+id
+2
+3
+(2 rows)
+id|dbl|inc
+1|20|11
+2|[null]|[null]
+(2 rows)
+id|c|ng
+1|10|[null]
+2|-1|[null]
+3|30|b
+4|20|b
+5|5|[null]
+(5 rows)
+label
+A-1
+A-2
+B-3
+B-4
+(4 rows)
+id|grp|n|f
+3|b|30|[null]
+(1 row)
+f
+1.5
+4
+(2 rows)
+three|xy|idiv|m|yes
+3|xy|3|1|t
+(1 row)
+len|low|a
+5|abc|4
+(1 row)
+DROP TABLE

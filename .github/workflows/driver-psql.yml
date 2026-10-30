@@ -1,0 +1,72 @@
+name: driver-psql
+# Runs the checked-in psql scripts in tests/drivers/psql against the real, release-built latticed (#575):
+# loopback trust (DDL, DML, transactions, errors with SQLSTATE, the extended protocol through psql
+# \bind, a restart) and SCRAM-SHA-256 over TLS with sslmode=verify-full. Expected outputs are written
+# by hand; the job fails when no script matched, when the server did not start or stop, when a case
+# listed as a known failure starts to pass, and when the runner's own self-test cannot turn red.
+# This is one client (libpq's psql). It is not the driver compatibility matrix (#413).
+on:
+  pull_request:
+    paths:
+      - "crates/latticed/**"
+      - "crates/lattice-api/**"
+      - "crates/lattice-exec/**"
+      - "tests/drivers/psql/**"
+      - "Cargo.lock"
+      - ".github/workflows/driver-psql.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/latticed/**"
+      - "crates/lattice-api/**"
+      - "crates/lattice-exec/**"
+      - "tests/drivers/psql/**"
+      - "Cargo.lock"
+      - ".github/workflows/driver-psql.yml"
+  workflow_dispatch:
+  schedule: [{ cron: "50 5 * * 1" }]
+permissions:
+  contents: read
+concurrency:
+  group: driver-psql-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  driver-psql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with: { toolchain: 1.99.1 }
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: build latticed
+        run: cargo build --release --locked -p latticed
+      - name: psql client
+        run: |
+          command -v psql >/dev/null || {
+            sudo apt-get update -q
+            sudo apt-get install -y -q postgresql-client
+          }
+          psql --version
+          { echo "### psql scripts"; echo; echo "client: \`$(psql --version)\`"; } >> "$GITHUB_STEP_SUMMARY"
+      - name: shellcheck
+        run: shellcheck -x -P SCRIPTDIR tests/drivers/psql/*.sh
+      - name: psql scripts, loopback and SCRAM over TLS
+        env:
+          LATTICE_PSQL_WORK: ${{ runner.temp }}/psql-suite
+        run: tests/drivers/psql/run.sh target/release/latticed all
+      - name: runner self-test (it must be able to fail)
+        run: tests/drivers/psql/selftest.sh target/release/latticed
+      - name: server logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: driver-psql-logs
+          path: |
+            ${{ runner.temp }}/psql-suite/loopback/*.log
+            ${{ runner.temp }}/psql-suite/loopback/*.actual
+            ${{ runner.temp }}/psql-suite/scram-tls/*.log
+            ${{ runner.temp }}/psql-suite/scram-tls/*.actual
+          if-no-files-found: ignore
+          retention-days: 7
