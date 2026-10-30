@@ -853,3 +853,70 @@ proptest! {
         prop_assert_eq!(run(&mut a.db, &mut sa, all), run(&mut b.db, &mut sb, all));
     }
 }
+
+#[test]
+fn a_term_that_can_fail_keeps_the_full_scan_whatever_wraps_it() {
+    let mut f = fixture();
+    let mut s = common::admin();
+    setup_t(&mut f.db, &mut s);
+    // Row 2 divides by zero in `10 / v`; `id = 1` alone would never read it. Every wrapper below
+    // leaves the failing term in the predicate, so the table is read in full and the error shows.
+    ok(
+        &mut f.db,
+        &mut s,
+        "INSERT INTO t VALUES (1, 1, 5), (2, 2, 0)",
+    );
+    let predicates = [
+        "NOT (10 / v > 1) AND id = 1",
+        "(10 / v) IS NULL AND id = 1",
+        "(10 / v) IS NOT NULL AND id = 1",
+        "v IN (1, 10 / v) AND id = 1",
+        "v NOT IN (1, 10 / v) AND id = 1",
+        "10 / v IN (1, 2) AND id = 1",
+        "v BETWEEN 10 / v AND 100 AND id = 1",
+        "10 / v BETWEEN 0 AND 100 AND id = 1",
+        "(10 / v > 1 OR id = 7) AND id = 1",
+        "(10 / v > 1) = true AND id = 1",
+        "(10 / v > 1) <> false AND id = 1",
+        "NOT NOT (10 / v > 1) AND id = 1",
+        "(NOT (10 / v > 1)) IS NULL AND id = 1",
+    ];
+    for pred in predicates {
+        let e = err(&mut f.db, &mut s, &format!("SELECT id FROM t WHERE {pred}"));
+        assert_eq!(e.sqlstate(), "22012", "{pred}");
+        assert_eq!(
+            f.db.last_access_paths(),
+            vec![AccessPath::FullScan],
+            "{pred}"
+        );
+    }
+}
+
+#[test]
+fn predicates_made_only_of_total_terms_still_narrow_the_scan() {
+    let mut f = fixture();
+    let mut s = common::admin();
+    setup_t(&mut f.db, &mut s);
+    ok(
+        &mut f.db,
+        &mut s,
+        "INSERT INTO t VALUES (1, 1, 5), (2, 2, 0)",
+    );
+    let predicates = [
+        "NOT (v > 1) AND id = 1",
+        "v IS NULL AND id = 1",
+        "v IN (1, 2, 3) AND id = 1",
+        "v BETWEEN 0 AND 100 AND id = 1",
+        "(v > 1 OR id = 7) AND id = 1",
+        "NOT NOT (v > 1) AND id = 1",
+    ];
+    for pred in predicates {
+        let got = run(&mut f.db, &mut s, &format!("SELECT id FROM t WHERE {pred}"));
+        assert!(got.is_ok(), "{pred}: {got:?}");
+        assert_eq!(
+            f.db.last_access_paths(),
+            vec![AccessPath::PrimaryKeyPoint],
+            "{pred}"
+        );
+    }
+}
