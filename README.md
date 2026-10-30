@@ -148,7 +148,9 @@ cargo xtask ci                                          # the full pull request 
 
 Nightly archives for Linux x86_64, Linux arm64 and macOS arm64 are on the
 [releases page](https://github.com/moncifem/latticedb/releases/tag/nightly), and
-`docker run --rm ghcr.io/moncifem/latticedb:nightly --version` runs the container. They may predate the
+`docker run --rm ghcr.io/moncifem/latticedb:nightly --version` runs the container, and with no arguments
+it prints the flags a server needs. To serve from it with SCRAM over TLS, see
+[Run in a container](docs/alpha.md#run-in-a-container). These archives and images may predate the
 latest source. The Linux binaries are built on Ubuntu 22.04 and are smoke-tested on Debian 12 and
 Ubuntu 22.04; the minimum glibc is in the release notes.
 

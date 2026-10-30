@@ -107,12 +107,15 @@ launchd (`~/Library/LaunchAgents/dev.lattice.latticed.plist`; launchd sends SIGT
 </plist>
 ```
 
-Containers: when the image exists (#587), its entrypoint passes `--stdin-control off`; with any other
-way of running `latticed` in a container, pass it yourself. Give `docker stop` more time than
+Containers: the image's entrypoint runs `latticed --stdin-control off` with your arguments, and with
+no arguments it prints the flags it needs and exits 2; the commands are in
+[Run in a container](../../docs/alpha.md#run-in-a-container). Any other way of running `latticed` in a
+container needs `--stdin-control off` passed yourself. Give `docker stop` more time than
 `--stop-timeout-ms` (`docker stop -t 40`, or lower the flag below Docker's default of 10 seconds).
-A process running as PID 1 only receives signals it has a handler for, and `latticed` installs one
-for SIGTERM and SIGINT. Trust mode refuses a non-loopback bind, so a container that publishes the
-port needs `--auth scram-tls`.
+A process running as PID 1 only receives signals it has a handler for. `latticed` installs its SIGTERM
+and SIGINT handlers after startup, so a stop sent during recovery is ignored and `docker stop` falls
+back to SIGKILL. Trust mode refuses a non-loopback bind, so a container that publishes the port needs
+`--auth scram-tls`.
 
 ## Cooperative cancellation
 

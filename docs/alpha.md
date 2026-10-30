@@ -69,6 +69,75 @@ decoy secret, the policy file and bearer-token files (see the
 talk to a running server. The SCRAM-over-TLS path is covered by Rust integration tests
 (`crates/latticed/tests`), not by the quickstart smoke test.
 
+### Run in a container
+
+The image `ghcr.io/moncifem/latticedb` (the `nightly` tag until a release is cut) holds `latticed` and
+`lattice` on `ubuntu:24.04`. It runs as the user `lattice` (uid 10001), keeps data in the volume
+`/var/lib/lattice`, and its entrypoint runs `latticed --stdin-control off` with your arguments, so a
+detached container keeps running. With no arguments it prints the flags it needs and exits 2:
+
+```bash
+docker run --rm ghcr.io/moncifem/latticedb:nightly
+```
+
+A published port needs SCRAM over TLS, because trust mode refuses a non-loopback bind. Keep the account
+files in their own volume, outside the data volume (the tool asks for an owner-only directory). Create
+them with the image's own `lattice account` (the password is read from stdin or generated and printed
+once), and the certificate with a pinned `openssl` command, since the tool does not make TLS keys:
+
+```bash
+IMAGE=ghcr.io/moncifem/latticedb:nightly
+docker volume create lattice-config && docker volume create lattice-tls
+docker run --rm --entrypoint lattice -v lattice-config:/etc/lattice "$IMAGE" account init /etc/lattice
+printf '%s\n' "$PASSWORD" | docker run --rm -i --entrypoint lattice -v lattice-config:/etc/lattice "$IMAGE" \
+  account add /etc/lattice alice --read notes --write notes --ddl notes --password-stdin
+
+# a throwaway CA and a server certificate for localhost (use your own names and a real CA otherwise)
+openssl req -x509 -newkey rsa:2048 -nodes -keyout ca-key.pem -out ca.pem -days 30 -subj "/CN=lattice test CA"
+openssl req -newkey rsa:2048 -nodes -keyout server-key.pem -out server.csr -subj "/CN=localhost"
+printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n' > server.ext
+openssl x509 -req -in server.csr -CA ca.pem -CAkey ca-key.pem -CAcreateserial -days 30 \
+  -extfile server.ext -out server-cert.pem
+
+# the key must be owned by uid 10001 and mode 0600, so copy it in as root with install
+for f in server-key.pem:0600 server-cert.pem:0644; do
+  name=${f%%:*}; mode=${f##*:}
+  docker run --rm --user 0:0 --entrypoint install -v lattice-tls:/etc/lattice-tls -v "$PWD:/src:ro" "$IMAGE" \
+    -o 10001 -g 10001 -m "$mode" "/src/$name" "/etc/lattice-tls/$name"
+done
+```
+
+Start it with the flags the account tool prints, the data and account volumes, and the certificate
+volume read-only. The host side is bound to loopback here; publish on `0.0.0.0` only after reading the
+listener guide's TLS and account sections:
+
+```bash
+docker run -d --name lattice -p 127.0.0.1:5432:5432 \
+  -v lattice-data:/var/lib/lattice -v lattice-config:/etc/lattice:ro -v lattice-tls:/etc/lattice-tls:ro \
+  "$IMAGE" --data-dir /var/lib/lattice --auth scram-tls --listen 0.0.0.0:5432 \
+  --tls-cert /etc/lattice-tls/server-cert.pem --tls-key /etc/lattice-tls/server-key.pem \
+  --scram-verifiers /etc/lattice/scram-verifiers --scram-decoy-secret /etc/lattice/scram-decoy-secret \
+  --account-policies /etc/lattice/account-policies
+PGPASSWORD="$PASSWORD" psql "host=localhost port=5432 user=alice dbname=lattice sslmode=verify-full sslrootcert=ca.pem"
+```
+
+`docker stop` gives a clean stop when `latticed` has printed its listening line (wait for it first; a
+process that is still recovering ignores SIGTERM as PID 1 and is killed after the stop timeout). Docker
+waits 10 seconds by default; use `docker stop -t 40` when connections may take longer to drain. A
+`docker start lattice` keeps the same volumes and rows. `docker inspect -f '{{.State.ExitCode}}' lattice`
+prints `0` after a clean stop.
+
+Bind mounts keep the host's ownership, not the image's. A host directory mounted at `/var/lib/lattice` or
+`/etc/lattice` must be owned by uid 10001 (for example `sudo chown -R 10001:10001 ./data`), or the server
+cannot write it; named volumes copy the image's ownership, which is why the examples use them.
+
+What is checked and what is not. `tests/image/smoke.sh` runs the steps above in CI (`image-smoke`) on
+the amd64 image: the usage error, the user and volume ownership, the account tool inside the image, SCRAM
+over TLS with `sslmode=verify-full`, a wrong password, inserts, a clean `docker stop`, and rows read back
+after a restart on the same volumes. It does not run the arm64 image, the published image or a supervisor,
+and it does not test a stop during recovery. The image adds no shell or package manager, but the
+`ubuntu:24.04` base still ships `/bin/sh` and `apt`; removing them is a separate decision.
+
 ## Connect with psql
 
 ```bash
@@ -165,7 +234,7 @@ optional models plugin; Windows.
 | No TLS on the gateway | When the gateway ships it listens on loopback only and has no TLS; do not expose it. The pgwire listener can use TLS (SCRAM mode). |
 | Token reload | When a gateway uses bearer tokens, they will be read at start only; changing them will need a restart. Nothing reads them today. |
 | MCP transport | No HTTP or stdio transport is shipped (above). |
-| Containers | `docker run -d` needs `--stdin-control off`; trust mode refuses a non-loopback bind, so a published port needs SCRAM mode. No container run beyond `--version` is part of the smoke test. |
+| Containers | The image's entrypoint passes `--stdin-control off` and prints usage with no arguments. A published port needs SCRAM over TLS. `tests/image/smoke.sh` (CI job `image-smoke`) tests the amd64 image only; the `nightly` image predates this entrypoint until the next nightly build. See [Run in a container](#run-in-a-container). |
 | Platforms | No Windows (no signal handling or installer). Linux needs glibc as stated in the release notes. |
 
 This table is edited by hand; the open issues and the [gate pages](gates) are the authority.

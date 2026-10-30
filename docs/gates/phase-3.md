@@ -99,6 +99,21 @@ the script against a real published release or its real attestation (`gh attesta
 shim, and whether it needs a signed-in `gh` for a public repository is untested), the rehearsal job (first run needs a
 `release` rehearsal run id), and the script as a release asset (the release workflow does not attach it yet).
 
+Container image (issue #587, part of #568 and the Alpha 0.1 definition #567, no exit criterion): with no arguments the
+entrypoint prints the flags a server needs and exits 2; otherwise it runs `latticed --stdin-control off` with the arguments.
+The image runs as uid 10001 with `/var/lib/lattice` and `/etc/lattice` owned by that user (the group is created with gid
+10001; `useradd --system` alone gave gid 999). The `image-smoke` job builds the binaries on ubuntu-24.04 (glibc 2.39), while
+the release archives are built on ubuntu-22.04 (glibc 2.35), so a pass does not prove that the release binaries run in the
+image; it tests the image built from the same source on the same base. `tests/image/smoke.sh` ran locally on an arm64 image built with `docker build`
+from a debug Linux build of `lattice` and `latticed` in `rust:1.99.1-bookworm`, on a Docker Desktop VM: 12 of 12 checks
+passed (usage error, version passthrough, uid, fresh volume owner and mode, `lattice account` init and add inside the image,
+TLS key installed for uid 10001, SCRAM over TLS listening on 0.0.0.0:5432, wrong password refused, `psql sslmode=verify-full`
+insert and select, clean `docker stop` with exit 0, restart on the same volumes with the rows read back and a duplicate key
+still refused, a second clean stop). Not verified here: the amd64 release-profile image (the `image-smoke` job is its first
+run), arm64 in CI, the published or nightly image, the systemd and launchd snippets, a stop during recovery (as PID 1 the
+process ignores SIGTERM until its handler is installed; not tested), and `docker stop` while a client is connected. The
+`ubuntu:24.04` base still contains `/bin/sh` and `apt`; they were not removed.
+
 Alpha documentation (issues #589 and #590, part of the Alpha 0.1 definition #567, no exit criterion): `docs/alpha.md`
 (what works, how to run `latticed` in trust and SCRAM modes, psql, the agent-client status, experimental parts and a
 hand-edited known-issues table), a README install section marked "once the alpha tag exists", a rewritten `SECURITY.md`
