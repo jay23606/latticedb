@@ -243,6 +243,9 @@ planted_bugs! {
     /// The MCP backend writes stored row text outside the fixed untrusted envelope, so an agent
     /// cannot tell data from the server's own words (prompt injection, N-11).
     McpRowTextOutsideEnvelope,
+    /// The MCP `lattice_subscribe` answers from a cursor one step back, so the event the client
+    /// already has comes again on every call (duplicate delivery; a resumed reader sees a repeat).
+    McpSubscribeInclusiveCursor,
     /// Recovery decodes the definition blocks of the log but does not keep them in the catalog,
     /// so a table created with a definition comes back without one.
     DefinitionDroppedOnReplay,
@@ -391,11 +394,12 @@ impl Bug {
     ];
 
     /// MCP tool backend defects, detected by the witnesses in `latticed::mcp_backend`.
-    pub const MCP: [Bug; 4] = [
+    pub const MCP: [Bug; 5] = [
         Bug::McpCallerFromArgument,
         Bug::McpWriteIgnoresExpectedVersion,
         Bug::McpDeniedTableDistinguishable,
         Bug::McpRowTextOutsideEnvelope,
+        Bug::McpSubscribeInclusiveCursor,
     ];
 
     /// Guarded-WAL admission defects, exercised by independent context witnesses.

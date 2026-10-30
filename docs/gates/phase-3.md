@@ -254,11 +254,31 @@ one winner, `tool_output_is_bounded_before_the_backend_commits`, `row_text_is_da
 `mcp_grant_scope_maps_to_table_grants_and_never_widens_them` and
 `scope_mapping_is_total_injective_and_refuses_what_it_cannot_express`. Planted bugs `McpCallerFromArgument`,
 `McpWriteIgnoresExpectedVersion`, `McpDeniedTableDistinguishable` and `McpRowTextOutsideEnvelope` are each caught by
-their witness. Not done: `lattice_subscribe` and the 12-byte cursor (issue #579); a cursor and an unseen-change count
+their witness. Not done at #526 (`lattice_subscribe` and the 12-byte cursor were added under #579, see the paragraph below): a cursor and an unseen-change count
 in tool results; author names in tool output (the envelope is built for them, no tool returns one yet); any transport
 or token handling (#527, #580); a version column maintained for SQL writers; per-principal limits (#529). Tables must
 have the key, value and version columns; others get `table_shape`. Not run locally: the workspace gate, mutation
 testing, Miri.
+
+Verification evidence, not an exit criterion: MCP `lattice_subscribe` (issue #579, part 2 of #526). The backend
+`latticed::mcp_backend` serves a long poll over `FeedSource::read_records` as the bound principal, waiting on the
+`CommitNotifier` for at most `wait_ms` (capped at 30 000 ms, default 0), with the 12-byte feed cursor as 24 lowercase
+hex digits. A reply holds at most 64 events (the codec's array bound) and stays within the 1 MiB output bound, each
+upsert decoded to its columns on the executor thread (`feed_source::decode_columns`, requested by a flag, so the sync
+path is unchanged), with `next_cursor` and `truncated`. Shutdown ends a waiting call with `50001`. Tests:
+`cargo test -p latticed --lib mcp_backend` (26 passing locally), `cargo test -p lattice-sdk --lib mcp` (25),
+`cargo test -p lattice-core --lib bugs` (2) and `cargo test -p lattice-api --lib feed_source` (17). The subscribe tests
+check the reply against the change feed read directly (same cursors, authors and order), a seeded interleaving of
+writes and calls that yields every key once in write order, the wait bound and a wake by a commit, shutdown cancelling
+a waiting call, two principals (hidden commits do not move `next_cursor`, a restricted table answers as a missing one),
+a delete, the event and byte bounds with resumption across replies, a cursor ahead of the head answered as caught up
+(identically for two principals, with hidden commits), and a malformed cursor refused. Planted bug
+`McpSubscribeInclusiveCursor` is caught by its witness. Issue #363 is not closed: a table-restricted reader can still
+observe the quiet-table wedge (`50001` after a large run of hidden versions, issues #525 and #661), the latency of a
+waiting call (each wake re-reads the feed), `cursor_too_old` (the store-wide vacuum floor) and a corrupt event's
+`50001`, which wedges that reader. Not done: a per-principal long-poll cap (issue #529; a waiting call holds its worker
+for up to 30 s, and when the notifier is full the call polls about 50 times a second), any MCP transport (#527), and the
+unseen-change count (not returned: it would reveal hidden commits, issue #363).
 
 Verification evidence, not an exit criterion: `lattice-engines::feed_emit` (WP36, issue #238) emits the change feed
 from the row store's retained committed versions. One local run of `cargo test -p lattice-engines --lib feed_emit`

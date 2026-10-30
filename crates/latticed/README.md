@@ -456,10 +456,11 @@ keep the credential directory on local storage.
 
 ## MCP tool backend
 
-`latticed::mcp_backend::McpBackend` is the transport-independent backend of the MCP tools `lattice_read` and
-`lattice_write` (issue #526, part 1). It is created from an authenticated `Principal` and the account's row grant, and
-runs every statement as that principal through the SQL executor, so the table grants, the author id of a commit
-and the statement budgets are the ones a PostgreSQL connection of the account gets. A table the principal may not
-see answers like a table that does not exist. Row text is returned under a fixed `untrusted` member. Nothing
-serves it yet: no listener, token header or MCP transport calls it (issues #527 and #580), and `lattice_subscribe`
-is issue #579. See [docs/mcp-v0.md](../../docs/mcp-v0.md).
+`latticed::mcp_backend::McpBackend` is the transport-independent backend of the MCP tools `lattice_read`,
+`lattice_write` (issue #526, part 1) and `lattice_subscribe` (issue #579: a long poll over the change feed, with the
+12-byte cursor and a bounded `wait_ms`). It is created from an authenticated `Principal`, the account's row grant and
+the host's feed and commit notifier, and runs every statement as that principal through the SQL executor, so the
+table grants, the author id of a commit and the statement budgets are the ones a PostgreSQL connection of the account
+gets. A table the principal may not see answers like a table that does not exist. Row text is returned under a fixed
+`untrusted` member. Nothing serves it yet: no listener, token header or MCP transport calls it (issues #527 and
+#580). See [docs/mcp-v0.md](../../docs/mcp-v0.md).

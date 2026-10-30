@@ -69,11 +69,11 @@ use crate::principal::Principal;
 use crate::subscribe::{EventSource, SourceError};
 use crate::sync::{Event, MAX_CURSOR_LEN};
 use lattice_core::bugs::{self, Bug};
-use lattice_core::feed::Cursor;
+use lattice_core::feed::{ChangeEvent, ChangeOp, Cursor};
 use lattice_engines::feed_emit::{FeedLimits, FeedReadError};
 use lattice_engines::limits::PolicyEvaluator;
 use lattice_engines::store::RowStore;
-use lattice_exec::Database;
+use lattice_exec::{Database, Schema};
 use lattice_seams::{Clock, Io, Rng};
 
 /// The scope prefix that names a table.
@@ -96,6 +96,47 @@ pub(crate) struct Chunk {
     pub(crate) resume: Cursor,
     /// True when the step stopped before the end of history.
     pub(crate) more: bool,
+    /// The decoded columns of each event, aligned with `events`; empty unless the step was asked
+    /// for them (see [`decode_columns`]).
+    pub(crate) columns: Vec<Option<Columns>>,
+}
+
+/// The columns of one decoded row: name and text value, `None` for SQL `NULL`, in column order.
+pub type Columns = Vec<(String, Option<String>)>;
+
+/// One event of a decoded read: the feed event as the sync protocol carries it, and the row it
+/// changed, as text, when the read decoded it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeedRecord {
+    /// The event, exactly as [`EventSource::read_after`] returns it.
+    pub event: Event,
+    /// For an upsert the executor could decode: its columns. `None` for a delete, and for an upsert
+    /// of a table the executor cannot decode (one recovered from the log without its definition).
+    pub columns: Option<Columns>,
+}
+
+/// The decoded columns of each event, aligned with `events`. Decoding is the executor's job: it has
+/// the table definitions, and the rows are its encoding. An event that does not decode yields `None`.
+pub(crate) fn decode_columns(schema: &Schema, events: &[Event]) -> Vec<Option<Columns>> {
+    events
+        .iter()
+        .map(|event| {
+            let change = ChangeEvent::decode(&event.data).ok()?;
+            let ChangeOp::Upsert(value) = change.change.op else {
+                return None;
+            };
+            let table = schema.by_id(change.change.kind)?;
+            let row = table.decode_row(&value).ok()?;
+            Some(
+                table
+                    .columns
+                    .iter()
+                    .zip(&row)
+                    .map(|(column, datum)| (column.name.clone(), datum.to_pg_text()))
+                    .collect(),
+            )
+        })
+        .collect()
 }
 
 /// A change-feed reader backed by the executor actor. Cheap to clone through
@@ -125,33 +166,64 @@ impl FeedSource {
     }
 }
 
-impl EventSource for FeedSource {
-    fn read_after(
+impl FeedSource {
+    /// The events of `scope` for `principal` strictly after `after`, at most `limit` of them, each
+    /// with its decoded columns (see [`FeedRecord`]). The same events, in the same order, as
+    /// [`EventSource::read_after`]; the only difference is the decoding, which costs the executor
+    /// one decode per event it returns.
+    ///
+    /// # Errors
+    /// As [`EventSource::read_after`].
+    pub fn read_records(
         &self,
         principal: &Principal,
         scope: &str,
         after: &[u8],
         limit: usize,
-    ) -> Result<Vec<Event>, SourceError> {
+    ) -> Result<Vec<FeedRecord>, SourceError> {
+        self.read_steps(principal, scope, after, limit, true)
+    }
+
+    fn read_steps(
+        &self,
+        principal: &Principal,
+        scope: &str,
+        after: &[u8],
+        limit: usize,
+        decode: bool,
+    ) -> Result<Vec<FeedRecord>, SourceError> {
         // A cursor longer than the wire allows is not one this source issued; a denied principal's
         // answer must not depend on it, so the actor checks scope first and this only bounds memory.
         if after.len() > MAX_CURSOR_LEN {
             return self
                 .handle
-                .read(principal, scope, &[0xff; 13], 1, 1)
-                .map(|chunk| chunk.events);
+                .read(principal, scope, &[0xff; 13], 1, 1, false)
+                .map(|chunk| {
+                    chunk
+                        .events
+                        .into_iter()
+                        .map(|event| FeedRecord {
+                            event,
+                            columns: None,
+                        })
+                        .collect()
+                });
         }
         let limit = limit.min(self.max_events);
-        let mut out: Vec<Event> = Vec::new();
+        let mut out: Vec<FeedRecord> = Vec::new();
         let mut at = after.to_vec();
         for _ in 0..MAX_ROUNDS {
             let want = limit.saturating_sub(out.len());
             match self
                 .handle
-                .read(principal, scope, &at, want, self.scan_budget)
+                .read(principal, scope, &at, want, self.scan_budget, decode)
             {
                 Ok(chunk) => {
-                    out.extend(chunk.events);
+                    let mut columns = chunk.columns.into_iter();
+                    out.extend(chunk.events.into_iter().map(|event| FeedRecord {
+                        event,
+                        columns: columns.next().flatten(),
+                    }));
                     if out.len() >= limit || !chunk.more {
                         return Ok(out);
                     }
@@ -166,9 +238,22 @@ impl EventSource for FeedSource {
     }
 }
 
+impl EventSource for FeedSource {
+    fn read_after(
+        &self,
+        principal: &Principal,
+        scope: &str,
+        after: &[u8],
+        limit: usize,
+    ) -> Result<Vec<Event>, SourceError> {
+        self.read_steps(principal, scope, after, limit, false)
+            .map(|records| records.into_iter().map(|r| r.event).collect())
+    }
+}
+
 /// The answer of a read that used up its steps: what it found, or `Unavailable`. An empty page would
 /// claim the reader is caught up, which is untrue.
-fn give_up(out: Vec<Event>) -> Result<Vec<Event>, SourceError> {
+fn give_up<T>(out: Vec<T>) -> Result<Vec<T>, SourceError> {
     if out.is_empty() {
         Err(SourceError::Unavailable)
     } else {
@@ -258,6 +343,7 @@ fn feed_chunk<I: Io, C: Clock, R: Rng, P: PolicyEvaluator + ?Sized>(
             events: Vec::new(),
             resume: pos,
             more: false,
+            columns: Vec::new(),
         });
     }
     let limits = FeedLimits {
@@ -278,6 +364,7 @@ fn feed_chunk<I: Io, C: Clock, R: Rng, P: PolicyEvaluator + ?Sized>(
                 events,
                 resume: page.resume,
                 more: page.more,
+                columns: Vec::new(),
             })
         }
         // The first readable event this step would deliver cannot be carried: continue after it. The
@@ -286,6 +373,7 @@ fn feed_chunk<I: Io, C: Clock, R: Rng, P: PolicyEvaluator + ?Sized>(
             events: Vec::new(),
             resume: cursor,
             more: true,
+            columns: Vec::new(),
         }),
         Err(e) => Err(source_error(&e)),
     }

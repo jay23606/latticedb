@@ -17,6 +17,7 @@ use lattice_seams::OsRng;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::thread;
 
 const WS: &str = "team";
 const KV: &str = "CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT, version BIGINT NOT NULL)";
@@ -100,7 +101,14 @@ impl Rig {
     fn backend(&self, name: &str) -> McpBackend {
         let p = self.principal(name);
         let grant = self.policies.grant_for(&p);
-        McpBackend::new(self.host.sql_for(p), grant, WS).unwrap()
+        McpBackend::new(
+            self.host.sql_for(p),
+            grant,
+            WS,
+            self.host.feed_source(SUBSCRIBE_LIMIT),
+            self.host.commit_notifier(),
+        )
+        .unwrap()
     }
 
     fn conn(&self, name: &str) -> Conn {
@@ -316,7 +324,16 @@ fn a_workspace_that_is_not_a_scope_path_is_refused() {
             ConfigError::Workspace,
             "{bad}"
         );
-        assert!(McpBackend::new(rig.host.sql_for(p.clone()), grant.clone(), bad).is_err());
+        assert!(
+            McpBackend::new(
+                rig.host.sql_for(p.clone()),
+                grant.clone(),
+                bad,
+                rig.host.feed_source(SUBSCRIBE_LIMIT),
+                rig.host.commit_notifier()
+            )
+            .is_err()
+        );
     }
 }
 
@@ -352,13 +369,16 @@ fn mcp_grant_scope_maps_to_table_grants_and_never_widens_them() {
         assert_eq!(caller.id, "account:alice");
         assert_eq!(caller.check(Tool::Read, WS).is_ok(), read, "{grant:?}");
         assert_eq!(caller.check(Tool::Write, WS).is_ok(), write, "{grant:?}");
-        // Granted on the workspace subtree only, and never subscribe in part 1.
-        for tool in [Tool::Read, Tool::Write] {
+        // Subscribing reads, so it follows the read bit; granted on the workspace subtree only.
+        assert_eq!(caller.check(Tool::Subscribe, WS).is_ok(), read, "{grant:?}");
+        for tool in [Tool::Read, Tool::Subscribe, Tool::Write] {
             assert!(caller.check(tool, "teams").is_err());
             assert!(caller.check(tool, "tea").is_err());
         }
-        assert!(caller.check(Tool::Subscribe, WS).is_err());
-        assert_eq!(caller.grants.len(), usize::from(read) + usize::from(write));
+        assert_eq!(
+            caller.grants.len(),
+            2 * usize::from(read) + usize::from(write)
+        );
     }
 
     // End to end, the executor decides which table: a grant on `kv` gives nothing on `other`.
@@ -390,7 +410,7 @@ fn mcp_grant_scope_maps_to_table_grants_and_never_widens_them() {
 }
 
 #[test]
-fn the_tool_list_follows_the_grants_and_has_no_subscribe() {
+fn the_tool_list_follows_the_grants_and_includes_subscribe_for_readers() {
     let rig = setup();
     let names = |who: &str| -> Vec<String> {
         let mut c = rig.conn(who);
@@ -408,20 +428,23 @@ fn the_tool_list_follows_the_grants_and_has_no_subscribe() {
             })
             .collect()
     };
-    assert_eq!(names("admin"), ["lattice_read", "lattice_write"]);
-    assert_eq!(names("alice"), ["lattice_read", "lattice_write"]);
-    assert_eq!(names("bob"), ["lattice_read"]);
+    // Subscribing is a read: a principal that may read a table may subscribe, and nothing else.
+    let all = ["lattice_read", "lattice_write", "lattice_subscribe"];
+    assert_eq!(names("admin"), all);
+    assert_eq!(names("alice"), all);
+    assert_eq!(names("bob"), ["lattice_read", "lattice_subscribe"]);
+    assert_eq!(names("carol"), all);
     assert!(names("dave").is_empty());
-    let mut admin = rig.conn("admin");
+    // A principal with no tool gets the same refusal for subscribe as for read.
+    let mut dave = rig.conn("dave");
+    assert_eq!(error_code(&dave.read("kv", None)), 40301);
     assert_eq!(
-        error_code(&admin.call(
+        error_code(&dave.call(
             "lattice_subscribe",
             &format!("{{\"scope\":\"{WS}\",\"table\":\"kv\"}}")
         )),
         40301
     );
-    let mut dave = rig.conn("dave");
-    assert_eq!(error_code(&dave.read("kv", None)), 40301);
 }
 
 // ---- identity ---------------------------------------------------------------------------------
@@ -824,4 +847,471 @@ fn error_texts_hold_no_caller_or_stored_text() {
         assert!(!out.contains(secret), "{out}");
         assert!(!out.contains(&secret.to_lowercase()), "{out}");
     }
+}
+
+// ---- subscribe --------------------------------------------------------------------------------
+
+/// The origin cursor in its wire form.
+const ORIGIN: &str = "000000000000000000000000";
+
+/// One event of a subscribe reply, read back from its text.
+#[derive(Debug, PartialEq)]
+struct Ev {
+    cursor: String,
+    op: String,
+    author: String,
+    columns: Option<Vec<(String, Option<String>)>>,
+}
+
+/// A successful subscribe reply, read back from its text.
+#[derive(Debug)]
+struct Reply {
+    next: String,
+    truncated: bool,
+    events: Vec<Ev>,
+}
+
+impl Reply {
+    /// The text of column `name` of each event, in event order.
+    fn column(&self, name: &str) -> Vec<String> {
+        self.events
+            .iter()
+            .map(|e| {
+                let columns = e.columns.as_ref().expect("a decoded upsert");
+                columns
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .and_then(|(_, v)| v.clone())
+                    .expect("a text column")
+            })
+            .collect()
+    }
+}
+
+fn subscribe_args(after: &str, wait_ms: u32) -> String {
+    format!("{{\"scope\":\"{WS}\",\"table\":\"kv\",\"after\":\"{after}\",\"wait_ms\":{wait_ms}}}")
+}
+
+/// Reads a successful subscribe reply back from its text, as a client does.
+fn reply_of(response: &str) -> Reply {
+    let (text, is_error) = tool_text(response);
+    assert!(!is_error, "{text}");
+    let v = parse_json(text.as_bytes()).unwrap();
+    let text_of = |j: Option<&Json>| match j {
+        Some(Json::Str(s)) => s.clone(),
+        other => panic!("expected text, got {other:?} in {text}"),
+    };
+    let next = text_of(v.get("next_cursor"));
+    let truncated = matches!(v.get("truncated"), Some(Json::Bool(true)));
+    let Some(Json::Arr(items)) = v.get("untrusted").and_then(|u| u.get("events")) else {
+        panic!("no events in {text}");
+    };
+    let events = items
+        .iter()
+        .map(|e| {
+            let columns = match e.get("columns") {
+                Some(Json::Obj(members)) => Some(
+                    members
+                        .iter()
+                        .map(|(name, value)| {
+                            let v = match value {
+                                Json::Str(s) => Some(s.clone()),
+                                Json::Null => None,
+                                other => panic!("column value {other:?}"),
+                            };
+                            (name.clone(), v)
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            };
+            Ev {
+                cursor: text_of(e.get("cursor")),
+                op: text_of(e.get("op")),
+                author: text_of(e.get("author")),
+                columns,
+            }
+        })
+        .collect();
+    Reply {
+        next,
+        truncated,
+        events,
+    }
+}
+
+impl Conn {
+    fn subscribe(&mut self, after: &str, wait_ms: u32) -> Reply {
+        reply_of(&self.call("lattice_subscribe", &subscribe_args(after, wait_ms)))
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn subscribe_returns_the_same_events_in_the_same_order_as_the_feed() {
+    let rig = setup();
+    let mut alice = rig.conn("alice");
+    // Four events, in commit order, hand-derived: three inserts and one update that bumps k1 to 2.
+    assert!(applied(&alice.write("kv", "k1", "a", None), 1));
+    assert!(applied(&alice.write("kv", "k2", "b", None), 1));
+    assert!(applied(&alice.write("kv", "k3", "c", None), 1));
+    assert!(applied(&alice.write("kv", "k1", "a2", Some(1)), 2));
+    let reply = alice.subscribe(ORIGIN, 0);
+    assert_eq!(reply.column("key"), ["k1", "k2", "k3", "k1"]);
+    assert_eq!(reply.column("value"), ["a", "b", "c", "a2"]);
+    assert_eq!(reply.column("version"), ["1", "1", "1", "2"]);
+    assert!(reply.events.iter().all(|e| e.op == "upsert"));
+    assert!(!reply.truncated);
+    // The same events as the change feed, read directly: same cursors, same authors, same order.
+    let p = rig.principal("alice");
+    let raw = rig
+        .host
+        .feed_source(1000)
+        .read_after(&p, "table/kv", &[], 1000)
+        .unwrap();
+    let raw_cursors: Vec<String> = raw.iter().map(|e| hex(&e.cursor)).collect();
+    assert_eq!(
+        reply
+            .events
+            .iter()
+            .map(|e| e.cursor.clone())
+            .collect::<Vec<_>>(),
+        raw_cursors
+    );
+    assert_eq!(reply.next, *raw_cursors.last().unwrap());
+    let raw_authors: Vec<String> = rig
+        .authors("alice")
+        .iter()
+        .map(|a| format!("{a:032x}"))
+        .collect();
+    assert_eq!(
+        reply
+            .events
+            .iter()
+            .map(|e| e.author.clone())
+            .collect::<Vec<_>>(),
+        raw_authors
+    );
+    // Alice's own writes carry her author id, not the unknown author 0.
+    assert_ne!(raw_authors[0], format!("{:032x}", 0u128));
+}
+
+#[test]
+fn subscribe_after_a_cursor_never_skips_or_repeats_across_calls() {
+    let rig = setup();
+    let mut alice = rig.conn("alice");
+    // A seeded interleaving of writes and reads (xorshift, fixed seed). Every write is one new key,
+    // so the events must come back as the keys in write order, however the calls fall.
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next_random = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut written: Vec<String> = Vec::new();
+    let mut read: Vec<String> = Vec::new();
+    let mut cursor = ORIGIN.to_owned();
+    for _ in 0..120 {
+        if next_random() % 3 == 0 {
+            let key = format!("s{:03}", written.len());
+            assert!(applied(&alice.write("kv", &key, "v", None), 1));
+            written.push(key);
+        } else {
+            let r = alice.subscribe(&cursor, 0);
+            read.extend(r.column("key"));
+            cursor = r.next;
+        }
+    }
+    loop {
+        let r = alice.subscribe(&cursor, 0);
+        if r.events.is_empty() {
+            assert_eq!(r.next, cursor, "an empty reply stays at its cursor");
+            break;
+        }
+        read.extend(r.column("key"));
+        cursor = r.next;
+    }
+    assert!(written.len() > 20, "{}", written.len());
+    assert_eq!(read, written);
+}
+
+#[test]
+fn subscribe_wait_is_bounded_and_cancellable() {
+    let rig = setup();
+    let mut alice = rig.conn("alice");
+    // An idle table: the call waits its 200 ms and answers empty, at the cursor it was given.
+    let started = Instant::now();
+    let idle = alice.subscribe(ORIGIN, 200);
+    let waited = started.elapsed();
+    assert!(idle.events.is_empty());
+    assert_eq!(idle.next, ORIGIN);
+    assert!(waited >= Duration::from_millis(200), "{waited:?}");
+    assert!(waited < Duration::from_secs(10), "{waited:?}");
+
+    // A commit during the wait wakes it: the row comes back long before the 20 s the call allowed.
+    let started = Instant::now();
+    let woken = thread::scope(|s| {
+        s.spawn(|| {
+            thread::sleep(Duration::from_millis(100));
+            rig.sql(
+                "alice",
+                "INSERT INTO kv (key, value, version) VALUES ('w1', 'x', 1)",
+            );
+        });
+        alice.subscribe(ORIGIN, 20_000)
+    });
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(woken.column("key"), ["w1"]);
+
+    // Shutdown cancels a waiting call: it ends with the backend unavailable, at once.
+    // From the cursor after w1, so the call has nothing to return and must wait.
+    let notifier = rig.host.commit_notifier();
+    let mut waiter = rig.conn("alice");
+    let caught_up = woken.next.clone();
+    let (ended, took) = thread::scope(|s| {
+        let handle = s.spawn(move || {
+            let started = Instant::now();
+            let r = waiter.call("lattice_subscribe", &subscribe_args(&caught_up, 30_000));
+            (r, started.elapsed())
+        });
+        let until = Instant::now() + Duration::from_secs(20);
+        while notifier.sleepers() == 0 {
+            assert!(Instant::now() < until, "the waiter never slept");
+            thread::sleep(Duration::from_millis(1));
+        }
+        rig.host.begin_shutdown();
+        handle.join().unwrap()
+    });
+    assert_eq!(error_code(&ended), 50001);
+    assert!(took < Duration::from_secs(10), "{took:?}");
+    // And a call made after shutdown is refused the same way, without waiting.
+    assert_eq!(
+        error_code(&alice.call("lattice_subscribe", &subscribe_args(ORIGIN, 30_000))),
+        50001
+    );
+}
+
+#[test]
+fn subscribe_reports_a_delete_as_an_event_without_columns() {
+    let rig = setup();
+    let mut alice = rig.conn("alice");
+    assert!(applied(&alice.write("kv", "d1", "a", None), 1));
+    rig.sql("alice", "DELETE FROM kv WHERE key = 'd1'");
+    let reply = alice.subscribe(ORIGIN, 0);
+    let ops: Vec<&str> = reply.events.iter().map(|e| e.op.as_str()).collect();
+    assert_eq!(ops, ["upsert", "delete"]);
+    // The upsert carries the row it wrote; the delete carries no row, so no columns.
+    let written = reply.events[0].columns.as_ref().unwrap();
+    assert_eq!(written[0], ("key".to_owned(), Some("d1".to_owned())));
+    assert_eq!(reply.events[1].columns, None);
+    assert_eq!(reply.next, reply.events[1].cursor);
+}
+
+#[test]
+fn subscribe_sees_only_what_the_principal_may_read() {
+    let rig = setup();
+    let mut alice = rig.conn("alice");
+    assert!(applied(&alice.write("kv", "k1", "a", None), 1));
+    // Bob reads kv and sees alice's write, with alice's author id.
+    let mut bob = rig.conn("bob");
+    let seen = bob.subscribe(ORIGIN, 0);
+    assert_eq!(seen.column("key"), ["k1"]);
+    let alice_author = format!("{:032x}", rig.authors("alice")[0]);
+    assert_eq!(seen.events[0].author, alice_author);
+    assert_ne!(alice_author, format!("{:032x}", 0u128));
+    // Carol holds other and nothing on kv: kv answers exactly as a table that does not exist.
+    let mut carol = rig.conn("carol");
+    let hidden = carol.call("lattice_subscribe", &subscribe_args(ORIGIN, 0));
+    let missing = carol.call(
+        "lattice_subscribe",
+        &format!("{{\"scope\":\"{WS}\",\"table\":\"nope\",\"after\":\"{ORIGIN}\"}}"),
+    );
+    assert!(is_tool_error(&hidden, "{\"error\":\"not_found\"}"));
+    assert!(is_tool_error(&missing, "{\"error\":\"not_found\"}"));
+    // Hidden commits do not move the cursor: carol writes other, and bob's cursor stays where it was.
+    let cursor = seen.next.clone();
+    assert!(applied(&carol.write("other", "h1", "secret", None), 1));
+    assert!(applied(&carol.write("other", "h2", "secret", None), 1));
+    let quiet = bob.subscribe(&cursor, 0);
+    assert!(quiet.events.is_empty());
+    assert_eq!(quiet.next, cursor);
+    // A visible commit is the next thing bob sees, from the same cursor.
+    assert!(applied(&alice.write("kv", "k2", "b", None), 1));
+    assert_eq!(bob.subscribe(&cursor, 0).column("key"), ["k2"]);
+    // Erin reads kv and writes other: on kv she sees alice's rows, on other she sees the hidden ones.
+    let mut erin = rig.conn("erin");
+    assert_eq!(erin.subscribe(ORIGIN, 0).column("key"), ["k1", "k2"]);
+    let on_other = erin.call(
+        "lattice_subscribe",
+        &format!("{{\"scope\":\"{WS}\",\"table\":\"other\",\"after\":\"{ORIGIN}\"}}"),
+    );
+    assert_eq!(reply_of(&on_other).column("key"), ["h1", "h2"]);
+}
+
+#[test]
+fn subscribe_replies_are_bounded_by_events_and_bytes_and_resume_where_they_stopped() {
+    let rig = setup();
+    let mut alice = rig.conn("alice");
+    // 105 small rows: more than one reply's event limit, so the first reply stops at the limit.
+    let total = 105;
+    let mut keys = Vec::new();
+    for i in 0..total {
+        let key = format!("r{i:03}");
+        assert!(applied(&alice.write("kv", &key, "x", None), 1));
+        keys.push(key);
+    }
+    assert_eq!(SUBSCRIBE_LIMIT, 64, "the codec's array bound");
+    let first = alice.subscribe(ORIGIN, 0);
+    assert_eq!(first.events.len(), 64);
+    assert!(first.truncated);
+    let second = alice.subscribe(&first.next, 0);
+    assert_eq!(second.events.len(), total - 64);
+    assert!(!second.truncated);
+    let mut got = first.column("key");
+    got.extend(second.column("key"));
+    assert_eq!(got, keys);
+    let third = alice.subscribe(&second.next, 0);
+    assert!(third.events.is_empty() && third.next == second.next && !third.truncated);
+
+    // Large rows: 60 000 characters each, so about seventeen of them fill one reply. Every reply
+    // stays under the output bound and reading on from each next cursor gets every row, in order.
+    // A reply this size is over the SDK reader's message bound, so it is read by plain search here:
+    // the envelope fields, and each event's key, which the test's own data makes unambiguous.
+    let big = "y".repeat(60_000);
+    let mut big_keys = Vec::new();
+    for i in 0..20 {
+        let key = format!("b{i:02}");
+        assert!(applied(&alice.write("kv", &key, &big, None), 1));
+        big_keys.push(key);
+    }
+    let mut cursor = second.next.clone();
+    let mut got = Vec::new();
+    let mut truncated_replies = 0;
+    loop {
+        let response = alice.call("lattice_subscribe", &subscribe_args(&cursor, 0));
+        // The reply text sits inside the response as a JSON string: unescape its quotes to search it,
+        // and bound the text itself, which is what the output bound applies to.
+        let raw = response.replace("\\\"", "\"");
+        assert!(raw.len() <= MAX_OUTPUT_BYTES, "{}", raw.len());
+        let keys_here: Vec<String> = raw
+            .match_indices("\"key\":\"")
+            .map(|(at, pat)| {
+                let rest = &raw[at + pat.len()..];
+                rest[..rest.find('"').unwrap()].to_owned()
+            })
+            .collect();
+        if keys_here.is_empty() {
+            assert!(
+                raw.contains(&format!("\"next_cursor\":\"{cursor}\"")),
+                "{raw}"
+            );
+            break;
+        }
+        truncated_replies += usize::from(raw.contains("\"truncated\":true,"));
+        let at = raw.find("\"next_cursor\":\"").unwrap() + "\"next_cursor\":\"".len();
+        cursor = raw[at..at + 2 * 12].to_owned();
+        got.extend(keys_here);
+    }
+    assert_eq!(truncated_replies, 1);
+    assert_eq!(got, big_keys);
+}
+
+/// The text of a caught-up subscribe reply whose `next_cursor` is `next`, written out from the reply
+/// format in `docs/mcp-v0.md`: no events, not truncated. The notice is escaped as the text is JSON.
+fn caught_up_text(next: &str) -> String {
+    let notice = NOTICE.replace('"', "\\\"");
+    format!(
+        "{{\"tool\":\"lattice_subscribe\",\"notice\":\"{notice}\",\"truncated\":false,\"next_cursor\":\"{next}\",\"untrusted\":{{\"events\":[]}}}}"
+    )
+}
+
+#[test]
+fn subscribe_answers_a_cursor_ahead_of_the_head_as_caught_up_and_refuses_a_malformed_one() {
+    let rig = setup();
+    let mut alice = rig.conn("alice");
+    assert!(applied(&alice.write("kv", "k1", "a", None), 1));
+    let head = alice.subscribe(ORIGIN, 0).next;
+    // Far ahead of the newest commit: the same reply as at the head, with the cursor echoed back. An
+    // error here would reveal the newest LSN, and with it the hidden commits (issue #363).
+    let far = "ffffffffffffffffffffffff";
+    assert_eq!(
+        tool_text(&alice.call("lattice_subscribe", &subscribe_args(far, 0))),
+        (caught_up_text(far), false)
+    );
+    // Just past the head: the LSN of the commit plus one, index 0 (the head itself is LSN `head[..16]`).
+    let lsn = u64::from_str_radix(&head[..16], 16).unwrap();
+    let just_past = format!("{:016x}00000000", lsn + 1);
+    assert_eq!(
+        tool_text(&alice.call("lattice_subscribe", &subscribe_args(&just_past, 0))),
+        (caught_up_text(&just_past), false)
+    );
+    // The origin and the head are the caught-up cases the reply format already covers.
+    assert_eq!(
+        tool_text(&alice.call("lattice_subscribe", &subscribe_args(&head, 0))),
+        (caught_up_text(&head), false)
+    );
+    // Malformed: LSN 0 with a nonzero index is not a cursor the feed can hold, whatever the store holds.
+    let malformed = alice.call(
+        "lattice_subscribe",
+        &subscribe_args("000000000000000000000001", 0),
+    );
+    assert!(is_tool_error(&malformed, "{\"error\":\"invalid_cursor\"}"));
+    // Not the wire form (upper case digits): refused as an argument, before the backend.
+    let upper = alice.call(
+        "lattice_subscribe",
+        &subscribe_args("00000000000000000000000A", 0),
+    );
+    assert_eq!(error_code(&upper), -32602);
+}
+
+#[test]
+fn a_far_future_cursor_reads_the_same_for_every_principal_whatever_is_hidden() {
+    let rig = setup();
+    let mut alice = rig.conn("alice");
+    let mut bob = rig.conn("bob");
+    assert!(applied(&alice.write("kv", "k1", "a", None), 1));
+    let head = alice.subscribe(ORIGIN, 0).next;
+    let far = "ffffffffffffffffffffffff";
+    // Alice (kv read and write) and bob (kv read only) get the same reply to a far-future cursor.
+    let alice_far = tool_text(&alice.call("lattice_subscribe", &subscribe_args(far, 0)));
+    let bob_far = tool_text(&bob.call("lattice_subscribe", &subscribe_args(far, 0)));
+    assert_eq!(alice_far, (caught_up_text(far), false));
+    assert_eq!(bob_far, alice_far);
+    // Commits nobody here may read (table other) do not change the reply, with or without a wait.
+    let mut carol = rig.conn("carol");
+    for i in 0..3 {
+        assert!(applied(
+            &carol.write("other", &format!("h{i}"), "secret", None),
+            1
+        ));
+    }
+    assert_eq!(
+        tool_text(&alice.call("lattice_subscribe", &subscribe_args(far, 0))),
+        alice_far
+    );
+    assert_eq!(
+        tool_text(&bob.call("lattice_subscribe", &subscribe_args(far, 30))),
+        bob_far
+    );
+    // Bob's reply to the head is the same reply with only the echoed cursor changed: a future cursor
+    // cannot be told from the head.
+    let bob_head = tool_text(&bob.call("lattice_subscribe", &subscribe_args(&head, 0)));
+    assert_eq!(bob_head, (caught_up_text(&head), false));
+    assert_eq!(bob_far.0.replace(far, &head), bob_head.0);
+}
+
+#[test]
+fn a_planted_inclusive_subscribe_cursor_is_caught() {
+    let rig = setup();
+    let mut alice = rig.conn("alice");
+    assert!(applied(&alice.write("kv", "k1", "a", None), 1));
+    catches(Bug::McpSubscribeInclusiveCursor, || {
+        let first = alice.subscribe(ORIGIN, 0);
+        let again = alice.subscribe(&first.next, 0);
+        first.events.len() == 1 && again.events.is_empty()
+    });
 }

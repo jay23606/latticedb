@@ -64,7 +64,7 @@ All inputs are objects with `additionalProperties: false`.
 |---|---|---|
 | `lattice_read` | `scope`, `table` | `key` (omit for a page), `limit` 1..1000 |
 | `lattice_write` | `scope`, `table`, `key`, `value` (up to 64 KiB) | `expected_version` |
-| `lattice_subscribe` | `scope`, `table` | `after` (resume cursor) |
+| `lattice_subscribe` | `scope`, `table` | `after` (feed cursor: 24 lowercase hex digits, the origin when omitted), `wait_ms` 0..30000 (default 0) |
 
 `scope` is a path of `/`-separated segments of `[A-Za-z0-9_-]` (no `.`, no empty segment, at most 128
 characters); `table` is `[A-Za-z0-9_]` up to 64 characters. `minLength` and `maxLength` count
@@ -81,8 +81,8 @@ A backend's output is bounded by its type: `ToolOutput::new` refuses text over 1
 reported as a tool execution error (`isError: true`), for failures the model can correct. The server never fails a call after the backend
 returns success, so a write that was applied is never reported as an error that a client would retry.
 A write backend must build or bound its output before it commits, or return the notice.
-`lattice_subscribe` returns what the backend returns for the cursor; streaming notifications are not
-implemented.
+`lattice_subscribe` is a poll with a bounded wait (see "Subscribe" below); streaming notifications are
+not implemented.
 
 ## Scoping
 
@@ -113,10 +113,10 @@ backend lives in `latticed`, and `lattice-api` gained `PrincipalSql` (SQL for on
   statement ceiling and memory budget of a PostgreSQL connection of the same account. The `Caller`
   given with each call must equal the one the backend derived from the principal (`caller_for`); any
   other is `40302`. Arguments cannot name an identity: the schemas have no such member.
-- **Grants.** A tool grant names a scope, not a table. `caller_for` grants `lattice_read` on the
-  workspace scope when the principal holds the read bit on at least one table, `lattice_write` when it
-  holds the write bit on at least one, and never `lattice_subscribe`; `allow-all` gets read and write,
-  `deny-all` nothing. Which tables, is the executor's decision on every statement (interim table
+- **Grants.** A tool grant names a scope, not a table. `caller_for` grants `lattice_read` and
+  `lattice_subscribe` on the workspace scope when the principal holds the read bit on at least one table
+  (subscribing is reading), `lattice_write` when it holds the write bit on at least one; `allow-all` gets
+  all three, `deny-all` nothing. Which tables is the executor's decision on every statement (interim table
   grants, issue #522): a table the principal holds no bit on is invisible.
 - **Scope.** The `scope` argument must be the workspace the backend serves; `table` must be `[a-z0-9_]`
   up to 64 characters. `sync_scope` maps the pair to the sync scope `table/<name>` and refuses what it
@@ -143,6 +143,66 @@ backend lives in `latticed`, and `lattice-api` gained `PrincipalSql` (SQL for on
   and `rejected` (the table refused the value). A stopped executor or an exceeded statement ceiling is
   `50001`. No error holds caller-supplied or stored text.
 
+## Subscribe
+
+`lattice_subscribe` is the poll-with-cursor floor of the live collaboration design (issue #579, part 2 of
+#526; `docs/design/live-collaboration.md`): an agent that cannot hold a stream calls it with the cursor it
+saved and, with `wait_ms`, is woken when a commit arrives. It reads the change feed as the connection's
+principal, so it sees exactly the events a PostgreSQL reader of the same account would get from the feed.
+
+- **Cursor.** The 12-byte feed cursor (commit LSN as a big-endian `u64`, then the index in its change set
+  as a big-endian `u32`), written as 24 lowercase hex digits. Only that spelling is accepted; upper case
+  or another length is `-32602`. Omitting `after` starts from the origin (24 zeros). Events come back
+  strictly after the cursor, in cursor order.
+- **Wait.** `wait_ms` is at most 30 000 and defaults to 0, which answers at once. When no readable event
+  exists, the call waits on the host's commit notifier for at most `wait_ms`, then answers with no events
+  at the cursor it was given. Every wake re-reads the feed; a wake that finds nothing this principal can
+  read (a commit to a table it may not see) is not reported, the wait goes on, so a hidden commit does not
+  end the call (threat model G-07). Shutdown of the host ends a waiting call with `50001`. The content of a
+  reply does not depend on hidden commits; its latency may (see Known limits).
+- **Reply.** One JSON text in the fixed envelope:
+  `{"tool":"lattice_subscribe","notice":"<NOTICE>","truncated":false,"next_cursor":"<24 hex>","untrusted":{"events":[{"cursor":"<24 hex>","op":"upsert","author":"<32 hex>","entity":"<hex>","columns":{"key":"k","value":"v","version":"1"}}]}}`.
+  `op` is `upsert` or `delete`; `author` is the 16-byte author id of the commit (`00..00` when unknown);
+  `entity` is the row's raw key in hex; `columns` are the row's columns as text (`null` for SQL `NULL`),
+  present for an upsert the executor can decode, and `null` for a delete or for a table recovered from the
+  log without its definition. Everything except `tool`, `notice`, `truncated` and `next_cursor` sits under
+  `untrusted`.
+- **Bounds.** A reply carries at most 64 events (the codec's bound on an array, `MAX_ITEMS`) and at most the
+  1 MiB output bound less the envelope. A reply that stops early sets `truncated`; the next call from its
+  `next_cursor` continues. An event too large to return with the rest is returned on its own, without its
+  columns (`"omitted":"too_large"`), so a reader is never stuck on one event.
+- **Cursor movement.** `next_cursor` is the cursor of the last event returned, or the cursor given when none
+  was. It moves only on events the principal can read, so the reply does not reveal how many hidden commits
+  there were. Reading on from `next_cursor` never skips and never repeats an event.
+- **Not returned.** A count of unseen changes. It would tell a table-restricted reader how many hidden
+  commits happened (issue #363), so no reply carries it; `truncated` says only that more events exist.
+- **A cursor ahead of the newest commit** is not an error. It is answered exactly as a caught-up cursor
+  is: no events, `truncated` false, `next_cursor` equal to the cursor given, and the same `wait_ms` wait.
+  Once the head reaches it, events after it are returned as usual. Refusing it would tell a reader of any
+  table it can read where the head is, and with it how many commits are hidden from it (issue #363).
+- **Errors.** `{"error":"invalid_cursor"}`: the cursor is malformed, which is decided from its bytes before
+  the store is read (LSN 0 with a nonzero index; the wire-form check already refuses other spellings with
+  `-32602`). `{"error":"cursor_too_old"}`: the cursor is below the vacuum floor, so the history it needs may
+  be gone; the client must read the table again and subscribe from a new cursor (snapshot-then-tail, issue
+  #525, is not built). The floor is a store-wide value, so this error does not depend on what the principal
+  may read. A table the principal may not read is `{"error":"not_found"}`, the same answer as a table that
+  does not exist.
+- **Known limits (issue #363 is not closed).** Each of these is a signal a table-restricted reader can
+  observe. None is a count of hidden commits in the reply itself.
+  - Quiet-table wedge: the feed scan is not per table. A reader of a quiet table can meet a large run of
+    commits to other tables, and once that run passes the step budget of `feed_source` (about 4.2 million
+    versions by default) every poll answers `50001`. The threshold reveals that hidden activity was large
+    (issues #525 and #661 are the mitigations).
+  - Timing: a visible event answers at once. Each wake re-reads the feed, so a waiting call's latency
+    rises with hidden activity, while its reply stays the same.
+  - A corrupt event: if a feed event's bytes do not decode, the whole call fails with `50001` and every
+    later call from the same cursor fails the same way. Only corrupted feed bytes can cause this; it needs
+    the store repaired or reopened.
+  - Long-poll budget: there is no per-principal cap on waiting or feed work (issues #529 and #543). A
+    waiting call holds its worker for up to 30 seconds. When the notifier has no room for another sleeper
+    (the host's commit-waiter limit), the call polls the feed about 50 times a second until the cap of
+    #529 bounds the waiters.
+
 ## Not implemented
 
 - Transports (stdio framing, Streamable HTTP) and any socket or process handling.
@@ -154,10 +214,12 @@ backend lives in `latticed`, and `lattice-api` gained `PrincipalSql` (SQL for on
 - `subscriptions/listen` and `notifications/tools/list_changed`.
 - Output schemas, structured content and tool annotations.
 - Rate limiting.
-- `lattice_subscribe` has no backend yet (issue #579: the 12-byte feed cursor and a bounded `wait_ms`
-  long poll). The executor backend does not grant it, so it is not listed and a call is `40301`.
-- A cursor in `lattice_read` and `lattice_write` results, and a count of unseen changes: they need the
-  cursor type of #579 and the decision on what a head cursor reveals to a restricted reader (#363).
+- A cursor in `lattice_read` and `lattice_write` results. The cursor type now exists (see "Subscribe"),
+  but no read or write result carries one yet.
+- A count of unseen changes. It is not built, and would reveal hidden commits to a restricted reader
+  (issue #363), so it is not planned for a restricted caller.
+- The per-principal limit on long polls (issue #529): a `wait_ms` call holds a connection's worker for up
+  to 30 seconds, and only the host's commit-waiter limit bounds how many sleep at once.
 - Presence, search, document and workflow tools.
 
 ## Evidence
@@ -165,9 +227,16 @@ backend lives in `latticed`, and `lattice-api` gained `PrincipalSql` (SQL for on
 The executor backend's tests (`cargo test -p latticed --lib mcp_backend`) run the server over a real
 `ExecHost` with bearer-authenticated principals; they check writes against a SQL reader and the change
 feed, version conflicts (also from concurrent writers), the fixed envelope byte for byte, denied equal to
-missing, the output bound, the scope mapping and the grant mapping. Four planted bugs are each caught by a
-witness: `McpCallerFromArgument`, `McpWriteIgnoresExpectedVersion`, `McpDeniedTableDistinguishable` and
-`McpRowTextOutsideEnvelope`.
+missing, the output bound, the scope mapping and the grant mapping. Five planted bugs are each caught by a
+witness: `McpCallerFromArgument`, `McpWriteIgnoresExpectedVersion`, `McpDeniedTableDistinguishable`,
+`McpRowTextOutsideEnvelope` and `McpSubscribeInclusiveCursor`.
+
+The subscribe tests in the same module check the reply against the change feed read directly (the same
+cursors and authors, in order), a seeded interleaving of writes and calls that must yield every key once in
+write order, the wait bound and wake-up, shutdown cancelling a waiting call, two principals with hidden
+commits that do not move the cursor, a delete, the event and byte bounds with resumption, a cursor ahead of
+the head answered as caught up (identically for two principals, with and without hidden commits, and equal
+to the reply at the head apart from the echoed cursor), and refusal of a malformed cursor.
 
 Unit and property tests live beside the code (`cargo test -p lattice-sdk mcp`): byte vectors per
 message, a schema table, a grant table, a `_meta` table, a dual-era connection test, a mock backend that

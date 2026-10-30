@@ -54,6 +54,44 @@ pub const MAX_VALUE_CHARS: usize = 64 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 1 << 20;
 /// Longest scope string, in bytes.
 pub const MAX_SCOPE_BYTES: usize = 128;
+/// Length of a feed cursor: the commit LSN (`u64`, big endian) then the index in its change set
+/// (`u32`, big endian), so byte order is cursor order. The same 12 bytes as `lattice_core::feed`.
+pub const CURSOR_LEN: usize = 12;
+/// A feed cursor as the tools carry it. On the wire it is [`CURSOR_LEN`] bytes of lowercase hex.
+pub type FeedCursor = [u8; CURSOR_LEN];
+/// Longest `wait_ms` a `lattice_subscribe` call may ask for, in milliseconds.
+pub const MAX_WAIT_MS: u32 = 30_000;
+
+/// The wire form of a feed cursor: 24 lowercase hex digits.
+#[must_use]
+pub fn cursor_to_hex(cursor: &FeedCursor) -> String {
+    let mut out = String::with_capacity(2 * CURSOR_LEN);
+    for b in cursor {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// Parses the wire form of a feed cursor. Only the one spelling is accepted (24 lowercase hex
+/// digits), so a cursor has exactly one text form.
+#[must_use]
+pub fn cursor_from_hex(text: &str) -> Option<FeedCursor> {
+    if !is_cursor_hex(text) {
+        return None;
+    }
+    let mut out = [0u8; CURSOR_LEN];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let pair = text.get(2 * i..2 * i + 2)?;
+        *slot = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(out)
+}
+
+fn is_cursor_hex(s: &str) -> bool {
+    s.len() == 2 * CURSOR_LEN
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 
 /// JSON-RPC and application error codes. Application codes are outside the JSON-RPC reserved range
 /// `-32768..=-32000`, as the specification recommends.
@@ -597,6 +635,8 @@ enum Fmt {
     Text,
     Scope,
     Ident,
+    /// Exactly the 24 lowercase hex digits of a feed cursor.
+    Cursor,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -682,12 +722,22 @@ const EXPECTED: Prop = Prop {
 };
 const AFTER: Prop = Prop {
     name: "after",
-    ty: Ty::Int {
-        min: 0,
-        max: MAX_SAFE_INT,
+    ty: Ty::Str {
+        min: 2 * CURSOR_LEN,
+        max: 2 * CURSOR_LEN,
+        fmt: Fmt::Cursor,
     },
     required: false,
-    desc: "Resume after this cursor (default 0, from the start).",
+    desc: "Resume after this cursor: 24 lowercase hex digits from the last result's next_cursor; omit to start from the origin.",
+};
+const WAIT_MS: Prop = Prop {
+    name: "wait_ms",
+    ty: Ty::Int {
+        min: 0,
+        max: MAX_WAIT_MS as i64,
+    },
+    required: false,
+    desc: "Longest time in milliseconds to wait for a new event when there is none (default 0: answer now).",
 };
 
 impl Tool {
@@ -722,7 +772,7 @@ impl Tool {
         match self {
             Tool::Read => &[SCOPE, TABLE, KEY_OPT, LIMIT],
             Tool::Write => &[SCOPE, TABLE, KEY_REQ, VALUE, EXPECTED],
-            Tool::Subscribe => &[SCOPE, TABLE, AFTER],
+            Tool::Subscribe => &[SCOPE, TABLE, AFTER, WAIT_MS],
         }
     }
 
@@ -801,8 +851,10 @@ pub enum ToolCall {
         scope: String,
         /// Table.
         table: String,
-        /// Resume cursor.
-        after: u64,
+        /// Resume cursor: the events strictly after it are returned (the origin when absent).
+        after: FeedCursor,
+        /// Longest wait for a first event, in milliseconds, at most [`MAX_WAIT_MS`].
+        wait_ms: u32,
     },
 }
 
@@ -866,6 +918,7 @@ fn check_prop<'a>(p: &Prop, v: &'a Json) -> Result<Val<'a>, RpcError> {
                     .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r')),
                 Fmt::Scope => is_valid_scope(s),
                 Fmt::Ident => is_ident(s),
+                Fmt::Cursor => is_cursor_hex(s),
             };
             if ok {
                 Ok(Val::Str(s))
@@ -953,7 +1006,12 @@ pub fn validate_args(tool: Tool, args: &Json) -> Result<ToolCall, RpcError> {
         Tool::Subscribe => ToolCall::Subscribe {
             scope,
             table,
-            after: n("after").and_then(|v| u64::try_from(v).ok()).unwrap_or(0),
+            after: s("after")
+                .and_then(|h| cursor_from_hex(&h))
+                .unwrap_or([0; CURSOR_LEN]),
+            wait_ms: n("wait_ms")
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(0),
         },
     })
 }
@@ -1523,7 +1581,8 @@ mod tests {
             r#""description":"Subscribe to changes of a table in a scope you may read.","inputSchema":{"type":"object","#,
             r#""properties":{"scope":{"type":"string","minLength":1,"maxLength":128,"description":"Scope path such as workspace/project; must be covered by one of your grants."},"#,
             r#""table":{"type":"string","minLength":1,"maxLength":64,"description":"Table name: ASCII letters, digits and underscore."},"#,
-            r#""after":{"type":"integer","minimum":0,"maximum":9007199254740991,"description":"Resume after this cursor (default 0, from the start)."}},"#,
+            r#""after":{"type":"string","minLength":24,"maxLength":24,"description":"Resume after this cursor: 24 lowercase hex digits from the last result's next_cursor; omit to start from the origin."},"#,
+            r#""wait_ms":{"type":"integer","minimum":0,"maximum":30000,"description":"Longest time in milliseconds to wait for a new event when there is none (default 0: answer now)."}},"#,
             r#""required":["scope","table"],"additionalProperties":false}}]}}"#
         );
         assert_eq!(out.as_deref(), Some(expected));
@@ -1604,7 +1663,7 @@ mod tests {
             &all("team"),
             &call_msg(
                 "lattice_subscribe",
-                r#"{"scope":"team","table":"t","after":9}"#,
+                r#"{"scope":"team","table":"t","after":"000000000000000900000007","wait_ms":250}"#,
             ),
         );
         assert_eq!(
@@ -1612,7 +1671,9 @@ mod tests {
             Some(&ToolCall::Subscribe {
                 scope: "team".into(),
                 table: "t".into(),
-                after: 9
+                // lsn 9, index 7: the 12 bytes big endian, the same bytes the feed encodes.
+                after: [0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 7],
+                wait_ms: 250
             })
         );
         // A version conflict is a tool execution error, not a protocol error.
@@ -1855,6 +1916,36 @@ mod tests {
                 r#"{"scope":"a","table":"t","after":null}"#.into(),
                 "argument has wrong type",
                 Some("after"),
+            ),
+            (
+                "lattice_subscribe",
+                r#"{"scope":"a","table":"t","after":9}"#.into(),
+                "argument has wrong type",
+                Some("after"),
+            ),
+            (
+                "lattice_subscribe",
+                r#"{"scope":"a","table":"t","after":"00000000000000090000000A"}"#.into(),
+                "argument has invalid format",
+                Some("after"),
+            ),
+            (
+                "lattice_subscribe",
+                r#"{"scope":"a","table":"t","after":"0000000000000009000000"}"#.into(),
+                "argument out of range",
+                Some("after"),
+            ),
+            (
+                "lattice_subscribe",
+                r#"{"scope":"a","table":"t","wait_ms":30001}"#.into(),
+                "argument out of range",
+                Some("wait_ms"),
+            ),
+            (
+                "lattice_subscribe",
+                r#"{"scope":"a","table":"t","wait_ms":-1}"#.into(),
+                "argument out of range",
+                Some("wait_ms"),
             ),
         ];
         for (tool, args, msg, field) in cases {
@@ -2496,5 +2587,29 @@ mod tests {
         let big = ToolOutput::tool_error("x".repeat(MAX_OUTPUT_BYTES + 1));
         assert_eq!((big.text(), big.is_error()), (OUTPUT_OMITTED, true));
         assert!(!ToolOutput::or_notice("{}".to_owned()).is_error());
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn feed_cursor_has_one_text_form_and_round_trips() {
+        // The 12 bytes of the feed encoding, in order: lsn then index, both big endian.
+        let c: FeedCursor = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13];
+        assert_eq!(cursor_to_hex(&c), "01020304050607080a0b0c0d");
+        assert_eq!(cursor_from_hex("01020304050607080a0b0c0d"), Some(c));
+        assert_eq!(cursor_to_hex(&[0; CURSOR_LEN]), "0".repeat(24));
+        // Upper case, a wrong length and a non-hex digit are not cursors.
+        for bad in [
+            "01020304050607080A0B0C0D",
+            "0102030405060708",
+            "0102030405060708 a0b0c0d",
+            "0102030405060708g0b0c0d0",
+            "",
+        ] {
+            assert_eq!(cursor_from_hex(bad), None, "{bad}");
+        }
     }
 }

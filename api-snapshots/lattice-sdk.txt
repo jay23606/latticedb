@@ -455,9 +455,10 @@ pub lattice_sdk::mcp::ToolCall::Read::limit: u32
 pub lattice_sdk::mcp::ToolCall::Read::scope: alloc::string::String
 pub lattice_sdk::mcp::ToolCall::Read::table: alloc::string::String
 pub lattice_sdk::mcp::ToolCall::Subscribe
-pub lattice_sdk::mcp::ToolCall::Subscribe::after: u64
+pub lattice_sdk::mcp::ToolCall::Subscribe::after: lattice_sdk::mcp::FeedCursor
 pub lattice_sdk::mcp::ToolCall::Subscribe::scope: alloc::string::String
 pub lattice_sdk::mcp::ToolCall::Subscribe::table: alloc::string::String
+pub lattice_sdk::mcp::ToolCall::Subscribe::wait_ms: u32
 pub lattice_sdk::mcp::ToolCall::Write
 pub lattice_sdk::mcp::ToolCall::Write::expected_version: core::option::Option<u64>
 pub lattice_sdk::mcp::ToolCall::Write::key: alloc::string::String
@@ -578,6 +579,7 @@ pub fn lattice_sdk::mcp::ToolOutput::eq(&self, &Self) -> bool
 impl core::fmt::Debug for lattice_sdk::mcp::ToolOutput
 pub fn lattice_sdk::mcp::ToolOutput::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for lattice_sdk::mcp::ToolOutput
+pub const lattice_sdk::mcp::CURSOR_LEN: usize
 pub const lattice_sdk::mcp::LEGACY_PROTOCOL_VERSION: &str
 pub const lattice_sdk::mcp::MAX_DEPTH: usize
 pub const lattice_sdk::mcp::MAX_ITEMS: usize
@@ -586,16 +588,20 @@ pub const lattice_sdk::mcp::MAX_NODES: usize
 pub const lattice_sdk::mcp::MAX_OUTPUT_BYTES: usize
 pub const lattice_sdk::mcp::MAX_SCOPE_BYTES: usize
 pub const lattice_sdk::mcp::MAX_VALUE_CHARS: usize
+pub const lattice_sdk::mcp::MAX_WAIT_MS: u32
 pub const lattice_sdk::mcp::OUTPUT_OMITTED: &str
 pub const lattice_sdk::mcp::PROTOCOL_VERSION: &str
 pub trait lattice_sdk::mcp::ToolBackend
 pub fn lattice_sdk::mcp::ToolBackend::call(&mut self, &lattice_sdk::mcp::Caller, &lattice_sdk::mcp::ToolCall) -> core::result::Result<lattice_sdk::mcp::ToolOutput, lattice_sdk::mcp::BackendError>
+pub fn lattice_sdk::mcp::cursor_from_hex(&str) -> core::option::Option<lattice_sdk::mcp::FeedCursor>
+pub fn lattice_sdk::mcp::cursor_to_hex(&lattice_sdk::mcp::FeedCursor) -> alloc::string::String
 pub fn lattice_sdk::mcp::decode(&[u8]) -> core::result::Result<lattice_sdk::mcp::Incoming, lattice_sdk::mcp::Failure>
 pub fn lattice_sdk::mcp::encode_error(core::option::Option<&lattice_sdk::mcp::Id>, &lattice_sdk::mcp::RpcError) -> alloc::string::String
 pub fn lattice_sdk::mcp::encode_result(&lattice_sdk::mcp::Id, &str) -> alloc::string::String
 pub fn lattice_sdk::mcp::is_valid_scope(&str) -> bool
 pub fn lattice_sdk::mcp::parse_json(&[u8]) -> core::result::Result<lattice_sdk::mcp::Json, lattice_sdk::mcp::ParseError>
 pub fn lattice_sdk::mcp::validate_args(lattice_sdk::mcp::Tool, &lattice_sdk::mcp::Json) -> core::result::Result<lattice_sdk::mcp::ToolCall, lattice_sdk::mcp::RpcError>
+pub type lattice_sdk::mcp::FeedCursor = [u8; 12]
 pub mod lattice_sdk::outbox
 pub enum lattice_sdk::outbox::DecodeError
 pub lattice_sdk::outbox::DecodeError::BadChecksum

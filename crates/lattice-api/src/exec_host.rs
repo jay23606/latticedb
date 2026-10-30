@@ -324,6 +324,8 @@ enum Request {
         after: Vec<u8>,
         limit: usize,
         scan: usize,
+        /// Whether to decode each upsert's row into columns on the actor thread.
+        decode: bool,
         token: CancellationToken,
         reply: SyncSender<Result<crate::feed_source::Chunk, SourceError>>,
     },
@@ -1056,6 +1058,7 @@ fn serve<I, C, R>(
                 after,
                 limit,
                 scan,
+                decode,
                 token,
                 reply,
             } => {
@@ -1063,15 +1066,17 @@ fn serve<I, C, R>(
                     // The reader gave up before the read started; nothing is read.
                     Err(SourceError::Unavailable)
                 } else {
+                    let guard = db.borrow();
                     crate::feed_source::read_feed_chunk(
-                        &db.borrow(),
-                        policies,
-                        &principal,
-                        &scope,
-                        &after,
-                        limit,
-                        scan,
+                        &guard, policies, &principal, &scope, &after, limit, scan,
                     )
+                    .map(|mut chunk| {
+                        if decode {
+                            chunk.columns =
+                                crate::feed_source::decode_columns(guard.schema(), &chunk.events);
+                        }
+                        chunk
+                    })
                 };
                 let _ = reply.send(result);
             }
@@ -1354,6 +1359,7 @@ impl FeedHandle {
         after: &[u8],
         limit: usize,
         scan: usize,
+        decode: bool,
     ) -> Result<crate::feed_source::Chunk, SourceError> {
         let mut budget = Budget::new(self.wait);
         let token = CancellationToken::default();
@@ -1364,6 +1370,7 @@ impl FeedHandle {
             after: after.to_vec(),
             limit,
             scan,
+            decode,
             token: token.clone(),
             reply,
         };
