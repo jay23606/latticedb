@@ -10,13 +10,36 @@
 //! directory written before definitions existed refuses its first `CREATE TABLE` until
 //! [`SqlConfig::allow_format_upgrade`] is set; a new directory needs nothing.
 
-use crate::ws::{CommitWake, GatewayConfig, GatewayHandle};
+use crate::mcp_backend::{McpBackend, SUBSCRIBE_LIMIT};
+use crate::ws::{CommitWake, GatewayConfig, GatewayHandle, McpBackends};
 use crate::{ServerConfig, ServerHandle};
 use lattice_api::exec_host::{ExecHost, HostLimits, PolicyTable};
+use lattice_api::principal::Principal;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// The MCP tool backends of this database: one per verified principal, over the executor, with the
+/// row grant that principal's account has (issue #526).
+struct ExecMcp {
+    host: Arc<ExecHost>,
+    policies: PolicyTable,
+    workspace: String,
+}
+
+impl McpBackends for ExecMcp {
+    fn backend(&self, principal: &Principal) -> Option<McpBackend> {
+        McpBackend::new(
+            self.host.sql_for(principal.clone()),
+            self.policies.grant_for(principal),
+            &self.workspace,
+            self.host.feed_source(SUBSCRIBE_LIMIT),
+            self.host.commit_notifier(),
+        )
+        .ok()
+    }
+}
 
 /// SQL settings for [`SqlServer::start`].
 #[derive(Debug, Clone)]
@@ -102,6 +125,7 @@ impl SqlServer {
             + crate::CONTROL_CONNECTION_RESERVE
             + 16
             + gateway.as_ref().map_or(0, |g| g.max_connections);
+        let policies = sql.policies.clone();
         let host = Arc::new(
             ExecHost::start_dir_with(
                 sql.data_dir,
@@ -119,10 +143,16 @@ impl SqlServer {
                 let feeds = Arc::clone(&host);
                 // One feed source per connection; the commit notifier says when to read.
                 let wake = CommitWake(host.commit_notifier());
-                Some(GatewayHandle::start(
+                let mcp: Arc<dyn McpBackends> = Arc::new(ExecMcp {
+                    host: Arc::clone(&host),
+                    policies,
+                    workspace: cfg.mcp_workspace.clone(),
+                });
+                Some(GatewayHandle::start_with_mcp(
                     cfg,
                     move || feeds.feed_source(lattice_api::sync::MAX_EVENTS_PER_FRAME),
                     Arc::new(wake),
+                    Some(mcp),
                 )?)
             }
         };

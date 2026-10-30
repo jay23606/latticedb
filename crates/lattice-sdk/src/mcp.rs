@@ -1197,8 +1197,9 @@ pub enum Mode {
     /// Revision 2026-07-28: every request carries its own `_meta`. The initial mode.
     Stateless,
     /// The connection opened with a successful `initialize` (2025-11-25 semantics): `_meta` is
-    /// optional. Set only by `initialize`, never by a missing `_meta`, and kept for the life of the
-    /// [`Server`] (one server per connection).
+    /// optional. Set by `initialize` on a connection, never by a missing `_meta`, and kept for the life
+    /// of the [`Server`] (one server per connection). [`Server::sessionless`] starts in this mode for a
+    /// transport that keeps no session.
     Legacy,
 }
 
@@ -1247,6 +1248,19 @@ impl<B: ToolBackend> Server<B> {
         Self {
             backend,
             mode: Mode::Stateless,
+        }
+    }
+
+    /// A server for a transport that keeps no session, such as one HTTP request. It starts in
+    /// [`Mode::Legacy`]: `_meta` is optional and no `initialize` is needed first, as standard MCP
+    /// clients over HTTP send none. A `_meta` that is present is still validated (a version other than
+    /// the two revisions is `-32022`). Nothing is kept from one message to the next, so a server of this
+    /// kind serves one message.
+    #[must_use]
+    pub fn sessionless(backend: B) -> Self {
+        Self {
+            backend,
+            mode: Mode::Legacy,
         }
     }
 
@@ -2434,6 +2448,33 @@ mod tests {
         assert!(out.contains(r#""supported":["2026-07-28","2025-11-25"]"#));
         // Mode is per server (per connection): a fresh server is stateless again.
         assert_eq!(Server::new(Mock::default()).mode(), Mode::Stateless);
+    }
+
+    #[test]
+    fn a_sessionless_server_needs_no_meta_or_initialize_and_still_checks_the_meta_it_gets() {
+        let c = all("a");
+        let mut s = Server::sessionless(Mock::default());
+        assert_eq!(s.mode(), Mode::Legacy);
+        // A bare list with no initialize and no _meta is answered with the tools.
+        let out = s
+            .handle(&c, br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+            .expect("response");
+        assert!(out.contains("\"tools\":["), "{out}");
+        assert!(!out.contains("-32602"), "{out}");
+        // A bare ping is answered too.
+        let out = s.handle(&c, br#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#);
+        assert_eq!(
+            out.as_deref(),
+            Some(r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete"}}"#)
+        );
+        // A _meta that is present is still validated: the 2026-07-28 one passes ...
+        let good = r#"{"jsonrpc":"2.0","id":3,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+        let out = s.handle(&c, good.as_bytes()).expect("response");
+        assert!(out.contains("\"resultType\":\"complete\""), "{out}");
+        // ... and a version that is neither revision is refused.
+        let bad = r#"{"jsonrpc":"2.0","id":4,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"1900-01-01"}}}"#;
+        let out = s.handle(&c, bad.as_bytes()).expect("response");
+        assert!(out.contains(r#""code":-32022"#), "{out}");
     }
 
     // ---- injection -----------------------------------------------------------------------

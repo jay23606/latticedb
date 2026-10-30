@@ -562,6 +562,7 @@ pub fn lattice_sdk::mcp::Server<B>::handle(&mut self, &lattice_sdk::mcp::Caller,
 pub fn lattice_sdk::mcp::Server<B>::into_backend(self) -> B
 pub fn lattice_sdk::mcp::Server<B>::mode(&self) -> lattice_sdk::mcp::Mode
 pub fn lattice_sdk::mcp::Server<B>::new(B) -> Self
+pub fn lattice_sdk::mcp::Server<B>::sessionless(B) -> Self
 impl<B: core::fmt::Debug> core::fmt::Debug for lattice_sdk::mcp::Server<B>
 pub fn lattice_sdk::mcp::Server<B>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct lattice_sdk::mcp::ToolOutput

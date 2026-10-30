@@ -246,6 +246,20 @@ planted_bugs! {
     /// The MCP `lattice_subscribe` answers from a cursor one step back, so the event the client
     /// already has comes again on every call (duplicate delivery; a resumed reader sees a repeat).
     McpSubscribeInclusiveCursor,
+    /// The MCP HTTP endpoint serves a request whose `Host` is not its own address, so a page on another
+    /// name that resolves to loopback can call it (DNS rebinding, issue #580).
+    McpHostCheckSkipped,
+    /// The MCP HTTP endpoint serves a request that carries an `Origin` header, so a browser page on
+    /// another origin can call it (issue #580).
+    McpOriginCheckSkipped,
+    /// The MCP HTTP endpoint reads a body whose declared length is over its cap before refusing it,
+    /// so an oversize request is buffered (issue #527, declared length first).
+    McpBodyCheckedAfterRead,
+    /// The MCP HTTP endpoint runs a tool call as the identity the request body names, instead of the
+    /// one bound to the verified token (confused deputy). `McpBackend` still refuses a call whose caller
+    /// is not the one derived from its principal, so this defect alone does not widen access; its
+    /// witness in `latticed::ws::mcp_http` is what detects it.
+    McpPrincipalFromBody,
     /// Recovery decodes the definition blocks of the log but does not keep them in the catalog,
     /// so a table created with a definition comes back without one.
     DefinitionDroppedOnReplay,
@@ -402,6 +416,15 @@ impl Bug {
         Bug::McpSubscribeInclusiveCursor,
     ];
 
+    /// MCP HTTP endpoint defects (issues #527 and #580), detected by the witnesses in
+    /// `latticed::ws::mcp_http`. The mask is thread-local, so these are decided by pure rules.
+    pub const MCP_HTTP: [Bug; 4] = [
+        Bug::McpHostCheckSkipped,
+        Bug::McpOriginCheckSkipped,
+        Bug::McpBodyCheckedAfterRead,
+        Bug::McpPrincipalFromBody,
+    ];
+
     /// Guarded-WAL admission defects, exercised by independent context witnesses.
     pub const ADMISSION: [Bug; 3] = [
         Bug::RequiredGuardOmitted,
@@ -481,6 +504,7 @@ impl Bug {
         &Bug::AUTHOR,
         &Bug::GATEWAY,
         &Bug::MCP,
+        &Bug::MCP_HTTP,
     ];
 }
 

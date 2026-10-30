@@ -57,7 +57,18 @@
 //!
 //! TLS on the gateway port (so a non-loopback address is refused at start), idle deadlines, a byte
 //! budget per principal, the security event log and the same-port protocol sniff are #578, #529, #530.
+//!
+//! # The MCP endpoint
+//!
+//! `POST /mcp` on the same port (issue #527) is served by the `mcp_http` child module. It is routed
+//! from the request line before the WebSocket parser runs, and only when a [`McpBackends`] factory was
+//! given ([`GatewayHandle::start_with_mcp`]). Its Host, Origin, credential and size rules are those of
+//! the module's documentation; the credential store, the failure count per address and the connection
+//! places are the ones of this listener.
 
+mod mcp_http;
+
+use crate::mcp_backend::McpBackend;
 use crate::tokens::{CredentialWatch, Reload};
 use lattice_api::bearer::{CredentialStore, FailureLimiter, verify_bearer};
 use lattice_api::principal::Principal;
@@ -80,9 +91,13 @@ use zeroize::Zeroizing;
 /// A credential file that has not loaded for this long refuses every token until it loads (ADR 0031).
 pub const REFUSE_AFTER: Duration = Duration::from_secs(600);
 
-/// The only request target the gateway upgrades. Other routes (the MCP endpoint of issue #527) will
-/// be added beside it, so an unknown path is `404`, not a fallback to the sync protocol.
+/// The request target the gateway upgrades to the sync protocol. An unknown path is `404`, never a
+/// fallback to the sync protocol.
 pub const SYNC_PATH: &str = "/sync";
+
+/// The request target of the MCP tool endpoint (`POST`, issue #527). Served only when a
+/// [`McpBackends`] factory was given.
+pub const MCP_PATH: &str = "/mcp";
 
 /// The largest payload a client frame may carry, advertised as `Welcome.max_payload`. Every client
 /// message (`Hello`, `Subscribe`, `Ack`, `Error`, `Ping`, `Pong`) is far below it.
@@ -130,6 +145,14 @@ impl Wake for NoWake {
     fn token(&self) -> Option<u64> {
         Some(0)
     }
+}
+
+/// Builds the MCP tool backend of one verified principal (issue #526). The gateway calls it once per
+/// `POST /mcp`, with the principal the bearer token verified and no other input, so the backend is
+/// bound to that principal alone.
+pub trait McpBackends: Send + Sync {
+    /// The backend for `principal`, or `None` when the executor cannot serve one (answered `503`).
+    fn backend(&self, principal: &Principal) -> Option<McpBackend>;
 }
 
 /// How the gateway decides who is connected.
@@ -193,6 +216,9 @@ pub struct GatewayConfig {
     pub max_frames_per_pump: usize,
     /// WebSocket ping interval (ms of silence before a ping); 0 disables.
     pub ws_ping_interval: Duration,
+    /// The workspace the MCP endpoint serves: the `scope` every tool call names. A valid MCP scope
+    /// path (at most 128 bytes of `[A-Za-z0-9_-]` segments joined by `/`).
+    pub mcp_workspace: String,
 }
 
 impl Default for GatewayConfig {
@@ -217,6 +243,7 @@ impl Default for GatewayConfig {
             batch_events: 128,
             max_frames_per_pump: 2,
             ws_ping_interval: Duration::from_secs(30),
+            mcp_workspace: "default".to_owned(),
         }
     }
 }
@@ -258,6 +285,9 @@ impl GatewayConfig {
         }
         if self.failure_limit == 0 {
             return bad("gateway failure limit must be positive");
+        }
+        if !lattice_sdk::mcp::is_valid_scope(&self.mcp_workspace) {
+            return bad("gateway MCP workspace must be a valid MCP scope path");
         }
         // The host validates the rest when a connection is made; check it now so a bad value fails
         // at start, not on the first client.
@@ -521,6 +551,10 @@ struct Shared {
     epoch: Instant,
     stopping: AtomicBool,
     wake: Arc<dyn Wake>,
+    /// The address the listener actually bound (its port is the one `Host` must name).
+    bound: SocketAddr,
+    /// The MCP tool backends, when the endpoint is served.
+    mcp: Option<Arc<dyn McpBackends>>,
 }
 
 impl Shared {
@@ -596,6 +630,21 @@ impl GatewayHandle {
         S: EventSource + Send + 'static,
         F: Fn() -> S + Send + Sync + 'static,
     {
+        Self::start_with_mcp(config, source, wake, None)
+    }
+
+    /// As [`GatewayHandle::start`], and when `mcp` is given also serves `POST /mcp` (issue #527): each
+    /// call takes its tool backend from that factory, for the principal the bearer token verified.
+    pub fn start_with_mcp<S, F>(
+        config: GatewayConfig,
+        source: F,
+        wake: Arc<dyn Wake>,
+        mcp: Option<Arc<dyn McpBackends>>,
+    ) -> io::Result<Self>
+    where
+        S: EventSource + Send + 'static,
+        F: Fn() -> S + Send + Sync + 'static,
+    {
         config.validate()?;
         let (store, bearer, watch) = match &config.auth {
             GatewayAuth::LocalDevelopment => (CredentialStore::empty(), false, None),
@@ -624,6 +673,8 @@ impl GatewayHandle {
             epoch: Instant::now(),
             stopping: AtomicBool::new(false),
             wake,
+            bound: address,
+            mcp,
             cfg: config,
         });
         let state = Arc::clone(&shared);
@@ -824,7 +875,7 @@ fn serve<S: EventSource>(
         return;
     }
     let _ = socket.set_nodelay(true);
-    let Some((identity, leftover)) = upgrade(&mut socket, address, shared) else {
+    let Some((identity, leftover)) = upgrade(&mut socket, address, shared, &mut slot) else {
         return;
     };
     slot.upgraded();
@@ -875,6 +926,7 @@ fn upgrade(
     socket: &mut TcpStream,
     address: IpAddr,
     shared: &Shared,
+    slot: &mut Slot,
 ) -> Option<(Identity, Vec<u8>)> {
     let cfg = &shared.cfg;
     let deadline = Instant::now().checked_add(cfg.handshake_timeout)?;
@@ -894,7 +946,29 @@ fn upgrade(
         if shared.stopping.load(Ordering::Acquire) {
             return None;
         }
-        match websocket::parse_upgrade(&buf, &codec) {
+        // The request line decides the route before the WebSocket parser sees any byte, so `POST /mcp`
+        // is never refused as a non-GET upgrade.
+        let parsed = match mcp_http::route(&buf, shared.mcp.is_some()) {
+            mcp_http::Route::Mcp => {
+                mcp_http::answer(socket, buf, deadline, address, shared, slot);
+                return None;
+            }
+            mcp_http::Route::Pending if buf.len() >= cfg.max_head => {
+                reply(
+                    socket,
+                    &http_response(
+                        431,
+                        "Request Header Fields Too Large",
+                        "",
+                        "the request head is too large",
+                    ),
+                );
+                return None;
+            }
+            mcp_http::Route::Pending => Ok(None),
+            mcp_http::Route::Sync => websocket::parse_upgrade(&buf, &codec),
+        };
+        match parsed {
             Ok(Some((upgrade, used))) => break (upgrade, used),
             Ok(None) => {}
             Err(refused) => {

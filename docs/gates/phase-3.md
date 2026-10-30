@@ -278,6 +278,24 @@ waiting call (each wake re-reads the feed), `cursor_too_old` (the store-wide vac
 for up to 30 s, and when the notifier is full the call polls about 50 times a second), any MCP transport (#527), and the
 unseen-change count (not returned: it would reveal hidden commits, issue #363).
 
+Verification evidence, not an exit criterion: MCP over HTTP (issue #527, part 1, with the Host, Origin and content-type
+defences of issue #580). `POST /mcp` on the gateway port (`latticed::ws::mcp_http`, routed from the request line before
+the WebSocket parser runs) verifies the bearer token the way the WebSocket upgrade does, serves one JSON-RPC message per
+request as the verified principal through `McpBackend`, and closes. Tests: `cargo test -p latticed --lib mcp_http` (9
+passing locally: the Host, Origin, media-type, length and head rules, the route decision, and the witnesses),
+`cargo test -p latticed --test mcp_http` (18 passing locally, over real sockets: initialize, the notification, list and
+call as two principals with no `_meta` and no session, which is how standard HTTP MCP clients call it; a denied call
+answered like a missing table; a present `_meta` with a bad version refused; the same 401 bytes for missing and wrong credentials; a
+token in the URL refused and never echoed; the Host and Origin rules; a cross-origin POST that cannot call a tool; method,
+media type and declared length (413 before any body byte is read); a body that stops short cut at the deadline; rate
+limiting; revocation within the reload bound; a gateway without a credential store serving no MCP request; a principal
+named in the body ignored), `cargo test -p latticed --test ws_sync` (19 passing, one ignored as before, so the WebSocket
+path is unchanged) and `cargo test -p lattice-core --lib bugs` (2). Planted bugs `McpHostCheckSkipped`,
+`McpOriginCheckSkipped`, `McpBodyCheckedAfterRead` and `McpPrincipalFromBody` are caught by their witnesses. The switch is
+thread-local, so the socket tests cannot turn them on. Not done: stdio, Streamable HTTP streams, TLS on the gateway port
+(#578), the per-principal long-poll budget (#529), and a run with a real MCP client. The workspace gate, mutation testing,
+Miri and the long tests are left to CI.
+
 Verification evidence, not an exit criterion: `lattice-engines::feed_emit` (WP36, issue #238) emits the change feed
 from the row store's retained committed versions. One local run of `cargo test -p lattice-engines --lib feed_emit`
 (6 tests, default settings): the feed from every cursor of 12 seeded 14-commit histories equals an independently

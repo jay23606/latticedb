@@ -53,7 +53,7 @@ run over `psql` are in [integrations/board](integrations/board/CONVENTIONS.md).
 - The connected team workspace (work items, docs, specs and the links between them) and everything after it.
 - A stable release. Nightly builds exist, with checksums, SBOMs and build provenance, and the first
   alpha pre-release is described in the [alpha guide](docs/alpha.md); no tag claims a phase gate.
-- A usable agent gateway. The experimental WebSocket gateway (loopback only, no TLS, read only) and the MCP tool backend (`lattice_read`, `lattice_write`, `lattice_subscribe`) are on `main`, but no MCP transport serves the tools, so an agent client should use the PostgreSQL wire protocol (see [docs/alpha.md](docs/alpha.md#connect-an-agent-client)).
+- An experimental agent gateway. The WebSocket sync gateway (loopback only, no TLS, read only) and the MCP tools (`lattice_read`, `lattice_write`, `lattice_subscribe`) are on `main`. The tools are served as `POST /mcp` on the gateway port with a bearer token, on loopback and without TLS, so this is for trying the slice, not for production use (see [docs/mcp-v0.md](docs/mcp-v0.md#http-transport) and [docs/alpha.md](docs/alpha.md#connect-an-agent-client)).
 
 ## Progress toward the product
 
@@ -82,7 +82,7 @@ flowchart LR
 | 0 Repository and conventions | Done | [phase-0](docs/gates/phase-0.md) |
 | 1 Foundations and evaluation | Built. Gate open: 2 of 7 clean nightly runs recorded, Linux runtime numbers and two-maintainer sign-off pending | [phase-1](docs/gates/phase-1.md) |
 | 2 Storage engines and SQL | Storage, wire, auth, parser and single-table executor with durable table definitions exist. Joins and driver matrix open | [phase-2](docs/gates/phase-2.md) |
-| 3 Sync, CRDTs and SDKs | Building blocks exist. An experimental WebSocket sync gateway and an MCP tool backend are on `main`; no MCP transport yet; no live sync is production-ready | [phase-3](docs/gates/phase-3.md) |
+| 3 Sync, CRDTs and SDKs | Building blocks exist. An experimental WebSocket sync gateway and MCP tools over HTTP (`POST /mcp`) are on `main`; no stdio MCP transport yet; no live sync is production-ready | [phase-3](docs/gates/phase-3.md) |
 | 4 to 12 | Identity and policy, blobs and S3, schema packs, search, intelligence, role packs, cluster, optional models, 1.0 | [spec](docs/spec/README.md) |
 
 Full detail: [roadmap](docs/roadmap.md) and [milestones](https://github.com/moncifem/latticedb/milestones).

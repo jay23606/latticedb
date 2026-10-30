@@ -462,5 +462,9 @@ keep the credential directory on local storage.
 the host's feed and commit notifier, and runs every statement as that principal through the SQL executor, so the
 table grants, the author id of a commit and the statement budgets are the ones a PostgreSQL connection of the account
 gets. A table the principal may not see answers like a table that does not exist. Row text is returned under a fixed
-`untrusted` member. Nothing serves it yet: no listener, token header or MCP transport calls it (issues #527 and
-#580). See [docs/mcp-v0.md](../../docs/mcp-v0.md).
+`untrusted` member.
+
+It is served over HTTP as `POST /mcp` on the sync gateway port (`--gateway-listen` with `--gateway-tokens`; issue
+#527, part 1, with the Host, Origin and content-type defences of issue #580). Each request is verified against the
+bearer token and served as that token's principal, from `ws/mcp_http.rs`. There is no stdio transport. See
+[docs/mcp-v0.md](../../docs/mcp-v0.md#http-transport).

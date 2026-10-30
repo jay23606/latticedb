@@ -224,14 +224,18 @@ What is not shipped, so no agent client can use it yet:
   idle deadline and no per-principal byte budget. Bearer-token files are reloaded when they change and revoked
   connections are closed ([#577](https://github.com/moncifem/latticedb/issues/577)). It is not covered by the quickstart
   smoke test.
-- MCP over HTTP or stdio. `lattice-sdk` contains the MCP message codec, tool schemas and a grant layer
-  ([mcp-v0.md](mcp-v0.md)). The transport-independent tool backend in `latticed` serves `lattice_read`,
-  `lattice_write` and `lattice_subscribe` (issues [#526](https://github.com/moncifem/latticedb/issues/526) and [#579](https://github.com/moncifem/latticedb/issues/579); commits `8932717f` and `81953029`); `lattice_subscribe` is a long poll that waits at most 30 seconds. No MCP
-  transport serves these tools yet: no listener, token header or process exposes them to a client.
+- MCP over stdio. `lattice-sdk` contains the MCP message codec, tool schemas and a grant layer
+  ([mcp-v0.md](mcp-v0.md)). The tool backend in `latticed` serves `lattice_read`, `lattice_write` and
+  `lattice_subscribe` (issues [#526](https://github.com/moncifem/latticedb/issues/526) and [#579](https://github.com/moncifem/latticedb/issues/579)); `lattice_subscribe` is a long poll that waits at most 30 seconds.
+  Over HTTP the tools are served as `POST /mcp` on the experimental gateway (issue
+  [#527](https://github.com/moncifem/latticedb/issues/527), part 1), with a bearer token, on loopback and without
+  TLS. No stdio transport exists. The Claude Code CLI (2.1.314) was run once against this endpoint by hand, with
+  an HTTP MCP entry and a bearer header (`lattice_write` then `lattice_read`); no other client has been run, and the
+  tests send raw requests.
 - `lattice watch`.
 
-No MCP client has been run against `latticed`, so this page gives no client configuration and lists
-every client as untested. When a transport lands, each client entry will be added only after someone ran
+Apart from that one manual Claude Code run, no MCP client has been run against `latticed`, so this page gives no
+client configuration and lists every other client as untested. When a transport lands, each client entry will be added only after someone ran
 it, with the date and client version. The design of the live-collaboration slice that these pieces are
 building toward is [live-collaboration.md](design/live-collaboration.md); it is a proposal, not shipped
 behaviour.
@@ -291,7 +295,7 @@ optional models plugin; Windows.
 | [#360](https://github.com/moncifem/latticedb/issues/360) | No SCRAM channel binding; a client that skips certificate verification can be relayed. |
 | [#361](https://github.com/moncifem/latticedb/issues/361) | No security event log and no failed-authentication backoff for pgwire. |
 | No TLS on the gateway | The gateway listens on loopback only and has no TLS ([#578](https://github.com/moncifem/latticedb/issues/578)); do not expose it. The pgwire listener can use TLS (SCRAM mode). |
-| MCP transport | No HTTP or stdio transport is shipped (above). |
+| MCP transport | HTTP `POST /mcp` on the experimental loopback gateway only, with a bearer token and no TLS; no stdio transport (above). |
 | Containers | The image's entrypoint passes `--stdin-control off` and prints usage with no arguments. A published port needs SCRAM over TLS. `tests/image/smoke.sh` (CI job `image-smoke`) tests the amd64 image only; the `nightly` image predates this entrypoint until the next nightly build. See [Run in a container](#run-in-a-container). |
 | Platforms | No Windows (no signal handling or installer). Linux needs glibc as stated in the release notes. |
 

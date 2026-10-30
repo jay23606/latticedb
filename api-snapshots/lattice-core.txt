@@ -95,8 +95,12 @@ pub lattice_core::bugs::Bug::HlcRegress
 pub lattice_core::bugs::Bug::HlcSnapshotClamped
 pub lattice_core::bugs::Bug::LsnReusedAfterRecovery
 pub lattice_core::bugs::Bug::ManagedIndexesNotRecovered
+pub lattice_core::bugs::Bug::McpBodyCheckedAfterRead
 pub lattice_core::bugs::Bug::McpCallerFromArgument
 pub lattice_core::bugs::Bug::McpDeniedTableDistinguishable
+pub lattice_core::bugs::Bug::McpHostCheckSkipped
+pub lattice_core::bugs::Bug::McpOriginCheckSkipped
+pub lattice_core::bugs::Bug::McpPrincipalFromBody
 pub lattice_core::bugs::Bug::McpRowTextOutsideEnvelope
 pub lattice_core::bugs::Bug::McpSubscribeInclusiveCursor
 pub lattice_core::bugs::Bug::McpWriteIgnoresExpectedVersion
@@ -157,6 +161,7 @@ pub const lattice_core::bugs::Bug::GROUPS: &'static [&'static [lattice_core::bug
 pub const lattice_core::bugs::Bug::HLC_SNAPSHOT: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::KEY_LIMIT: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::MCP: [lattice_core::bugs::Bug; 5]
+pub const lattice_core::bugs::Bug::MCP_HTTP: [lattice_core::bugs::Bug; 4]
 pub const lattice_core::bugs::Bug::NON_PREFIX: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::NOTIFY: [lattice_core::bugs::Bug; 2]
 pub const lattice_core::bugs::Bug::POLICY: [lattice_core::bugs::Bug; 2]

@@ -3,7 +3,8 @@
 First slice of the Model Context Protocol server (WP52, issue #254, requirement P3-13): a sans-I/O
 message codec, three scoped tools and a grant layer, in `crates/lattice-sdk/src/mcp.rs`, and a tool
 backend over the SQL executor in `crates/latticed/src/mcp_backend.rs` (issue #526, part 1, see
-"Backend over the executor"). There is no transport yet, so nothing listens on a socket and no phase
+"Backend over the executor"). The one transport is HTTP: `POST /mcp` on the sync gateway port (issue
+#527, part 1, see "HTTP transport"). There is no stdio transport and no streaming transport, and no phase
 exit criterion is claimed.
 
 ## Protocol revision
@@ -36,13 +37,18 @@ Every result carries `resultType: "complete"`.
 
 | Connection | `_meta` missing | `_meta` not an object | version or capabilities member missing or mistyped | version not accepted |
 |---|---|---|---|---|
-| Stateless (default) | `-32602` | `-32602` | `-32602` | `-32022` |
-| Legacy (after `initialize`) | accepted | `-32602` | capabilities mistyped: `-32602`; absent: accepted | `-32022` |
+| Stateless (default `Server::new`) | `-32602` | `-32602` | `-32602` | `-32022` |
+| Legacy (after `initialize`, or `Server::sessionless` for the HTTP endpoint) | accepted | `-32602` | capabilities mistyped: `-32602`; absent: accepted | `-32022` |
 
 This applies to `ping`, `server/discover`, `tools/list` and `tools/call`. A stateless connection
 accepts only `2026-07-28` (`data.supported` is `["2026-07-28"]`); a legacy connection also accepts
 `2025-11-25` (`data.supported` lists both). `data.requested` echoes the requested version only when
 it is a short plain string. Unknown methods are `-32601` regardless of `_meta`.
+
+The HTTP endpoint (`POST /mcp`, see "HTTP transport") has no session, so each request is answered in the
+Legacy row: `_meta` is optional and `initialize` is not needed first, which is how standard HTTP MCP clients
+(Claude Code, Cursor) call it. A `_meta` that is present is still validated, so a version other than the two
+revisions is `-32022` on every request.
 
 ### Message rules
 
@@ -103,8 +109,9 @@ the model can correct. Application codes sit outside `-32768..-32000`, as the sp
 ## Backend over the executor
 
 `latticed::mcp_backend::McpBackend` implements `ToolBackend` for `lattice_read` and `lattice_write`.
-It has no transport: whatever carries the messages (issue #527) creates one backend per connection from
-the authenticated principal, passes `McpBackend::caller()` to `Server::handle` and nothing else.
+It has no transport of its own: the HTTP endpoint (see "HTTP transport") creates one backend per request
+from the principal the bearer token verified, passes `McpBackend::caller()` to `Server::handle` and nothing
+else.
 Part of the layering decision of issue #526: `layers.toml` lets `latticed` depend on `lattice-sdk`, the
 backend lives in `latticed`, and `lattice-api` gained `PrincipalSql` (SQL for one fixed principal).
 
@@ -203,9 +210,89 @@ principal, so it sees exactly the events a PostgreSQL reader of the same account
     (the host's commit-waiter limit), the call polls the feed about 50 times a second until the cap of
     #529 bounds the waiters.
 
+## HTTP transport
+
+`POST /mcp` on the sync gateway port (`latticed --data-dir DIR --gateway-listen 127.0.0.1:PORT
+--gateway-tokens FILE`; issue #527, part 1, with the browser and DNS-rebinding defences of issue #580). The
+gateway is loopback only and has no TLS yet (issue #578), so a non-loopback address is refused at start.
+Tokens come from the credential file given to `--gateway-tokens` (the same file the WebSocket gateway reads, re-read
+within 5 seconds of a change). The development gateway (`development-trust`, without `--gateway-tokens`) has no
+credential store, so `POST /mcp` answers `401` to every request there. Those refusals are not counted against
+the address, as the WebSocket upgrade on that gateway is not, so they never become `429`.
+
+Scope of this part. It is part 1 of #527 (the POST transport and bearer authentication) together with the
+browser defences that are part 2 (#580: Host, Origin, content type, CORS, the declared length), which ship
+together so that no release has the endpoint without them. Not in it: the long-poll budget (#529). A
+`lattice_subscribe` call with `wait_ms` holds a connection for up to 30 seconds and counts only against the
+gateway's connection limit.
+
+Plaintext. The bearer token travels in the `Authorization` header unencrypted over loopback until TLS on the
+gateway port exists (issue #578). The listener refuses any non-loopback address, so the token does not leave
+the host; do not forward the port or put it behind a proxy.
+
+A request is one MCP JSON-RPC message in the body. Its headers must be:
+
+- `Host`: this listener's address (`127.0.0.1:PORT`) or `localhost:PORT`, exactly once. Anything else is `403`.
+- `Authorization: Bearer <token>`: the same verification, failure count and rate limit as the WebSocket
+  upgrade. A missing, malformed, unknown or revoked token gets the same `401` bytes. Too many failures from
+  one address get `429`.
+- `Content-Type: application/json`, optionally `; charset=utf-8`. Anything else is `415`.
+- `Content-Length`, once. A missing length or any `Transfer-Encoding` is `411`; a non-numeric one is `400`.
+  A length over 1 MiB is `413` before any body byte is read.
+
+The request must not carry an `Origin` header (any value, `null` included: `403`). No response carries a CORS
+header, so a page on another origin cannot call a tool, and a request with a query string is `400` (a token
+is never accepted in a URL and is never echoed).
+
+| Request | Response |
+|---|---|
+| `POST /mcp`, valid | `200`, `Content-Type: application/json`, one JSON-RPC response |
+| a notification (no `id`) | `202` with an empty body |
+| malformed JSON | `200` with a JSON-RPC parse error (`-32700`) |
+| any method other than `POST` | `405`, `Allow: POST` |
+| a target other than `/mcp` on this port | the WebSocket rules: `404` for an unknown path, `400` for a non-`GET` request |
+| more than 64 header lines, or a head over the gateway's head limit (8 KiB by default) | `431` |
+
+Every response says `Connection: close` and `Cache-Control: no-store`; there is no keep-alive. The head and
+body are read under the gateway's handshake deadline (default 5 seconds) and a body that stops short is cut
+at the deadline without an answer. The principal is the one the token verified and nothing in the body
+changes it: `_meta` cannot name another identity (a body that names one is answered as the bound principal).
+
+Sessionless. Each request is served by its own `mcp::Server::sessionless`, and nothing carries from one request
+to the next: no session id is issued or required. `initialize` is answered with `2025-11-25` and changes nothing
+else; `tools/list` and `tools/call` work with no prior `initialize` and with or without `_meta`. A `_meta` that
+is present is validated (see "Per-request `_meta`"). Standard HTTP MCP clients (Claude Code, Cursor) send
+`initialize`, `notifications/initialized`, `tools/list` and `tools/call` with no `_meta` and no session id, and
+those four requests succeed as shown by `a_standard_client_with_no_meta_and_no_session_can_call_tools`.
+One manual run with the Claude Code CLI 2.1.314 (`claude -p` with an `--mcp-config` of type `http` whose headers
+carry the bearer token, `--strict-mcp-config`, and the two tools allowed) wrote a row with `lattice_write` and read
+it back with `lattice_read`; the row is at version 1 in the table. This is one manual check, not a test.
+
+Ordering of the deadlines: the head is read under the handshake deadline. The handshake place is released once
+the token verifies; the body is then read under the same deadline. A client that authenticates and stops short
+therefore holds a live-connection place only until that deadline (default 5 seconds) passes, and no longer.
+
+A `401` on `/mcp` is byte-identical across missing, malformed, unknown and revoked tokens, which is the same
+answer the WebSocket upgrade gives (status, `WWW-Authenticate: Bearer` and the body `authentication required`).
+The one difference is the `Cache-Control: no-store` header that every `/mcp` response carries. The WebSocket 401
+does not carry it.
+
+The planted defects of this part (`McpHostCheckSkipped`, `McpOriginCheckSkipped`, `McpBodyCheckedAfterRead`,
+`McpPrincipalFromBody`) are switched by a thread-local mask, so their witnesses are pure-function witnesses
+(`ws::mcp_http`) and the socket tests cannot switch them on. `McpPrincipalFromBody` is also masked by the
+backend: `McpBackend` refuses a call whose `Caller` is not the one derived from its principal (`PolicyDenied`,
+`40302`), so that defect alone does not widen access; the witness is what detects it.
+
+The tool `scope` must be the gateway's MCP workspace, `default` (the default of `GatewayConfig::mcp_workspace`;
+the CLI does not set it yet). The `Accept` header is not checked: every answer is JSON.
+
+Not here: stdio, Streamable HTTP streams (SSE, GET, sessions and resumption), TLS, and the per-principal limit
+on long polls (issue #529). A `lattice_subscribe` call with `wait_ms` holds its connection thread for up to
+30 seconds; the connection counts against the gateway's connection limit, not a per-principal budget.
+
 ## Not implemented
 
-- Transports (stdio framing, Streamable HTTP) and any socket or process handling.
+- Transports other than HTTP `POST /mcp`: stdio framing, and Streamable HTTP streams (SSE, GET, sessions).
 - Authentication and authorization framework: the transport supplies the `Caller`; nothing here
   verifies identity or issues grants.
 - Resources, prompts, completion, logging, sampling, elicitation and roots.
