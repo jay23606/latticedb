@@ -16,7 +16,7 @@
 
 /// The integer type of the per-thread mask: one bit per planted bug.
 #[cfg(any(test, feature = "planted-bugs"))]
-type Mask = u64;
+type Mask = u128;
 /// How many bugs the mask can hold; discriminants must stay below it.
 #[cfg(test)]
 const MASK_BITS: u32 = Mask::BITS;
