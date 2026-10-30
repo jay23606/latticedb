@@ -395,6 +395,21 @@ impl Parser {
         }
     }
 
+    /// The alias of a select item. After `AS` any word is a label, reserved or not (`SELECT 1 AS
+    /// from`), as in PostgreSQL; without `AS` the rules of [`Self::alias`] apply.
+    fn select_alias(&mut self) -> PResult<Option<Ident>> {
+        if self.is_kw("as")
+            && let Tok::Word { text, .. } = &self.peek_n(1).tok
+        {
+            let value = text.clone();
+            self.bump();
+            let span = self.peek().span;
+            self.bump();
+            return Ok(Some(Ident { value, span }));
+        }
+        self.alias()
+    }
+
     // ---- statements ---------------------------------------------------------------------------
 
     fn statement(&mut self) -> PResult<Statement> {
@@ -735,7 +750,7 @@ impl Parser {
             return Ok(SelectItem::QualifiedWildcard(name));
         }
         let expr = self.tracked_expr(depth)?;
-        let alias = self.alias()?;
+        let alias = self.select_alias()?;
         Ok(SelectItem::Expr { expr, alias })
     }
 

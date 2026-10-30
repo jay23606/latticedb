@@ -244,3 +244,22 @@ fn values_and_with_inside_parentheses_are_refused_as_queries() {
         unsupported(sql, message);
     }
 }
+
+#[test]
+fn any_word_after_as_is_a_select_label_but_a_bare_reserved_word_is_not() {
+    for label in ["select", "from", "as", "limit", "order", "where"] {
+        let sql = format!("SELECT 1 AS {label}");
+        let Statement::Query(q) = parse_statement(&sql).unwrap() else {
+            panic!("`{sql}` is not a query");
+        };
+        let rendered = q.to_string();
+        let reparsed = parse_statement(&rendered).unwrap().to_string();
+        assert_eq!(reparsed, rendered, "`{sql}` does not round-trip");
+        assert!(rendered.contains(label), "{rendered}");
+    }
+    // The same word without AS stays a syntax error, and a table alias does not get the relief.
+    assert!(parse_statement("SELECT 1 limit").is_err());
+    assert!(parse_statement("SELECT * FROM t AS select").is_err());
+    assert!(parse_statement("SELECT 1 AS").is_err());
+    assert!(parse_statement("SELECT 1 AS 1").is_err());
+}
