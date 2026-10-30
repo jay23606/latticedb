@@ -359,19 +359,57 @@ pub(crate) fn parse_uuid(s: &str) -> Option<u128> {
     u128::from_str_radix(&hex, 16).ok()
 }
 
-fn parse_bytea(s: &str) -> Option<Vec<u8>> {
-    let hex = s.trim().strip_prefix("\\x")?;
-    if !hex.len().is_multiple_of(2) {
-        return None;
+/// `bytea` input as PostgreSQL reads it: the hex form `\\x4142` (pairs of digits, white space allowed
+/// between pairs) or the escape form, where `\\\\` is a backslash and `\\ooo` an octal byte. The error is
+/// the SQLSTATE: `22023` for a bad hex form, `22P02` for a bad escape.
+fn parse_bytea(s: &str) -> Result<Vec<u8>, &'static str> {
+    let bytes = s.as_bytes();
+    if let Some(hex) = bytes.strip_prefix(b"\\x") {
+        let mut out = Vec::with_capacity(hex.len() / 2);
+        let mut pending: Option<u32> = None;
+        for &c in hex {
+            if matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+                if pending.is_some() {
+                    return Err("22023");
+                }
+                continue;
+            }
+            let digit = char::from(c).to_digit(16).ok_or("22023")?;
+            match pending.take() {
+                Some(hi) => out.push(u8::try_from(hi * 16 + digit).map_err(|_| "22023")?),
+                None => pending = Some(digit),
+            }
+        }
+        return if pending.is_some() {
+            Err("22023")
+        } else {
+            Ok(out)
+        };
     }
-    let mut out = Vec::with_capacity(hex.len() / 2);
-    let b = hex.as_bytes();
-    for pair in b.chunks(2) {
-        let hi = (*pair.first()? as char).to_digit(16)?;
-        let lo = (*pair.get(1)? as char).to_digit(16)?;
-        out.push(u8::try_from(hi * 16 + lo).ok()?);
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while let Some(&c) = bytes.get(i) {
+        if c != b'\\' {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        match bytes.get(i + 1) {
+            Some(b'\\') => {
+                out.push(b'\\');
+                i += 2;
+            }
+            Some(d0 @ b'0'..=b'3') => {
+                let octal = |k: usize| bytes.get(i + k).filter(|d| (b'0'..=b'7').contains(d));
+                let (d1, d2) = (octal(2).ok_or("22P02")?, octal(3).ok_or("22P02")?);
+                let v = u32::from(d0 - b'0') * 64 + u32::from(d1 - b'0') * 8 + u32::from(d2 - b'0');
+                out.push(u8::try_from(v).map_err(|_| "22P02")?);
+                i += 4;
+            }
+            _ => return Err("22P02"),
+        }
     }
-    Some(out)
+    Ok(out)
 }
 
 pub(crate) fn parse_bool(s: &str) -> Option<bool> {
@@ -601,6 +639,25 @@ impl JsonScan<'_> {
 
 // ----- conversion from text -----
 
+/// `s` without the single underscores PostgreSQL 16 accepts between digits of an integer or numeric
+/// (`1_000`). An underscore anywhere else is a syntax error, so this is `None`.
+fn without_digit_separators(s: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if !s.contains('_') {
+        return Some(std::borrow::Cow::Borrowed(s));
+    }
+    let b = s.as_bytes();
+    for (i, &c) in b.iter().enumerate() {
+        if c == b'_' {
+            let digit_at =
+                |j: Option<usize>| j.and_then(|j| b.get(j)).is_some_and(u8::is_ascii_digit);
+            if !digit_at(i.checked_sub(1)) || !digit_at(Some(i + 1)) {
+                return None;
+            }
+        }
+    }
+    Some(std::borrow::Cow::Owned(s.replace('_', "")))
+}
+
 fn invalid(ty: SqlType, s: &str) -> ExecError {
     ExecError::eval(
         "22P02",
@@ -632,7 +689,8 @@ pub(crate) fn parse_text(s: &str, ty: SqlType) -> Result<Datum, ExecError> {
     Ok(match ty {
         SqlType::Boolean => Datum::Bool(parse_bool(s).ok_or_else(|| invalid(ty, s))?),
         SqlType::SmallInt | SqlType::Integer | SqlType::BigInt => {
-            let t = s.trim();
+            let t = without_digit_separators(s.trim()).ok_or_else(|| invalid(ty, s))?;
+            let t = t.as_ref();
             let digits = t.strip_prefix(['+', '-']).unwrap_or(t);
             if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(invalid(ty, s));
@@ -650,10 +708,14 @@ pub(crate) fn parse_text(s: &str, ty: SqlType) -> Result<Datum, ExecError> {
                 )
             })?)
         }
-        SqlType::Numeric => Datum::Numeric(Decimal::parse(s).map_err(|e| match e {
-            NumError::Syntax => invalid(ty, s),
-            other => other.into(),
-        })?),
+        SqlType::Numeric => Datum::Numeric(
+            Decimal::parse(&without_digit_separators(s).ok_or_else(|| invalid(ty, s))?).map_err(
+                |e| match e {
+                    NumError::Syntax => invalid(ty, s),
+                    other => other.into(),
+                },
+            )?,
+        ),
         SqlType::DoublePrecision => {
             let t = s.trim();
             let f: f64 = t.parse().map_err(|_| invalid(ty, s))?;
@@ -669,7 +731,9 @@ pub(crate) fn parse_text(s: &str, ty: SqlType) -> Result<Datum, ExecError> {
             Datum::Float(f)
         }
         SqlType::Text | SqlType::Unknown => Datum::Text(s.to_string()),
-        SqlType::Bytea => Datum::Bytes(parse_bytea(s).ok_or_else(|| invalid(ty, s))?),
+        SqlType::Bytea => Datum::Bytes(parse_bytea(s).map_err(|code| {
+            ExecError::eval(code, format!("invalid input syntax for type {ty}: \"{s}\""))
+        })?),
         SqlType::Uuid => Datum::Uuid(parse_uuid(s).ok_or_else(|| invalid(ty, s))?),
         SqlType::Date => {
             let d = parse_date(s).ok_or_else(|| {
