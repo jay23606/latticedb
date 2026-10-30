@@ -280,7 +280,7 @@ Priorities as in section 2. "Issue" is the tracking item; new issues were create
 | G-08 | P2 | CRDT hostile-peer limits exist at the library boundary (node binding, drift, batch, insert budgets, node, depth and origin-share caps, tree replay cap for old ids, set tag cap; merged in PR [#410](https://github.com/moncifem/latticedb/pull/410)); not called by any sync layer, and `Tree::apply_from` must not be wired into one until [#487](https://github.com/moncifem/latticedb/issues/487) (resync API, sender-charged replay budget) is closed: the replay cap is a stopgap that a flood of 4097 new ops turns into a way to make a replica refuse older honest ops; the compaction frontier is also still trusted | [#364](https://github.com/moncifem/latticedb/issues/364) |
 | G-09 | P2 | No fuzz targets for the SASL/SCRAM path, credential file, TLS PEM import, subscription host | [#365](https://github.com/moncifem/latticedb/issues/365) |
 | G-10 | P2 | Partly closed: risk paths now cover `latticed`, the session and the SQL host (PR [#417](https://github.com/moncifem/latticedb/pull/417)) and the ruleset claim was corrected. Open: `risk-gate` is not a required check (owner decision), and the `reviewed` label is not tied to the head ([#418](https://github.com/moncifem/latticedb/issues/418)) | [#366](https://github.com/moncifem/latticedb/issues/366), [#415](https://github.com/moncifem/latticedb/issues/415) |
-| G-11 | P2 | `SECURITY.md` points to a disabled reporting channel | [#367](https://github.com/moncifem/latticedb/issues/367) |
+| G-11 | closed | Closed: private vulnerability reporting is enabled (the repository API returned `{"enabled":true}` on 2026-10-30), issue #367 is closed, and `SECURITY.md` was rewritten for the alpha with supported versions and the disclosed gaps. The advisory link redirects to the GitHub sign-in page when logged out, as it does for any reporter without a session; a reporter needs a GitHub account | [#367](https://github.com/moncifem/latticedb/issues/367) |
 | G-12 | P2 | Build tools installed unpinned in the release and nightly-build gates | [#368](https://github.com/moncifem/latticedb/issues/368) |
 | E-1 | closed | Kernel checked duplicate before fence (fixed) | [#304](https://github.com/moncifem/latticedb/issues/304), PR [#332](https://github.com/moncifem/latticedb/pull/332) |
 | E-2 | P2 | Guard install can lose capability bits after a crash | [#307](https://github.com/moncifem/latticedb/issues/307) |
@@ -301,6 +301,34 @@ Priorities as in section 2. "Issue" is the tracking item; new issues were create
 | P3-L | P3 | Idle authenticated connection holds up to 1 MiB | folded into G-06 |
 | P3-M | P3 | Decoy-secret rotation is observable | none |
 | P3-N | P3 | Outbox integrity and confidentiality are the application's job | none (PR #322 merged) |
+
+### Alpha disposition of the gap rows
+
+For the alpha pre-release (2026-10-30, [#590](https://github.com/moncifem/latticedb/issues/590)). Each row is one of: closed, disclosed in the known issues of [alpha.md](alpha.md), or not applicable because the surface is not on `main`. "Not applicable" is a statement about `main` on that date; it must be re-read when the surface lands. This table closes no gap. No external review or penetration test has been done, and the independent read-only security review of the gateway diff that #590 asks for is not recorded here because the gateway is not merged.
+
+| Gap | Disposition |
+|---|---|
+| G-01 | Disclosed: table-level grants only; no row predicates, roles or policy language (alpha.md, "Not in the alpha") |
+| G-02 | Closed in the engine (see the row above) |
+| G-03 | Not applicable for transports (no gateway, plugin session or MCP transport on `main`; the gateway is in open PR #680, the MCP backend in #687); the pgwire principal path is covered by G-01 |
+| G-04 | Disclosed (#360) |
+| G-05 | Disclosed (#361); the bearer-token failure limiter is not called by any host |
+| G-06 | Disclosed in part: feed read cost (#543, #661) is in alpha.md; the open remainder is in the row above |
+| G-07 | Disclosed (#363) |
+| G-08 | Not applicable: no sync layer calls the CRDT peer entry points |
+| G-09 | Open, not a user-facing issue; it is a test gap (#365) |
+| G-10 | Open (owner decision on required checks; #418) |
+| G-11 | Closed |
+| G-12 | Open (#368) |
+
+Rows the gateway and MCP transport must satisfy before they ship, so that "not applicable" does not become silent:
+
+| Surface | Threat | State on `main` | What must hold |
+|---|---|---|---|
+| Gateway and MCP HTTP | A web page in the user's browser reaches the loopback endpoint (CSRF, DNS rebinding) | No HTTP endpoint exists; the pgwire listener does not speak HTTP. Not applicable on `main` | Bind loopback by default, validate `Host` and `Origin` against an allow-list on every request, require a bearer token that a page cannot attach, and a test that a rebinding-style request fails ([#527](https://github.com/moncifem/latticedb/issues/527), [#580](https://github.com/moncifem/latticedb/issues/580)) |
+| Gateway | No TLS on the gateway port | Not applicable on `main` | Disclosed: loopback only, do not expose it. TLS off loopback is a precondition |
+| Gateway | Token reload and revocation | Format, verifier and file loader only (ADR 0031) | Disclosed: tokens are read at start; revoking one needs a restart |
+| Agent clients | Prompt injection through stored text returned by a query or tool | Stored text is opaque data; nothing filters or labels it (N-11) | Disclosed in alpha.md: treat output as untrusted, narrow the grants |
 
 ## 8. Non-goals and assumptions
 
@@ -329,7 +357,7 @@ What `SECURITY.md` says against what the project supports, checked 2026-10-29. I
 
 | `SECURITY.md` says | Check | Result |
 |---|---|---|
-| Report privately with GitHub's "Report a vulnerability" | `gh api repos/moncifem/latticedb/private-vulnerability-reporting` returns `{"enabled":false}` | **The channel is disabled.** A reporter following the file cannot use it. ([#367](https://github.com/moncifem/latticedb/issues/367)) |
+| Report privately with GitHub's "Report a vulnerability" | The repository API returned `{"enabled":false}` on 2026-10-29 and `{"enabled":true}` on 2026-10-30 | Fixed ([#367](https://github.com/moncifem/latticedb/issues/367) is closed). Logged out, `security/advisories/new` redirects to the GitHub sign-in page |
 | A dedicated mailbox will be added once there is a domain | No `security.txt` or other contact file in the repository (searched) | Consistent; no address exists, so none is listed here |
 | Acknowledge within three business days, fix and advisory within ninety days | No triager, backup or process is written down. Not verifiable | A commitment with no named owner; one maintainer today |
 | Do not open public issues for vulnerabilities | `.github/ISSUE_TEMPLATE/config.yml` has a contact link to `security/advisories/new` ([config.yml:7-8](https://github.com/moncifem/latticedb/blob/ea9588286e4a4cadaf789531b44a497bd1ae77b4/.github/ISSUE_TEMPLATE/config.yml#L7)), the same private channel; whether that link works while reporting is disabled is not verified | Fixing the setting fixes both |

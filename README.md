@@ -16,9 +16,11 @@ have formal models. Features come after the evidence that the layer below them h
 
 **[Architecture](docs/ARCHITECTURE.md) · [Roadmap board](https://github.com/users/moncifem/projects/1) · [Contribute](CONTRIBUTING.md)**
 
-> **Pre-alpha. Use test data only.** No release exists, no phase gate is signed, and nothing here is
-> production ready. The numbers below come from the repository and CI; the
-> [gate pages](docs/gates) are the source of truth.
+> **Pre-alpha. Use test data only.** No phase gate is signed and nothing here is production ready.
+> An alpha pre-release (`v0.1.0-alpha.1`), once it is tagged, is for trying the server and giving
+> feedback: its data directories and the change-feed and sync encodings are not stable, and it
+> makes no gate claim. Start with the [alpha guide](docs/alpha.md). The numbers below come from the
+> repository and CI; the [gate pages](docs/gates) are the source of truth.
 
 ## What works today
 
@@ -46,8 +48,11 @@ write-ahead log that survives crashes.
 - Authenticated agent permissions: each account is allow-all, deny-all or a list of read, write and ddl bits per table, supplied by the host in a file. No row predicates, roles or policy language yet (Phase 4).
 - A sync server. The sync and SDK pieces are not connected to the listener yet.
 - The connected team workspace (work items, docs, specs and the links between them) and everything after it.
-- A release. Nightly builds exist, with checksums, SBOMs and build provenance, but the first alpha tag
-  waits for the Phase 1 gate.
+- A stable release. Nightly builds exist, with checksums, SBOMs and build provenance, and the first
+  alpha pre-release is described in the [alpha guide](docs/alpha.md); no tag claims a phase gate.
+- A usable agent gateway. An experimental WebSocket sync gateway (loopback only, no TLS, read only) and a
+  transport-independent MCP tool backend are on `main`, but no MCP transport serves the tools, so an agent
+  client should use the PostgreSQL wire protocol (see [docs/alpha.md](docs/alpha.md#connect-an-agent-client)).
 
 ## Progress toward the product
 
@@ -107,7 +112,23 @@ SELECT * FROM notes;
 After a restart the committed rows are recovered from the log, but column definitions are not (see
 above), so query the table in the run that created it. Without `--data-dir` the server only answers
 `SELECT 1`. For configured SCRAM over TLS, timeouts and the other flags, see the
-[listener guide](crates/latticed/README.md).
+[listener guide](crates/latticed/README.md). Known issues and the agent-client status are in the
+[alpha guide](docs/alpha.md).
+
+### Install an archive instead (once the alpha tag exists)
+
+This works only after the pre-release `v0.1.0-alpha.1` is published; until then build from source as
+above. It is a pre-release for test data, with no phase gate claimed. For macOS arm64, Linux x86_64 and
+Linux arm64 (no Windows), fetch the script from the same tag, read it, then run it:
+
+```bash
+curl -fsSL -o install.sh https://raw.githubusercontent.com/moncifem/latticedb/v0.1.0-alpha.1/scripts/install.sh
+sh install.sh 0.1.0-alpha.1
+```
+
+It checks the archive against the release `SHA256SUMS`, verifies the build attestation when the `gh`
+CLI is installed, and puts `lattice` and `latticed` in `~/.local/bin`. See
+[docs/releasing.md](docs/releasing.md#installing-a-release).
 
 To run with SCRAM over TLS instead of loopback trust, provision the credential files with
 `lattice account init DIR` and `lattice account add DIR NAME --read t1 --write t1` (passwords come from

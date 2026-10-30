@@ -99,6 +99,16 @@ the script against a real published release or its real attestation (`gh attesta
 shim, and whether it needs a signed-in `gh` for a public repository is untested), the rehearsal job (first run needs a
 `release` rehearsal run id), and the script as a release asset (the release workflow does not attach it yet).
 
+Alpha documentation (issues #589 and #590, part of the Alpha 0.1 definition #567, no exit criterion): `docs/alpha.md`
+(what works, how to run `latticed` in trust and SCRAM modes, psql, the agent-client status, experimental parts and a
+hand-edited known-issues table), a README install section marked "once the alpha tag exists", a rewritten `SECURITY.md`
+with supported versions and the disclosed gaps, and an alpha disposition for every threat-model gap row. Facts checked
+by reading `main`: the gateway (PR #680), the MCP tool backend (PR #687) and the `lattice account` tool (PR #683) are not
+merged, so the docs say no agent client can connect except as a PostgreSQL client, and give no MCP client configuration.
+The quickstart smoke test covers only the loopback build, psql and restart steps. Not done: a named MCP client run on a
+clean machine (none is possible yet), the independent security review of the gateway diff, a link check run on a hosted
+runner, and verification of the install one-liner against a published tag.
+
 ## Exit criteria
 
 | # | Criterion | State |
