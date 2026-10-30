@@ -179,6 +179,15 @@ planted_bugs! {
     /// Only the first bytes of a bearer token's secret reach its verifier, so a token that shares
     /// that prefix authenticates (authentication).
     TokenAcceptsPrefix,
+    /// The engine's feed read ignores the caller's event limit and returns everything after the
+    /// cursor (unbounded memory and executor time per read).
+    FeedLimitIgnored,
+    /// The engine's feed read ignores its bound on versions scanned, so one read over history the
+    /// reader may not see runs to the end (unbounded executor time per read).
+    FeedScanBudgetIgnored,
+    /// The row store leaves a change set out of its commit index, so the feed misses its events
+    /// (silent loss for every subscriber).
+    FeedIndexCommitSkipped,
 }
 
 impl Bug {
@@ -257,6 +266,13 @@ impl Bug {
     ];
     /// Bearer-token defect, detected by the prefix witness in `lattice-api::bearer`.
     pub const BEARER: [Bug; 1] = [Bug::TokenAcceptsPrefix];
+    /// Feed read-bound defects, detected by the bounded-read witnesses in `lattice-engines`
+    /// (`feed_emit` tests).
+    pub const FEED_BOUND: [Bug; 3] = [
+        Bug::FeedLimitIgnored,
+        Bug::FeedScanBudgetIgnored,
+        Bug::FeedIndexCommitSkipped,
+    ];
 
     /// Guarded-WAL admission defects, exercised by independent context witnesses.
     pub const ADMISSION: [Bug; 2] = [Bug::RequiredGuardOmitted, Bug::GuardRewriteUnstaged];
@@ -315,6 +331,7 @@ impl Bug {
         &Bug::FEED_SOURCE,
         &Bug::TABLE_GRANTS,
         &Bug::BEARER,
+        &Bug::FEED_BOUND,
         &Bug::EXEC_INDEX,
         &Bug::CRDT_PEER,
         &Bug::ADMISSION,

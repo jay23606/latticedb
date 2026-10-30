@@ -50,16 +50,16 @@ The sync `subscribe::SubscriptionHost` is built with the connection's authentica
 does not exist yet (threat model G-03).
 
 `feed_source::FeedSource` is the kernel-backed `EventSource`: `ExecHost::feed_source(max_events)` returns a reader
-that asks the executor's actor thread for `RowStore::events_since_as` as the principal's grant
-(`PolicyTable::grant_for`, deny by default). The scope is `table/<name>` and needs the read bit on that table; a
-denied principal, a table it holds no read grant on, an unknown table and any
+that asks the executor's actor thread for `RowStore::read_feed_as` as the principal's grant
+(`PolicyTable::grant_for`, deny by default). The scope is `table/<name>` and needs the read bit on that table; a denied principal, a table it holds no read grant on, an unknown table and any
 other scope are all `SourceError::UnknownScope`, decided before the cursor is read. The wire cursor is the 12-byte feed
 cursor, `Event::data` the `change-feed-v1` encoding. A cursor below the vacuum floor is `TooOld`. A legacy oversize
-key is skipped by reading again from the last cursor, so a reader is never wedged. One read returns at most
-`max_events` events, which bounds what is returned and not the cost: each read visits every key of every table plus the
-versions after the cursor, builds events for hidden tables before the policy filter (memory O(history after the
-cursor)), is never interrupted once running, and a reader that is not caught up scans twice. Only principals with a read
-grant on the table reach the scan today; the engine-side limit is issue #543. No wake-on-commit and no transport exist yet.
+key is skipped by continuing from its cursor, so a reader is never wedged. One read returns at most `max_events`
+events and is a series of steps, each one actor request: a step examines at most a scan budget of versions (default
+4,096, `FeedSource::with_scan_budget`) found through an in-memory commit index and builds events only for rows of the
+requested table that the policy allows. A step costs the budget and the page, never the table size or the history; a
+caught-up reader examines nothing; a commit queued during a read runs between its steps. Not done: a per-principal cap
+on feed work, a wall-clock bound and a per-table index (issue #543). No wake-on-commit and no transport exist yet.
 
 Row commits made through `ExecHandler` carry an author id so change-feed events say who wrote. The id comes from the
 connection's `Principal` only: the fixed id 1 for local development, or the id `AuthorRegistry` assigns to the
