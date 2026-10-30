@@ -18,6 +18,19 @@ use proptest::prelude::*;
 const NOW: u64 = 1_000;
 const DRIFT: u64 = 100;
 
+/// Depth limit the tree scenarios exercise. The interpreter used by the nightly Miri job runs
+/// these loops orders of magnitude slower, so there the boundary is tested at a small limit set
+/// through `with_max_depth`; the public default is unchanged and native runs use it.
+const DEPTH: usize = if cfg!(miri) { 12 } else { MAX_TREE_DEPTH };
+
+fn depth_tree() -> tree::Tree {
+    if cfg!(miri) {
+        tree::Tree::new().with_max_depth(DEPTH)
+    } else {
+        tree::Tree::new()
+    }
+}
+
 fn h(wall_ms: u64, node: u32) -> Hlc {
     Hlc {
         wall_ms,
@@ -135,21 +148,21 @@ fn node_limit_holds() -> bool {
 }
 
 fn depth_limit_holds() -> bool {
-    let mut t = tree::Tree::new();
+    let mut t = depth_tree();
     let p = ctx(1);
     // Chain node `link(i)` sits at depth i.
-    for i in 1..=MAX_TREE_DEPTH as u64 {
+    for i in 1..=DEPTH as u64 {
         let parent = if i == 1 { 0 } else { link(i - 1) };
         if t.apply_from(&p, mv(i, 1, link(i), parent)) != Ok(tree::Outcome::Applied) {
             return false;
         }
     }
-    let wall = MAX_TREE_DEPTH as u64 + 1;
+    let wall = DEPTH as u64 + 1;
     let too_deep = t.apply_from(&p, mv(wall, 1, link(wall), link(wall - 1)));
     // A two-node subtree must not slip past the limit by being moved whole.
     let ok_a = t.apply_from(&p, mv(wall + 1, 1, 5000, 0));
     let ok_b = t.apply_from(&p, mv(wall + 2, 1, 5001, 5000));
-    let deep_move = t.apply_from(&p, mv(wall + 3, 1, 5000, link(MAX_TREE_DEPTH as u64 - 1)));
+    let deep_move = t.apply_from(&p, mv(wall + 3, 1, 5000, link(DEPTH as u64 - 1)));
     too_deep == Ok(tree::Outcome::Skipped)
         && !t.contains(NodeId(link(wall)))
         && ok_a == Ok(tree::Outcome::Applied)
@@ -203,7 +216,11 @@ fn every_limit_holds() {
     assert!(node_limit_holds(), "tree node limit");
     assert!(depth_limit_holds(), "tree depth limit");
     assert!(origin_quota_holds(), "tree origin quota");
-    assert!(set_tag_limit_holds(), "set tag limit");
+    // The tag cap is `MAX_SET_TAGS` (2^20) with no smaller knob, so filling it is skipped under
+    // Miri; the other scenarios above still run there at their small limits.
+    if !cfg!(miri) {
+        assert!(set_tag_limit_holds(), "set tag limit");
+    }
     assert!(replay_budget_holds(), "tree replay budget");
 }
 
@@ -725,28 +742,31 @@ proptest! {
 
 #[test]
 fn a_move_of_a_very_wide_subtree_respects_the_depth_boundary() {
-    let mut t = tree::Tree::new();
-    for i in 1..=255u64 {
+    // Chain length and hub width shrink under Miri; the boundary arithmetic is the same.
+    let max = DEPTH as u64;
+    let width: u64 = if cfg!(miri) { 40 } else { 3000 };
+    let mut t = depth_tree();
+    for i in 1..=max - 1 {
         let parent = if i == 1 { 0 } else { link(i - 1) };
         t.apply(mv(i, 1, link(i), parent)).unwrap();
     }
     // A hub with many leaf children: height 1, however many children it has.
     t.apply(mv(300, 2, 9000, 0)).unwrap();
-    for c in 0..3000u64 {
+    for c in 0..width {
         t.apply(mv(301 + c, 2, 10_000 + c, 9000)).unwrap();
     }
     assert!(t.heights_are_consistent());
-    // Under the node at depth 254 the hub sits at 255 and its children at 256: allowed.
+    // Under the node at depth max-2 the hub sits at max-1 and its children at max: allowed.
     assert_eq!(
-        t.apply(mv(5000, 3, 9000, link(254))),
+        t.apply(mv(5000, 3, 9000, link(max - 2))),
         Ok(tree::Outcome::Applied)
     );
-    // Moving it under the node at depth 255 would put its children at 257: a no-op.
+    // Moving it under the node at depth max-1 would put its children at max+1: a no-op.
     assert_eq!(
-        t.apply(mv(5001, 3, 9000, link(255))),
+        t.apply(mv(5001, 3, 9000, link(max - 1))),
         Ok(tree::Outcome::Skipped)
     );
-    assert_eq!(t.parent(NodeId(9000)), Some(NodeId(link(254))));
+    assert_eq!(t.parent(NodeId(9000)), Some(NodeId(link(max - 2))));
     assert!(t.heights_are_consistent());
     // Moving it away and back keeps the cached heights right.
     t.apply(mv(5002, 3, 9000, 0)).unwrap();
@@ -769,7 +789,11 @@ fn trusted_apply_has_no_origin_share_until_one_is_set() {
     );
 }
 
+// Pins the 2^18 default by filling it, which the interpreter cannot do in reasonable time. The
+// same refuse-at-the-limit rule runs at small limits in `origin_quota_holds` and
+// `trusted_apply_has_no_origin_share_until_one_is_set`.
 #[test]
+#[cfg_attr(miri, ignore = "fills the 2^18 default origin share")]
 fn the_default_origin_share_is_pinned() {
     use crate::crdt_tree::DEFAULT_ORIGIN_OP_LIMIT;
     let op = |i: usize| {

@@ -1,0 +1,1 @@
+Nightly Miri job: the hostile-peer CRDT tests now use small limits under Miri (depth, tree width, set tag cap) and skip the two that fill a 2^18 or 2^20 default, so the job finishes again. Native runs and public defaults are unchanged. The Miri duration is confirmed from CI, not locally.
