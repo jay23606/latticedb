@@ -342,21 +342,23 @@ pub(crate) fn micros_to_date(t: i64) -> Option<i32> {
     i32::try_from(t.div_euclid(MICROS_PER_DAY)).ok()
 }
 
+/// `uuid` input as PostgreSQL reads it: 32 hex digits, optionally in braces, with an optional hyphen
+/// after any group of four digits except the last. White space is not skipped.
 pub(crate) fn parse_uuid(s: &str) -> Option<u128> {
-    let t = s.trim();
-    let t = t
-        .strip_prefix('{')
-        .and_then(|x| x.strip_suffix('}'))
-        .unwrap_or(t);
-    let hex: String = t.chars().filter(|c| *c != '-').collect();
-    if hex.len() != 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
+    let body = match s.strip_prefix('{') {
+        Some(rest) => rest.strip_suffix('}')?,
+        None => s,
+    };
+    let mut digits = body.bytes().peekable();
+    let mut value = 0u128;
+    for count in 1..=32u32 {
+        let d = char::from(digits.next()?).to_digit(16)?;
+        value = (value << 4) | u128::from(d);
+        if count.is_multiple_of(4) && count < 32 && digits.peek() == Some(&b'-') {
+            digits.next();
+        }
     }
-    let hyphens: Vec<usize> = t.match_indices('-').map(|(i, _)| i).collect();
-    if !hyphens.is_empty() && hyphens != [8, 13, 18, 23] {
-        return None;
-    }
-    u128::from_str_radix(&hex, 16).ok()
+    digits.next().is_none().then_some(value)
 }
 
 /// `bytea` input as PostgreSQL reads it: the hex form `\\x4142` (pairs of digits, white space allowed
