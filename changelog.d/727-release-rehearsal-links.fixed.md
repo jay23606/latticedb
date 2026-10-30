@@ -1,0 +1,1 @@
+The alpha guide link in the 0.1.0-alpha.1 changelog section resolves from the repository root again, and the typos check passes on main for the deliberate invalid JSON literals in the PostgreSQL reference checks.
