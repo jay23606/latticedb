@@ -95,7 +95,10 @@ sh install.sh [--prefix DIR] [VERSION]
 takes the newest tag of the form `vX.Y.Z-suffix`, and fails with a message when there is none (so before the
 first alpha tag it needs an explicit `nightly`). It downloads the archive and `SHA256SUMS` of that tag, refuses
 on a missing entry or any checksum mismatch, and runs `gh attestation verify` when the `gh` CLI is installed
-(refusing if that fails; without `gh` it says the attestation was skipped). It uses no sudo, edits no shell
+(refusing if that fails; without `gh` it says the attestation was skipped). Without `gh` the checksum gives
+integrity only, not authenticity: `SHA256SUMS` comes from the same release as the archive, so it detects a
+corrupted download but not a tampered release. Only the attestation ties the archive to this repository's
+workflow. Downloads are limited to https. It uses no sudo, edits no shell
 profile, supports no Windows and does not update itself. Fetch the script from the same tagged release, not
 from `main`; publishing it as a release asset is not wired yet, and the README one-liner waits for the first
 alpha tag.

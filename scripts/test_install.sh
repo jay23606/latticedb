@@ -200,6 +200,44 @@ install_rejects_a_version_that_is_not_a_release_version() {
   expect_out "not a release version"
 }
 
+install_rejects_a_version_with_a_newline() {
+  setup
+  nl='
+'
+  FAKE_UNAME_S=Linux FAKE_UNAME_M=x86_64 run_install --prefix "$tmp/p" "0.1.0${nl}9.9.9"
+  expect_nonzero
+  expect_out "not a release version"
+  expect_no_install "$tmp/p"
+}
+
+install_ignores_sha256sums_entries_that_only_contain_the_archive_name() {
+  setup
+  make_release "$tmp/rel" x86_64-unknown-linux-gnu
+  a="lattice-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
+  h=$(awk '{print $1}' "$tmp/rel/SHA256SUMS")
+  printf '%s  x%s\n%s  %s.sig\n' "$h" "$a" "$h" "$a" > "$tmp/rel/SHA256SUMS"
+  FAKE_UNAME_S=Linux FAKE_UNAME_M=x86_64 run_install --prefix "$tmp/p" "$VERSION"
+  expect_nonzero
+  expect_out "no entry"
+  expect_no_install "$tmp/p"
+}
+
+install_uses_the_first_sha256sums_line_for_the_archive() {
+  setup
+  make_release "$tmp/rel" x86_64-unknown-linux-gnu
+  a="lattice-$VERSION-x86_64-unknown-linux-gnu.tar.gz"
+  good=$(awk '{print $1}' "$tmp/rel/SHA256SUMS")
+  bad=0000000000000000000000000000000000000000000000000000000000000000
+  # A bad line first wins and refuses; a good line first wins and installs.
+  printf '%s  %s\n%s  %s\n' "$bad" "$a" "$good" "$a" > "$tmp/rel/SHA256SUMS"
+  FAKE_UNAME_S=Linux FAKE_UNAME_M=x86_64 run_install --prefix "$tmp/p" "$VERSION"
+  expect_nonzero
+  expect_out "checksum mismatch"
+  printf '%s  %s\n%s  %s\n' "$good" "$a" "$bad" "$a" > "$tmp/rel/SHA256SUMS"
+  FAKE_UNAME_S=Linux FAKE_UNAME_M=x86_64 run_install --prefix "$tmp/p" "$VERSION"
+  expect_status 0
+}
+
 install_defaults_to_home_local_bin_and_leaves_profiles_alone() {
   setup
   make_release "$tmp/rel" x86_64-unknown-linux-gnu
@@ -223,6 +261,9 @@ for t in \
   install_fails_clearly_when_there_is_no_pre_release_tag \
   install_fails_clearly_when_the_release_list_cannot_be_read \
   install_rejects_a_version_that_is_not_a_release_version \
+  install_rejects_a_version_with_a_newline \
+  install_ignores_sha256sums_entries_that_only_contain_the_archive_name \
+  install_uses_the_first_sha256sums_line_for_the_archive \
   install_defaults_to_home_local_bin_and_leaves_profiles_alone
 do
   if ( "$t" ); then echo "ok   $t"; else echo "FAIL $t"; failed=$((failed + 1)); fi

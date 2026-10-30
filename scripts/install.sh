@@ -77,11 +77,21 @@ else
 fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/lattice-install.XXXXXX") || die "cannot create a temporary directory"
-trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+cleanup() { rm -rf "$tmp"; }
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+# Only https, except when a test override points at a local file:// directory.
+if [ -n "${LATTICE_INSTALL_BASE:-}" ] || [ -n "${LATTICE_INSTALL_API:-}" ]; then
+  allowed_proto="=https,file"
+else
+  allowed_proto="=https"
+fi
+fetch() { curl -fsSL --proto "$allowed_proto" --proto-redir "=https" "$@"; }
 
 if [ -z "$version" ]; then
   say "looking up the newest pre-release of $REPO"
-  curl -fsSL "$API" -o "$tmp/releases.json" \
+  fetch "$API" -o "$tmp/releases.json" \
     || die "could not read the release list from $API (network down or rate limited). Pass a version, for example: sh install.sh 0.1.0-alpha.1"
   # The listing is newest first. Tags such as `nightly` are not versions and are skipped.
   version=$(grep '"tag_name"' "$tmp/releases.json" \
@@ -96,6 +106,10 @@ version="${version#v}"
 if [ "$version" = "nightly" ]; then
   tag="nightly"
 else
+  # The character check also refuses a newline, which a line-based grep would let through.
+  case "$version" in
+    "" | *[!0-9A-Za-z.-]*) die "not a release version (expected 0.1.0-alpha.1, a leading v is fine, or nightly)" ;;
+  esac
   printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
     || die "not a release version: $version (expected 0.1.0-alpha.1, a leading v is fine, or nightly)"
   tag="v$version"
@@ -106,9 +120,9 @@ name="lattice-$version-$target"
 archive="$name.tar.gz"
 
 say "downloading $archive and SHA256SUMS ($tag)"
-curl -fsSL "$base/$archive" -o "$tmp/$archive" \
+fetch "$base/$archive" -o "$tmp/$archive" \
   || die "could not download $base/$archive (does release $tag exist for $target?)"
-curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" \
+fetch "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" \
   || die "could not download $base/SHA256SUMS"
 
 expected=$(awk -v f="$archive" '$2 == f || $2 == "*" f { print $1; exit }' "$tmp/SHA256SUMS")
