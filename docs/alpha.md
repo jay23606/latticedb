@@ -146,10 +146,12 @@ psql -h 127.0.0.1 -p 5432 -U dev
 
 In SCRAM mode use `"host=... user=ACCOUNT sslmode=verify-full sslrootcert=ca.pem"` and enter the
 account's password. The smoke test and the socket tests use `psql` and a plain client that frames
-messages itself. Other drivers (psycopg, node-postgres, pgx, JDBC) have not been run
-([#413](https://github.com/moncifem/latticedb/issues/413), psql scripts in
-[#575](https://github.com/moncifem/latticedb/issues/575), three drivers in
-[#576](https://github.com/moncifem/latticedb/issues/576)); results are text format only.
+messages itself. node-postgres and pgx are run in text mode by `tests/drivers/smoke.sh` in CI
+([#576](https://github.com/moncifem/latticedb/issues/576)); each needs the setting in the known issues
+table below. No Python driver is run yet: psycopg 3 is LGPL-3.0, outside the licence policy, and its
+permissively licensed replacement is tracked in [#710](https://github.com/moncifem/latticedb/issues/710).
+JDBC has not been run ([#413](https://github.com/moncifem/latticedb/issues/413)). Results are text format
+only.
 
 SQL supported: single-table `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `CREATE TABLE`, `DROP TABLE`, and
 transaction control. Joins, aggregates, `GROUP BY`, `DISTINCT` and subqueries answer SQLSTATE `0A000`.
@@ -224,7 +226,10 @@ optional models plugin; Windows.
 | Issue | What you will see |
 |---|---|
 | [#574](https://github.com/moncifem/latticedb/issues/574) | Restart is tested in-process, with a power-cut sweep and psql scripts; the `kill -9` seed sweep with the real binary and the simulator workload are not done yet. Process kill is not power loss. |
-| [#413](https://github.com/moncifem/latticedb/issues/413) | Only `psql` and a hand-framed client are tested. No driver matrix; text results only. |
+| [#413](https://github.com/moncifem/latticedb/issues/413) | JDBC has not been run, and there is no driver matrix. Only text results and parameters work. |
+| [#608](https://github.com/moncifem/latticedb/issues/608) | Binary parameter and result formats are refused with `0A000`. A driver that sends binary parameters by default fails until it is set to text; psycopg 3's default `%s` placeholder does this (observed). |
+| [#703](https://github.com/moncifem/latticedb/issues/703) | A statement with parameters that declares no types is described with none, so pgx's default query mode fails before sending the query. Use `default_query_exec_mode=exec`. |
+| [#382](https://github.com/moncifem/latticedb/issues/382) | `CREATE TABLE` and `DROP TABLE` inside a transaction block are refused with `25001`. A driver that opens a block before DDL fails until autocommit is on; psycopg 3's default connection does this (observed). |
 | [#363](https://github.com/moncifem/latticedb/issues/363) | A filtered change feed reveals the count of hidden writes through gaps in cursors and never says a row left a reader's scope. Disclosed, not fixed. |
 | [#543](https://github.com/moncifem/latticedb/issues/543) | A feed read still costs more than it should on a large or busy table; a quiet-table reader can get `Unavailable` on every poll after many other-table versions ([#661](https://github.com/moncifem/latticedb/issues/661)). |
 | [#674](https://github.com/moncifem/latticedb/issues/674) | `COMMIT` or `ROLLBACK` outside a block, and `BEGIN` inside one, send no PostgreSQL warning (`25P01`, `25001`). |

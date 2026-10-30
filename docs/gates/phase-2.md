@@ -666,9 +666,51 @@ equal the latticed output pinned next to it in a `.latticed` file, checked by ha
   `FATAL:  password authentication failed` and psql exit status 2, not the code.
 - `date - date` and `date + integer` answer `42804` ("arithmetic is not defined for date"); the subset
   does not list date arithmetic, so no script asserts it.
-- Binary result formats, `PREPARE`/`EXECUTE` (refused by the executor), `COPY`, other clients and
-  drivers (#413, #576). This is one client, libpq's psql, and no driver conformance is claimed. No Phase 2
-  exit criterion is claimed.
+- Binary result formats, `PREPARE`/`EXECUTE` (refused by the executor), `COPY`, JDBC and the driver
+  matrix (#413). The psql suite is one client; the three drivers in the next section are text mode only.
+  No Phase 2 exit criterion is claimed.
+
+## Driver smoke scripts in text mode (issue 576)
+
+`tests/drivers/smoke.sh` runs one script per driver against a built `latticed --data-dir`, each on its own
+server and data directory over loopback trust without TLS: `node/smoke.mjs` (node-postgres `pg` 8.23.1) and
+`go/main.go` (pgx v5.11.0). Both run the same steps: connect; `SELECT` of a NULL, a bool, an int and a text;
+`CREATE TABLE`; INSERT, SELECT, UPDATE and DELETE with parameters, including NULL; a committed and a
+rolled-back transaction; an error with its SQLSTATE (`23505`, `42601`); `DROP TABLE`; a clean close. Each
+prints one JSON line per step. `smoke_compare.py` (standard library) compares the lines with `expected.jsonl`,
+which was written by hand from PostgreSQL's behaviour and from each driver's documented type mapping (pg returns
+bigint as a string), never from a run of latticed. It also checks that the expected output covers the tags
+parameter, null, bool, int, text and error, and that a run with its last step cut off fails. The lockfiles pin
+the drivers: `node/package-lock.json` (installed with `npm ci --ignore-scripts`) and `go/go.sum`. CI job
+`driver-smoke` (`.github/workflows/driver-smoke.yml`) installs from them and runs the same script.
+
+| Driver | Setting needed for text mode | Result | Pinned known failures (in `known.jsonl`, with the issue) |
+|---|---|---|---|
+| pg 8.23.1 | none: values use the extended protocol with text results; bigint comes back as a string | 16 of 16 steps pass | none |
+| pgx v5.11.0 | `default_query_exec_mode=exec` (`QueryExecModeExec` in the script) | 16 of 17 steps pass | the default query mode fails with `expected 0 arguments, got 1`, because the server describes no parameter types (#703) |
+
+Each known failure is a step whose output must equal the pinned latticed output. The run fails when it changes
+to anything else, and when it starts to match PostgreSQL (then it moves out of `known.jsonl`). A driver script
+that exits non-zero, a server that does not stop with status 0 after `shutdown`, or a missing step fails the
+job. A latticed that dies before it opens its stdin fails the run at once; it does not hang.
+
+**Python is not in this suite.** The first candidate, psycopg 3, is LGPL-3.0, and the licence allow list in
+`docs/dependency-policy.md` does not allow it. Its findings stay on record in #608 (psycopg's default `%s`
+placeholders send binary parameters, refused with `0A000`) and #382 (its default connection opens a
+transaction block before `CREATE TABLE`, refused with `25001`). The permissively licensed replacement, pg8000
+(BSD-3), is tracked in #710.
+
+Run locally, not in CI yet: a debug build of `latticed` rebased on current `main` (built with `CARGO_TARGET_DIR`
+outside the checkout and `CARGO_BUILD_JOBS=2`); node 26.13.0 (CI: 24) and go 1.27.1 (CI: the toolchain that
+`go.mod` asks for). Both scripts matched their expected output, with the known case xfail. The negative checks
+were run by hand: a single changed value and a missing step each fail the comparison, and a fake latticed that
+exits at start fails the run. The first CI result and the exact versions it prints are recorded here when that
+run exists.
+
+Not covered, and why: JDBC and binary formats (#413, #608); restart and reconnect from drivers (the psql restart
+scripts cover the server restart); TLS and SCRAM for these drivers (the psql suite covers SCRAM over TLS); pgx's
+`simple_protocol` mode and its default mode once #703 is fixed (not run yet); cancellation of a statement from a
+driver; Python (#710). Each of these is listed here rather than claimed. No Phase 2 exit criterion is claimed.
 
 ## SQL definitions in the executor (RFC 0012 work package 5, issue 573)
 

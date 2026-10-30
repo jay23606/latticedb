@@ -1,0 +1,13 @@
+{
+  "name": "latticedb-driver-smoke-node",
+  "version": "0.0.0",
+  "private": true,
+  "description": "node-postgres smoke script for latticed (text mode), pinned by package-lock.json",
+  "type": "module",
+  "scripts": {
+    "smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "pg": "8.23.1"
+  }
+}

@@ -43,3 +43,17 @@ updates:
     directory: /clients/typescript
     schedule: { interval: weekly }
     cooldown: { default-days: 7 }
+  - package-ecosystem: npm
+    directory: /tests/drivers/node
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+    groups:
+      driver-smoke:
+        patterns: ["*"]
+  - package-ecosystem: gomod
+    directory: /tests/drivers/go
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+    groups:
+      driver-smoke:
+        patterns: ["*"]

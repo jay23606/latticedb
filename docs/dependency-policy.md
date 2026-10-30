@@ -163,6 +163,8 @@ outside the root workspace (each has a nested `[workspace]`), which the root `ca
 | pip | `/.github` | `requirements-zizmor.txt` (hash-pinned) |
 | pip | `/tools` | `requirements-sql-planner.txt` (hash-pinned) |
 | npm | `/clients/typescript` | Exact-pinned development tools |
+| npm | `/tests/drivers/node` | The node-postgres (`pg`) client of the driver smoke script, exact-pinned, grouped |
+| gomod | `/tests/drivers/go` | The pgx client of the Go driver smoke script (`go.mod`, `go.sum`), grouped |
 
 The experiment and loom lockfiles stay out of the production graph on purpose; their update pull
 requests are reviewed like any other, but they do not change what ships. The classifier's

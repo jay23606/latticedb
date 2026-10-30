@@ -1,0 +1,82 @@
+name: driver-smoke
+# Runs the node-postgres (pg) and pgx smoke scripts in tests/drivers (text mode) against the release-built
+# latticed over loopback trust (issue 576). Each driver is installed from its lockfile: package-lock.json
+# for node, go.sum for Go. The expected output is written by hand; a case that latticed does not pass yet
+# is pinned in known.jsonl with its issue, and the job fails when that case changes or starts to match
+# PostgreSQL. This is not the driver matrix (#413), which also covers the binary formats.
+on:
+  pull_request:
+    paths:
+      - "crates/latticed/**"
+      - "crates/lattice-api/**"
+      - "crates/lattice-exec/**"
+      - "tests/drivers/**"
+      - "Cargo.lock"
+      - ".github/workflows/driver-smoke.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/latticed/**"
+      - "crates/lattice-api/**"
+      - "crates/lattice-exec/**"
+      - "tests/drivers/**"
+      - "Cargo.lock"
+      - ".github/workflows/driver-smoke.yml"
+  workflow_dispatch:
+  schedule: [{ cron: "20 6 * * 1" }]
+permissions:
+  contents: read
+concurrency:
+  group: driver-smoke-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  driver-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with: { toolchain: 1.99.1 }
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: build latticed
+        run: cargo build --release --locked -p latticed
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: install the node-postgres driver from package-lock.json
+        run: npm ci --ignore-scripts
+        working-directory: tests/drivers/node
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tests/drivers/go/go.mod
+          cache-dependency-path: tests/drivers/go/go.sum
+      - name: download the pgx driver pinned in go.sum
+        run: go mod download
+        working-directory: tests/drivers/go
+      - name: shellcheck
+        run: shellcheck -x tests/drivers/smoke.sh
+      - name: driver smoke scripts, text mode
+        env:
+          LATTICE_DRIVERS_WORK: ${{ runner.temp }}/driver-smoke
+        run: tests/drivers/smoke.sh target/release/latticed
+      - name: driver versions
+        if: always()
+        run: |
+          {
+            echo "### driver smoke scripts"
+            echo
+            echo "- node-postgres: \`$(cd tests/drivers/node && node -p 'require("pg/package.json").version')\` on node \`$(node --version)\`"
+            echo "- pgx: \`$(cd tests/drivers/go && go list -m -f '{{.Version}}' github.com/jackc/pgx/v5)\` on \`$(go version)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: server logs and driver output
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: driver-smoke-logs
+          path: |
+            ${{ runner.temp }}/driver-smoke/*/server.log
+            ${{ runner.temp }}/driver-smoke/*/driver.stderr
+            ${{ runner.temp }}/driver-smoke/*/actual.jsonl
+          if-no-files-found: ignore
+          retention-days: 7

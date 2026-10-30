@@ -20,3 +20,4 @@ __pycache__/
 /*.private.md
 /clients/typescript/node_modules
 /clients/typescript/dist
+/tests/drivers/node/node_modules/
