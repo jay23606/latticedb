@@ -1211,6 +1211,9 @@ impl Parser {
                 self.bump();
                 let if_exists = self.if_exists()?;
                 let name = self.object_name()?;
+                if self.at(&Tok::Comma) {
+                    return Err(self.unsupported_here("DROP TABLE with several names"));
+                }
                 self.reject_drop_behavior()?;
                 Ok(Statement::DropTable { name, if_exists })
             }
@@ -1218,6 +1221,9 @@ impl Parser {
                 self.bump();
                 let if_exists = self.if_exists()?;
                 let name = self.object_name()?;
+                if self.at(&Tok::Comma) {
+                    return Err(self.unsupported_here("DROP INDEX with several names"));
+                }
                 self.reject_drop_behavior()?;
                 Ok(Statement::DropIndex { name, if_exists })
             }

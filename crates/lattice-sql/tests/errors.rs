@@ -174,6 +174,13 @@ fn unsupported_statements_are_named() {
     unsupported("CREATE TRIGGER x", "CREATE TRIGGER", "CREATE TRIGGER");
     unsupported("CREATE TABLE t AS SELECT 1", "CREATE TABLE ... AS", "AS");
     unsupported("DROP VIEW v", "DROP VIEW", "DROP");
+    unsupported("DROP TABLE a, b", "DROP TABLE with several names", ",");
+    unsupported(
+        "DROP TABLE IF EXISTS a, b",
+        "DROP TABLE with several names",
+        ",",
+    );
+    unsupported("DROP INDEX a, b", "DROP INDEX with several names", ",");
     unsupported("ALTER VIEW v", "ALTER VIEW", "ALTER");
     unsupported(
         "ALTER TABLE t ALTER COLUMN a TYPE int",
