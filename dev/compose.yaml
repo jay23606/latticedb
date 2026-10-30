@@ -1,0 +1,79 @@
+# Dev stack for a maintainer agent and its subagents: one latticed with SCRAM over TLS, published on
+# 127.0.0.1 only. dev/lattice-dev.sh drives it; docs/alpha.md#dev-stack describes the workflow.
+#
+# Nothing secret is written here or into the image. The CA, the server key and the account files live
+# in the owner-only state dir (~/.lattice-dev by default). The script copies the server key and
+# certificate into the tls volume and creates the account files in the config volume, so the
+# containers read them as uid 10001 without a bind mount of the state dir.
+#
+# The sync gateway is not in this stack: the image refuses a non-loopback gateway address until TLS
+# exists on the gateway (issue #578), so it cannot be published from a container.
+name: ${LATTICE_DEV_PROJECT:-lattice-dev}
+
+x-image: &image ${LATTICE_DEV_IMAGE:-ghcr.io/moncifem/latticedb:0.1.0-alpha.1@sha256:678aba924b803c5ed198e117e36a5fd0d5c9ec05f5d1bb80fb56a5d739d948fd}
+
+services:
+  latticed:
+    image: *image
+    command:
+      - --data-dir
+      - /var/lib/lattice
+      - --auth
+      - scram-tls
+      - --listen
+      - 0.0.0.0:5432
+      - --tls-cert
+      - /etc/lattice-tls/server-cert.pem
+      - --tls-key
+      - /etc/lattice-tls/server-key.pem
+      - --scram-verifiers
+      - /etc/lattice/scram-verifiers
+      - --scram-decoy-secret
+      - /etc/lattice/scram-decoy-secret
+      - --account-policies
+      - /etc/lattice/account-policies
+      - --stdin-control
+      - "off"
+    ports:
+      - target: 5432
+        published: "${LATTICE_DEV_PORT:-5432}"
+        host_ip: 127.0.0.1
+    volumes:
+      - data:/var/lib/lattice
+      - config:/etc/lattice:ro
+      - tls:/etc/lattice-tls:ro
+    restart: unless-stopped
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/5432"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  # One-shot tools that dev/lattice-dev.sh runs with `docker compose run`. They have no network.
+  lattice-cli:
+    image: *image
+    profiles: ["tools"]
+    entrypoint: ["/usr/local/bin/lattice"]
+    network_mode: none
+    volumes:
+      - config:/etc/lattice
+
+  tls-install:
+    image: *image
+    profiles: ["tools"]
+    user: "0:0"
+    entrypoint: ["install", "-o", "10001", "-g", "10001", "-m", "0600", "/src/server-key.pem", "/src/server-cert.pem", "/etc/lattice-tls/"]
+    network_mode: none
+    volumes:
+      - type: bind
+        source: ${LATTICE_DEV_HOME:?set by dev/lattice-dev.sh}/tls
+        target: /src
+        read_only: true
+      - tls:/etc/lattice-tls
+
+volumes:
+  data:
+  config:
+  tls:

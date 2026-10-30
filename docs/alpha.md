@@ -137,6 +137,49 @@ after a restart on the same volumes. It does not run the arm64 image, the publis
 and it does not test a stop during recovery. The image adds no shell or package manager, but the
 `ubuntu:24.04` base still ships `/bin/sh` and `apt`; removing them is a separate decision.
 
+## Dev stack
+
+For a maintainer agent and its subagents that need a real server to work against. `dev/lattice-dev.sh`
+drives `dev/compose.yaml`: one `latticed` from the published image with SCRAM over TLS, published on
+`127.0.0.1` only, and one credential per account. It is a development setup on one machine, with a CA
+that the script makes for itself. It is not a deployment.
+
+```bash
+dev/lattice-dev.sh up          # first run: CA, server certificate and volumes; the server starts with the first account
+dev/lattice-dev.sh account add alice --read notes --write notes --ddl notes
+dev/lattice-dev.sh account add bob --read notes
+dev/lattice-dev.sh psql alice -c 'CREATE TABLE notes (id INT PRIMARY KEY, title TEXT)'
+dev/lattice-dev.sh psql bob -c 'SELECT * FROM notes'
+dev/lattice-dev.sh status
+dev/lattice-dev.sh down        # stops the containers and keeps the rows
+dev/lattice-dev.sh reset       # asks first, then deletes the rows, the volumes and the credentials
+```
+
+- The state dir `~/.lattice-dev` (mode 0700; set `LATTICE_DEV_HOME` to move it, never into the repository)
+  holds `ca.pem`, the CA key, the server key and certificate, and `accounts/NAME.env` for each account.
+  The env file has `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `PGSSLMODE=verify-full` and
+  `PGSSLROOTCERT`. Any libpq client can use it: `set -a; . ~/.lattice-dev/accounts/alice.env; set +a`.
+- `account add` prints the generated password once and writes it to that env file only. Passwords and
+  tokens never go on a command line. An account name is 1 to 63 letters, digits, `_` or `-`, and starts
+  with a letter or a digit. A name that is already taken is refused.
+- latticed reads the account files at start, so every `account add` restarts a running server. The
+  restart disconnects every client connected at that moment, and the server is unavailable until it is
+  healthy again (a few seconds). Add all the accounts you need before a long session.
+- If an account's env file is lost, its password cannot be shown again, and the name stays taken. There
+  is no `account remove` command yet, so the only way back is `reset`, which deletes every account and
+  every row. Keep the env files: they are the only copy of the passwords.
+- The rows live in the volumes `<project>_data`, `<project>_config` and `<project>_tls`. The project is
+  `lattice-dev` by default; `LATTICE_DEV_PROJECT` and `LATTICE_DEV_PORT` run a second stack beside it.
+  `LATTICE_DEV_IMAGE` runs another image, for example one built from the same binaries.
+- `dev/lattice-dev.sh logs` shows the server log. The script needs Docker with Compose v2, `openssl`
+  and `psql` (`brew install libpq` on macOS).
+- `tests/dev/dev-stack.sh` runs the whole flow in its own project and state dir, then removes them. Run
+  by hand on macOS arm64 with Docker Desktop; CI does not run it.
+
+The sync gateway (`--gateway-listen`) is not in the stack. The image refuses a non-loopback gateway
+address until TLS exists on the gateway ([#578](https://github.com/moncifem/latticedb/issues/578)), so
+a container cannot publish it.
+
 ## Connect with psql
 
 ```bash
