@@ -93,6 +93,14 @@ fn key_type_ok(ty: SqlType) -> bool {
     !matches!(ty, SqlType::Numeric | SqlType::Jsonb | SqlType::Unknown)
 }
 
+fn twice_in_key(name: &str) -> ExecError {
+    ExecError::new(
+        ErrorKind::Bind,
+        "42701",
+        format!("column \"{name}\" appears twice in a key"),
+    )
+}
+
 impl TableDef {
     /// Builds a definition from `CREATE TABLE`.
     pub fn from_create(id: u32, ct: &ast::CreateTable) -> Result<TableDef, ExecError> {
@@ -180,13 +188,21 @@ impl TableDef {
                         ));
                     }
                     for c in cols {
-                        primary_key.push(find(c)?);
+                        let at = find(c)?;
+                        if primary_key.contains(&at) {
+                            return Err(twice_in_key(&c.value));
+                        }
+                        primary_key.push(at);
                     }
                 }
                 TableConstraint::Unique(cols) => {
                     let mut u = Vec::new();
                     for c in cols {
-                        u.push(find(c)?);
+                        let at = find(c)?;
+                        if u.contains(&at) {
+                            return Err(twice_in_key(&c.value));
+                        }
+                        u.push(at);
                     }
                     uniques.push(u);
                 }

@@ -1060,12 +1060,29 @@ impl Parser {
             unique: false,
             default: None,
         };
+        let mut explicit_null = false;
         loop {
             match self.word() {
                 Some("not") => {
-                    self.bump();
+                    let at = self.bump();
                     self.expect_kw("null")?;
+                    if explicit_null {
+                        return Err(ParseError::syntax(
+                            "conflicting NULL/NOT NULL declarations",
+                            at,
+                        ));
+                    }
                     def.not_null = true;
+                }
+                Some("null") => {
+                    let at = self.bump();
+                    if def.not_null {
+                        return Err(ParseError::syntax(
+                            "conflicting NULL/NOT NULL declarations",
+                            at,
+                        ));
+                    }
+                    explicit_null = true;
                 }
                 Some("primary") => {
                     self.bump();
