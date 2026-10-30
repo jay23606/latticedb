@@ -112,6 +112,9 @@ planted_bugs! {
     TreeCycleCheckSkipped,
     /// A capability-requiring append omits its durable segment guard.
     RequiredGuardOmitted,
+    /// An append that requires the SQL definitions capability drops that bit from its durable
+    /// segment guard but keeps the others (old readers would replay definitions they cannot read).
+    SqlDefinitionsBitDropped,
     /// Recovery ignores managed index definitions and therefore omits their rebuilt entries.
     ManagedIndexesNotRecovered,
     /// Strict HLC history resolution silently substitutes the vacuum floor for an expired view.
@@ -283,7 +286,11 @@ impl Bug {
     pub const NOTIFY: [Bug; 2] = [Bug::NotifyWaitIgnoresPublished, Bug::NotifyBeforeDurable];
 
     /// Guarded-WAL admission defects, exercised by independent context witnesses.
-    pub const ADMISSION: [Bug; 2] = [Bug::RequiredGuardOmitted, Bug::GuardRewriteUnstaged];
+    pub const ADMISSION: [Bug; 3] = [
+        Bug::RequiredGuardOmitted,
+        Bug::GuardRewriteUnstaged,
+        Bug::SqlDefinitionsBitDropped,
+    ];
 
     /// Recovery-order defect, detected by the focused LSN-gap witnesses in `log.rs`: the log
     /// simulation never writes a gap, so it cannot reach this path.

@@ -8,7 +8,10 @@ and waived its wait on 2026-10-29. LCIX format acceptance/hold and engine activa
 
 The header is 32 bytes: ASCII `LATCAP02` (8), little-endian u32 version 2, u16 length 32,
 u16 reserved zero, u64 required capabilities, u32 reserved zero, then u32 CRC32C of the preceding
-28 bytes. Bit 0 is managed compound replay; zero/unknown bits refuse. Records keep the
+28 bytes. Required capability bits: bit 0 (value 1) is managed compound replay; bit 1 (value 2) is
+unknown; bit 2 (value 4) is unassigned; bit 3 (value 8, `SQL_DEFINITIONS`) is durable SQL table
+definitions (RFC 0012, pull request 414, proposed; nothing sets it yet).
+Zero and unknown bits refuse, so every reader built before bit 3 refuses a mask containing it. Records keep the
 unchanged v1 encoding and start at offset 32. Existing v1 headers/records remain byte-unchanged.
 
 ## Versioning and compatibility
@@ -29,7 +32,9 @@ the first 28 bytes. Record CRC coverage remains unchanged. Corrupt complete head
 
 ## Golden files
 
-`corpus/wal-admission-v2-{header,compound,unknown-capability,unknown-version}.golden` and
+`corpus/wal-admission-v2-{header,compound,unknown-capability,unknown-version}.golden`,
+`corpus/wal-admission-v2-{sql-definitions,managed-sql-definitions,unassigned-capability}.golden` (masks 8, 9
+and 4; RFC 0012, status proposed) and
 `corpus/wal-admission-v1-{legacy,rows}.golden`, wrong-length/reserved/bad-CRC examples, a
 capability-drop chain (201-byte guarded segment followed by a 16-byte legacy header), and all 32
 strict guarded-header prefixes are independently framed by

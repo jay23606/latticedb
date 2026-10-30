@@ -31,6 +31,13 @@ def record(lsn, kind, body):
     return u32(len(body)) + u32(crc(checked)) + struct.pack('<QB', lsn, kind) + body
 
 
+RFC_0012 = {
+    'wal-admission-v2-sql-definitions.golden',
+    'wal-admission-v2-managed-sql-definitions.golden',
+    'wal-admission-v2-unassigned-capability.golden',
+}
+
+
 def vectors():
     tables = b'LCAT\x01' + u32(1) + b'\x01' + u32(7) + name(b'items')
     rows = b'LROW\x01' + u32(2) + u32(7) + name(b'a') + b'\x01' + name(b'x') + u32(7) + name(b'b') + b'\x00'
@@ -44,6 +51,10 @@ def vectors():
         'wal-admission-v2-compound.golden': header() + record(1, 1, changeset),
         'wal-admission-v2-unknown-capability.golden': header(mask=2),
         'wal-admission-v2-unknown-version.golden': header(version=3),
+        # RFC 0012: bit 3 (value 8) alone and together with bit 0; value 4 stays unassigned.
+        'wal-admission-v2-sql-definitions.golden': header(mask=8),
+        'wal-admission-v2-managed-sql-definitions.golden': header(mask=9),
+        'wal-admission-v2-unassigned-capability.golden': header(mask=4),
         'wal-admission-v1-legacy.golden': legacy,
         'wal-admission-v1-rows.golden': legacy + record(1, 1, envelope(rows)),
         'wal-admission-v2-dropped-capability.golden': header() + record(1, 1, changeset) + legacy,
@@ -63,6 +74,9 @@ if __name__ == '__main__':
     root = Path(__file__).resolve().parents[2] / 'formats' / 'corpus'
     for filename, data in vectors().items():
         (root / filename).write_bytes(data)
+        pending = filename in RFC_0012
         (root / (filename + '.toml')).write_text(
-            'format = "wal-admission"\nversion = '+('1' if 'v1-' in filename else '2')+'\nstatus = "accepted"\n'
-            'description = "Independent Python framing/CRC32C; RFC 0008 and nested illustrative RFC 0005 accepted"\n')
+            'format = "wal-admission"\nversion = '+('1' if 'v1-' in filename else '2')+'\n'
+            + ('status = "proposed"\ndescription = "Independent Python framing/CRC32C; RFC 0012 capability set (bit 3), comment period open until 2026-11-06"\n' if pending else
+            'status = "accepted"\n'
+            'description = "Independent Python framing/CRC32C; RFC 0008 and nested illustrative RFC 0005 accepted"\n'))

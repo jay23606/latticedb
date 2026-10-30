@@ -23,6 +23,14 @@ Conditions, all of which stand until the gate is signed:
 - If a Phase 1 criterion is found to be unmet in a way that invalidates Phase 2 work, Phase 2 stops
   until it is fixed.
 
+Owner decisions recorded in chat on 2026-10-30:
+
+- `enforce_admins` on `main` is off until the first release (the alpha tag), so the coordinator may push
+  fast-forward commits directly to `main` after the same local checks and an independent review. Force
+  pushes to `main` stay forbidden. This changes no required check.
+- The seven-day RFC 0012 comment hold is waived: durable SQL definition code may merge once it is reviewed
+  and green. This is specific to RFC 0012 and does not waive any Phase 1 gate criterion.
+
 The open items include calendar-time evidence, unfinished engineering, and a maintainer decision.
 The table records those separately; collecting an evidence package does not sign the gate.
 

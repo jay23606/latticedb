@@ -590,13 +590,18 @@ impl<I: Io> Log<I> {
             return Err(LogError::TooLarge(payload.len()));
         }
         admit(required, self.supported_capabilities)?;
-        if required & !self.required_capabilities != 0 && !bugs::active(Bug::RequiredGuardOmitted) {
+        let guard = if bugs::active(Bug::SqlDefinitionsBitDropped) {
+            required & !crate::admission::SQL_DEFINITIONS
+        } else {
+            required
+        };
+        if guard & !self.required_capabilities != 0 && !bugs::active(Bug::RequiredGuardOmitted) {
             // Flush the legacy prefix before changing segment context; never mix a queued batch.
             self.sync()?;
             if self.poisoned {
                 return Err(LogError::Poisoned);
             }
-            if let Err(error) = self.install_guard(self.required_capabilities | required) {
+            if let Err(error) = self.install_guard(self.required_capabilities | guard) {
                 self.poisoned = true;
                 return Err(error);
             }

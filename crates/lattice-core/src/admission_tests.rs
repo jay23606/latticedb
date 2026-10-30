@@ -652,3 +652,234 @@ fn a_full_read_longer_than_the_admitted_length_is_refused_even_with_the_same_pre
         Err(LogError::Corrupt(_))
     ));
 }
+
+// RFC 0012: required capability bit 3 (value 8, SQL_DEFINITIONS). Nothing requests it yet.
+const SQL_DEFINITIONS_HEADER: &[u8] =
+    include_bytes!("../../../formats/corpus/wal-admission-v2-sql-definitions.golden");
+const MANAGED_SQL_HEADER: &[u8] =
+    include_bytes!("../../../formats/corpus/wal-admission-v2-managed-sql-definitions.golden");
+const UNASSIGNED_CAP: &[u8] =
+    include_bytes!("../../../formats/corpus/wal-admission-v2-unassigned-capability.golden");
+
+fn open_supporting(disk: &Disk, limit: u64, supported: u64) -> Log<Disk> {
+    Log::open_streaming_with_capabilities(disk.clone(), "wal", limit, supported, |_, _| {})
+        .unwrap()
+        .0
+}
+
+#[test]
+fn bit_3_headers_match_hand_derived_bytes_and_round_trip() {
+    // Prefix bytes written out by hand from the layout: magic, version 2, length 32, reserved 0,
+    // mask as u64 little endian, reserved 0. The CRC bytes come from the Python generator.
+    let prefix = |mask: u8| {
+        let mut p = b"LATCAP02".to_vec();
+        p.extend_from_slice(&[
+            2, 0, 0, 0, 32, 0, 0, 0, mask, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        p
+    };
+    assert_eq!(&SQL_DEFINITIONS_HEADER[..28], prefix(8).as_slice());
+    assert_eq!(&MANAGED_SQL_HEADER[..28], prefix(9).as_slice());
+    assert_eq!(SQL_DEFINITIONS_HEADER[28..], [0x32, 0x7b, 0x71, 0x22]);
+    assert_eq!(MANAGED_SQL_HEADER[28..], [0x02, 0xaf, 0x00, 0x13]);
+    assert_eq!(admission::SQL_DEFINITIONS, 8);
+    assert_eq!(admission::KNOWN_CAPABILITIES, 1 | 8);
+    for (mask, fixture) in [(8u64, SQL_DEFINITIONS_HEADER), (9, MANAGED_SQL_HEADER)] {
+        assert_eq!(admission::guarded_header(mask).unwrap(), fixture);
+        let parsed = admission::decode_header(fixture).unwrap();
+        assert_eq!((parsed.length, parsed.required_capabilities), (32, mask));
+        for n in 0..32 {
+            assert!(admission::decode_header(&fixture[..n]).is_err());
+            let mut flipped = fixture.to_vec();
+            flipped[n] ^= 1;
+            assert!(admission::decode_header(&flipped).is_err());
+        }
+    }
+}
+
+#[test]
+fn bit_3_neighbours_stay_refused_by_encoder_and_decoder() {
+    // Value 2 is unknown and value 4 is unassigned, alone or beside a known bit.
+    for mask in [2u64, 4, 3, 5, 10, 12, 13, 15, 16, 1 << 63] {
+        assert!(
+            matches!(
+                admission::guarded_header(mask),
+                Err(admission::HeaderError::Invalid(_))
+            ),
+            "mask {mask}"
+        );
+    }
+    for bytes in [UNKNOWN_CAP, UNASSIGNED_CAP] {
+        assert!(admission::decode_header(bytes).is_err());
+    }
+    assert_eq!(UNASSIGNED_CAP[16], 4);
+}
+
+#[test]
+fn a_reader_without_bit_3_refuses_before_any_callback_read_or_repair() {
+    for (fixture, mask) in [(SQL_DEFINITIONS_HEADER, 8u64), (MANAGED_SQL_HEADER, 9)] {
+        let mut disk = Disk::new();
+        plant(&mut disk, FIRST, fixture);
+        let before = disk.manifest();
+        disk.1.set(0);
+        // Legacy-only and managed-compound-only readers both refuse.
+        for supported in [0u64, 1] {
+            let calls = Cell::new(0);
+            let result = Log::open_streaming_with_capabilities(
+                disk.clone(),
+                "wal",
+                100,
+                supported,
+                |_, _| calls.set(calls.get() + 1),
+            );
+            assert!(
+                matches!(
+                    result,
+                    Err(LogError::UnsupportedCapabilities { required, supported: s })
+                        if required == mask && s == supported
+                ),
+                "mask {mask} supported {supported}"
+            );
+            assert_eq!(calls.get(), 0);
+        }
+        assert_eq!(disk.1.get(), 0, "preflight reads bounded prefixes only");
+        assert_eq!(disk.manifest(), before);
+        // A reader that lists exactly the bits in the header opens it.
+        let log = open_supporting(&disk, 100, mask);
+        assert_eq!(log.required_capabilities(), mask);
+    }
+    // Claiming support for an unassigned bit does not make the build understand it.
+    let mut disk = Disk::new();
+    plant(&mut disk, FIRST, UNASSIGNED_CAP);
+    assert!(
+        Log::open_streaming_with_capabilities(disk, "wal", 100, 4 | 9, |_, _| panic!(
+            "callback before admission"
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn a_later_segment_with_bit_3_refuses_a_reader_without_it_and_keeps_bytes() {
+    let mut disk = Disk::new();
+    let mut first = LEGACY.to_vec();
+    first.extend(record::encode_record(1, 42, b"legacy"));
+    plant(&mut disk, FIRST, &first);
+    plant(
+        &mut disk,
+        "wal/00000000000000000002.seg",
+        SQL_DEFINITIONS_HEADER,
+    );
+    let before = disk.manifest();
+    assert!(
+        Log::open_streaming_with_capabilities(disk.clone(), "wal", 100, 1, |_, _| panic!(
+            "callback before admission"
+        ))
+        .is_err()
+    );
+    assert_eq!(disk.manifest(), before);
+}
+
+#[test]
+fn bit_3_is_requested_only_by_a_writer_that_asks_and_survives_rollover() {
+    let disk = Disk::new();
+    // A build that supports bit 3 but never requests it writes no bit 3.
+    let mut log = open_supporting(&disk, 1, 9);
+    log.append_with_capabilities(42, b"managed", 1).unwrap();
+    log.sync().unwrap();
+    log.append(42, b"ordinary").unwrap();
+    log.sync().unwrap();
+    drop(log);
+    for (_, bytes) in disk.manifest() {
+        assert_eq!(
+            admission::decode_header(&bytes)
+                .unwrap()
+                .required_capabilities,
+            1
+        );
+    }
+    // A writer that does not list bit 3 cannot append it, and consumes no LSN trying.
+    let mut narrow = open_supporting(&disk, 1, 1);
+    let next = narrow.next_lsn();
+    assert!(matches!(
+        narrow.append_with_capabilities(42, b"x", 8),
+        Err(LogError::UnsupportedCapabilities {
+            required: 8,
+            supported: 1
+        })
+    ));
+    assert_eq!(narrow.next_lsn(), next);
+    drop(narrow);
+    // The first append that needs the bit adds it to the cumulative mask; every segment that
+    // follows keeps it, including ones opened after a restart.
+    let mut log = open_supporting(&disk, 1, 9);
+    let lsn = log.next_lsn();
+    log.append_with_capabilities(42, b"definition", 8).unwrap();
+    log.sync().unwrap();
+    assert_eq!(log.required_capabilities(), 9);
+    log.append(42, b"after").unwrap();
+    log.sync().unwrap();
+    drop(log);
+    let mut log = open_supporting(&disk, 1, 9);
+    log.append(42, b"after restart").unwrap();
+    log.sync().unwrap();
+    drop(log);
+    let masks: Vec<u64> = disk
+        .manifest()
+        .iter()
+        .map(|(_, b)| admission::decode_header(b).unwrap().required_capabilities)
+        .collect();
+    let first_with_bit = masks.iter().position(|m| m & 8 != 0).unwrap();
+    assert!(first_with_bit > 0, "earlier segments keep their older mask");
+    assert!(masks[first_with_bit..].iter().all(|m| *m == 9), "{masks:?}");
+    assert!(masks[..first_with_bit].iter().all(|m| *m == 1), "{masks:?}");
+    let mut seen = Vec::new();
+    Log::open_streaming_with_capabilities(disk.clone(), "wal", 1, 9, |r, c| {
+        seen.push((r.lsn, c.required_capabilities))
+    })
+    .unwrap();
+    assert_eq!(seen.iter().find(|(l, _)| *l == lsn).unwrap().1, 9);
+    assert!(seen.iter().filter(|(l, _)| *l > lsn).all(|(_, c)| *c == 9));
+    // A reader without bit 3 now refuses the directory.
+    assert!(
+        Log::open_streaming_with_capabilities(disk, "wal", 1, 1, |_, _| panic!("callback"))
+            .is_err()
+    );
+}
+
+#[cfg(feature = "planted-bugs")]
+#[test]
+fn independent_dropped_bit_3_witness_has_a_clean_control() {
+    use crate::bugs::{self, Bug};
+    for required in [8u64, 9] {
+        for mutate in [false, true] {
+            let disk = Disk::new();
+            let mut log = open_supporting(&disk, 1 << 20, 9);
+            if mutate {
+                bugs::enable(Bug::SqlDefinitionsBitDropped);
+            }
+            log.append_with_capabilities(42, b"needs-definitions", required)
+                .unwrap();
+            log.sync().unwrap();
+            bugs::clear();
+            // Literal oracle: the context the record replays under carries the exact mask.
+            let rows = log.read_from_with_context(1, 1).unwrap();
+            let violated = rows[0].1.required_capabilities != required;
+            assert_eq!(violated, mutate, "required {required}");
+        }
+    }
+    // A writer that never asks for bit 3 is unaffected by the defect.
+    let disk = Disk::new();
+    let mut log = open_supporting(&disk, 1 << 20, 9);
+    bugs::enable(Bug::SqlDefinitionsBitDropped);
+    log.append_with_capabilities(42, b"managed-only", 1)
+        .unwrap();
+    log.sync().unwrap();
+    bugs::clear();
+    assert_eq!(
+        log.read_from_with_context(1, 1).unwrap()[0]
+            .1
+            .required_capabilities,
+        1
+    );
+}

@@ -10,8 +10,11 @@ pub const GUARDED_MAGIC: &[u8; 8] = b"LATCAP02";
 pub const GUARDED_HEADER_LEN: usize = 32;
 /// Required capability for managed compound catalog/index/row payloads.
 pub const MANAGED_COMPOUND: u64 = 1;
+/// Required capability for durable SQL table definitions (RFC 0012). Value 2 stays unknown and
+/// value 4 stays unassigned (reserved for RFC 0001). No writer requests this bit yet.
+pub const SQL_DEFINITIONS: u64 = 8;
 /// All required capabilities understood by this format.
-pub const KNOWN_CAPABILITIES: u64 = MANAGED_COMPOUND;
+pub const KNOWN_CAPABILITIES: u64 = MANAGED_COMPOUND | SQL_DEFINITIONS;
 
 #[cfg(test)]
 thread_local! {

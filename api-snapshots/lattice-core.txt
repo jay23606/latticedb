@@ -40,6 +40,7 @@ pub const lattice_core::admission::GUARDED_HEADER_LEN: usize
 pub const lattice_core::admission::GUARDED_MAGIC: &[u8; 8]
 pub const lattice_core::admission::KNOWN_CAPABILITIES: u64
 pub const lattice_core::admission::MANAGED_COMPOUND: u64
+pub const lattice_core::admission::SQL_DEFINITIONS: u64
 pub fn lattice_core::admission::decode_header(&[u8]) -> core::result::Result<lattice_core::admission::SegmentHeader, lattice_core::admission::HeaderError>
 pub fn lattice_core::admission::guarded_header(u64) -> core::result::Result<alloc::vec::Vec<u8>, lattice_core::admission::HeaderError>
 pub mod lattice_core::bugs
@@ -103,6 +104,7 @@ pub lattice_core::bugs::Bug::RowTombstoneSkipped
 pub lattice_core::bugs::Bug::SetTagLimitSkipped
 pub lattice_core::bugs::Bug::SkipFsync
 pub lattice_core::bugs::Bug::SkipRecoverySync
+pub lattice_core::bugs::Bug::SqlDefinitionsBitDropped
 pub lattice_core::bugs::Bug::SubscribePrincipalDropped
 pub lattice_core::bugs::Bug::TokenAcceptsPrefix
 pub lattice_core::bugs::Bug::TreeCycleCheckSkipped
@@ -113,7 +115,7 @@ pub lattice_core::bugs::Bug::TreeReplayBudgetSkipped
 pub lattice_core::bugs::Bug::VacuumDropsVisibleVersion
 pub lattice_core::bugs::Bug::ZeroFilledTailKept
 impl lattice_core::bugs::Bug
-pub const lattice_core::bugs::Bug::ADMISSION: [lattice_core::bugs::Bug; 2]
+pub const lattice_core::bugs::Bug::ADMISSION: [lattice_core::bugs::Bug; 3]
 pub const lattice_core::bugs::Bug::ALL: [lattice_core::bugs::Bug; 21]
 pub const lattice_core::bugs::Bug::AUTHOR: [lattice_core::bugs::Bug; 3]
 pub const lattice_core::bugs::Bug::BEARER: [lattice_core::bugs::Bug; 1]

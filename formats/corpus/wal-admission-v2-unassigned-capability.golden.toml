@@ -1,0 +1,4 @@
+format = "wal-admission"
+version = 2
+status = "proposed"
+description = "Independent Python framing/CRC32C; RFC 0012 capability set (bit 3), comment period open until 2026-11-06"

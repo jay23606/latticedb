@@ -545,3 +545,21 @@ reverse scans, an `EXPLAIN` statement and a streaming range read are open. The r
 materialises row references before its first poll, like a full scan. Left to CI: the workspace gate,
 Miri, mutation testing of `access.rs`, and the larger proptest case counts. No Phase 2 exit criterion is
 claimed; P2-07 and P2-10 remain open.
+
+## WAL capability bit 3, SQL definitions (issue 555)
+
+`lattice-core::admission` defines `SQL_DEFINITIONS = 8` and `KNOWN_CAPABILITIES` is now `1 | 8`
+(RFC 0012 Option A, ADR 0028; value 2 stays unknown and value 4 stays unassigned). Header encode and
+decode accept masks 8 and 9; every build before this change refuses a segment that carries bit 3 before
+any callback, read of record bytes or repair, which the new tests pin for readers supporting 0 and 1.
+Tests also cover the cumulative mask surviving rollover and a restart, a writer that never asks for the
+bit never writing it, and an append requiring the bit under a narrower supported set refusing without
+consuming an LSN. Independent fixtures `wal-admission-v2-{sql-definitions,managed-sql-definitions,
+unassigned-capability}.golden` (masks 8, 9 and 4) come from `tools/wal-admission/make_fixtures.py` with
+its own CRC32C; the existing fixtures are byte-identical. `Bug::SqlDefinitionsBitDropped` (group
+`Bug::ADMISSION`) is caught by a literal required-mask witness with a clean control.
+
+**Not done.** Nothing sets bit 3: no writer, engine or `RowStore` requests or advertises it, and no
+definition payload exists. The frozen old-reader hosted job (issue 559) is separate and not run here.
+The RFC 0012 comment period runs until 2026-11-06 and was not waived, so this change must not merge
+before then unless the owner waives the hold. No phase-gate claim.
