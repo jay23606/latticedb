@@ -1156,10 +1156,12 @@ impl Binder<'_> {
 
     fn row_count(&mut self, e: &Expr, negative: BindErrorKind) -> R<TypedExpr> {
         let b = self.expr(e, &Scope::empty())?;
-        let b = if b.ty == SqlType::Unknown {
-            self.coerce(b, SqlType::BigInt, e.span)?
-        } else {
-            b
+        let b = match b.ty {
+            SqlType::Unknown => self.coerce(b, SqlType::BigInt, e.span)?,
+            // PostgreSQL converts a numeric or floating point count to bigint by rounding
+            // (`LIMIT 1.5` is 2), so the plan carries the cast and the executor rounds.
+            SqlType::Numeric | SqlType::DoublePrecision => self.cast(b, SqlType::BigInt, e.span)?,
+            _ => b,
         };
         if !is_integer(b.ty) {
             return mismatch(
