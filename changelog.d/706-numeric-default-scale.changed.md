@@ -1,0 +1,1 @@
+A numeric column default is stored in canonical form, so `DEFAULT -2.50` reads `-2.5`; PostgreSQL prints `-2.50`. The value is the same. The durable table definition (RFC 0012) stores numeric defaults without trailing zeros, so the written scale is not kept. Recorded as a known difference in #706.

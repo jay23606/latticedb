@@ -21,9 +21,12 @@ const STEPS: &[(&str, &[&str])] = &[
         &["CREATE TABLE"],
     ),
     ("INSERT INTO d1 (id) VALUES (1)", &["INSERT 0 1"]),
+    // PostgreSQL prints `-2.50`: it keeps the written scale of a numeric column without a typmod.
+    // Lattice stores a numeric default in canonical form (RFC 0012: no trailing zero), so `e` reads
+    // `-2.5`. The value is the same; only the text differs. A recorded known difference, see #706.
     (
         "SELECT a, b, c, d, e, f, g FROM d1",
-        &["-5|5||-1.5|-2.50|0.5|-9223372036854775807"],
+        &["-5|5||-1.5|-2.5|0.5|-9223372036854775807"],
     ),
     (
         "CREATE TABLE d2 (id INT PRIMARY KEY, a INT DEFAULT CAST('7' AS INT), b INT DEFAULT '8'::int, c TEXT DEFAULT 'x'::text, d BOOLEAN DEFAULT true, e BOOLEAN DEFAULT 'f', f DOUBLE PRECISION DEFAULT 2, g NUMERIC DEFAULT 3)",
