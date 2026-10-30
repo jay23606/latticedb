@@ -127,13 +127,15 @@ impl core::fmt::Debug for lattice_exec::TxStatus
 pub fn lattice_exec::TxStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for lattice_exec::TxStatus
 impl core::marker::StructuralPartialEq for lattice_exec::TxStatus
-pub struct lattice_exec::ActorPolicy(_, _, _)
+pub struct lattice_exec::ActorPolicy(_, _, _, _)
 impl lattice_exec::ActorPolicy
+pub fn lattice_exec::ActorPolicy::author(&self) -> u128
 pub fn lattice_exec::ActorPolicy::bound(&self, &lattice_engines::catalog::Tables) -> lattice_exec::ActorPolicy
 pub fn lattice_exec::ActorPolicy::can_read_table(&self, &str) -> bool
 pub fn lattice_exec::ActorPolicy::hiding_catalog(self) -> Self
 pub fn lattice_exec::ActorPolicy::new(alloc::rcs::rc::Rc<dyn lattice_engines::limits::PolicyEvaluator>) -> Self
 pub fn lattice_exec::ActorPolicy::sees_table(&self, &str) -> bool
+pub fn lattice_exec::ActorPolicy::with_author(self, u128) -> Self
 pub fn lattice_exec::ActorPolicy::with_table_grants(lattice_engines::grants::TableGrants) -> Self
 impl core::clone::Clone for lattice_exec::ActorPolicy
 pub fn lattice_exec::ActorPolicy::clone(&self) -> Self
