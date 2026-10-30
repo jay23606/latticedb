@@ -187,8 +187,7 @@ ones for SQL messages and for feed cursors, DDL by name and by `*`, `RETURNING`,
 created after the grants, the file parser's bounds and line numbers, and two property tests against bit models
 (32 SQL cases; the resolver). Planted bugs `GrantReadOnlyTreatedAsWrite` and `GrantTableMatchByPrefix` are caught by
 the SQL matrix, and the prefix bug by the feed matrix. Not done: no row predicates, roles, groups or policy language; no
-`presence` bit (issue #626); the MCP backend (#526) has not been built so "alike for SQL, feed and MCP" is shown for SQL and
-the feed only; grants live in a file that the operator edits and restarts for, not in the database; a transaction block
+`presence` bit (issue #626); "alike for SQL, feed and MCP" is shown for SQL and the feed here and for MCP read and write in the MCP backend paragraph below; grants live in a file that the operator edits and restarts for, not in the database; a transaction block
 reads a table created after it began as empty; `w` without `r` can probe primary-key and `UNIQUE` values of the table through `23505` (PostgreSQL INSERT-only behaviour, pinned by a test); the BadCursor/LSN-gap side channel of the feed (#363) is unchanged.
 
 Verification evidence, not an exit criterion: commit notifier (issue #523, part of #518 and #567). `ExecHost::commit_notifier`
@@ -212,6 +211,30 @@ long poll #579); no loom model of the notifier (the check is a deterministic mod
 reveals commit activity to any holder regardless of grants (threat model G-07, issue #363) and a waiter that is
 woken for a commit it cannot read just gets an empty poll; `wait_after` with a `seen` past the database can outlast
 its timeout while commits keep arriving, because no clock is read.
+Verification evidence, not an exit criterion: MCP tool backend over the executor (issue #526 part 1, part of #518; threat
+model B6 and G-03). `latticed::mcp_backend::McpBackend` implements `ToolBackend` for `lattice_read` and `lattice_write`
+through `lattice-api::principal_sql::PrincipalSql` (new: SQL for one fixed principal on the executor actor), so rows
+are read and written as the authenticated principal under the executor's policy, with that account's author id. The
+`Caller` is derived from the principal and a different one is refused; tool grants map to table grants without
+widening them (`caller_for`), the MCP scope maps to `table/<name>` by `sync_scope`, writes carry `expected_version` as
+one conditional statement, row text is returned under a fixed `untrusted` envelope and output is cut under 1 MiB at a
+row boundary. `layers.toml` gained the edge `latticed -> lattice-sdk` (the only change). Tests (`cargo test -p latticed
+--lib mcp_backend`, 18 passing locally; `cargo test -p lattice-sdk --lib mcp`, 24; `cargo test -p lattice-core --lib
+bugs`, 2; `cargo xtask check-layers`; clippy `-D warnings` on latticed, lattice-api, lattice-sdk and lattice-core)
+include `mcp_write_is_visible_to_a_sql_reader_and_the_feed_with_the_right_author` (author compared with the same
+account's SQL write and another account's), `mcp_caller_cannot_name_another_principal`,
+`write_conflict_returns_the_expected_version_mismatch_as_a_tool_error_not_a_lost_update` and a six-thread race with
+one winner, `tool_output_is_bounded_before_the_backend_commits`, `row_text_is_data_in_a_fixed_envelope` (exact bytes),
+`a_denied_table_looks_identical_to_a_missing_one` (same response bytes for SQL-hidden and absent tables),
+`mcp_grant_scope_maps_to_table_grants_and_never_widens_them` and
+`scope_mapping_is_total_injective_and_refuses_what_it_cannot_express`. Planted bugs `McpCallerFromArgument`,
+`McpWriteIgnoresExpectedVersion`, `McpDeniedTableDistinguishable` and `McpRowTextOutsideEnvelope` are each caught by
+their witness. Not done: `lattice_subscribe` and the 12-byte cursor (issue #579); a cursor and an unseen-change count
+in tool results; author names in tool output (the envelope is built for them, no tool returns one yet); any transport
+or token handling (#527, #580); a version column maintained for SQL writers; per-principal limits (#529). Tables must
+have the key, value and version columns; others get `table_shape`. Not run locally: the workspace gate, mutation
+testing, Miri.
+
 Verification evidence, not an exit criterion: `lattice-engines::feed_emit` (WP36, issue #238) emits the change feed
 from the row store's retained committed versions. One local run of `cargo test -p lattice-engines --lib feed_emit`
 (6 tests, default settings): the feed from every cursor of 12 seeded 14-commit histories equals an independently

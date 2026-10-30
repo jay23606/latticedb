@@ -215,6 +215,19 @@ planted_bugs! {
     /// A live gateway connection is never checked again against the current credential store, so a
     /// revoked token keeps its stream (authentication).
     GatewayRevalidationSkipped,
+    /// The MCP tool backend runs a call that carries a caller other than the one derived from its
+    /// bound principal, instead of refusing it (confused deputy: a client string names the
+    /// identity).
+    McpCallerFromArgument,
+    /// The MCP write drops its `expected_version` check, so a stale writer overwrites a newer row
+    /// (lost update).
+    McpWriteIgnoresExpectedVersion,
+    /// The MCP backend answers a table the principal may not see differently from a table that does
+    /// not exist (existence oracle).
+    McpDeniedTableDistinguishable,
+    /// The MCP backend writes stored row text outside the fixed untrusted envelope, so an agent
+    /// cannot tell data from the server's own words (prompt injection, N-11).
+    McpRowTextOutsideEnvelope,
 }
 
 impl Bug {
@@ -315,6 +328,14 @@ impl Bug {
         Bug::GatewayRevalidationSkipped,
     ];
 
+    /// MCP tool backend defects, detected by the witnesses in `latticed::mcp_backend`.
+    pub const MCP: [Bug; 4] = [
+        Bug::McpCallerFromArgument,
+        Bug::McpWriteIgnoresExpectedVersion,
+        Bug::McpDeniedTableDistinguishable,
+        Bug::McpRowTextOutsideEnvelope,
+    ];
+
     /// Guarded-WAL admission defects, exercised by independent context witnesses.
     pub const ADMISSION: [Bug; 3] = [
         Bug::RequiredGuardOmitted,
@@ -390,6 +411,7 @@ impl Bug {
         &Bug::NON_PREFIX,
         &Bug::AUTHOR,
         &Bug::GATEWAY,
+        &Bug::MCP,
     ];
 }
 

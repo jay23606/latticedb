@@ -392,3 +392,13 @@ TLS, an idle deadline (#578), byte budgets per principal (#529), the security ev
 and rotation (#577; the embedding API has `GatewayHandle::replace_credentials`, which closes connections whose
 token no longer verifies).
 
+
+## MCP tool backend
+
+`latticed::mcp_backend::McpBackend` is the transport-independent backend of the MCP tools `lattice_read` and
+`lattice_write` (issue #526, part 1). It is created from an authenticated `Principal` and the account's row grant, and
+runs every statement as that principal through the SQL executor, so the table grants, the author id of a commit
+and the statement budgets are the ones a PostgreSQL connection of the account gets. A table the principal may not
+see answers like a table that does not exist. Row text is returned under a fixed `untrusted` member. Nothing
+serves it yet: no listener, token header or MCP transport calls it (issues #527 and #580), and `lattice_subscribe`
+is issue #579. See [docs/mcp-v0.md](../../docs/mcp-v0.md).

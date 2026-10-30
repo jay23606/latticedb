@@ -422,6 +422,8 @@ pub fn lattice_api::exec_host::ExecHost::start<I, C, R>(impl core::ops::function
 pub fn lattice_api::exec_host::ExecHost::start_dir(std::path::PathBuf, lattice_api::exec_host::PolicyTable, lattice_api::exec_host::HostLimits) -> core::result::Result<Self, alloc::string::String>
 pub fn lattice_api::exec_host::ExecHost::start_with_authors<I, C, R>(impl core::ops::function::FnOnce() -> core::result::Result<lattice_exec::db::Database<I, C, R>, lattice_exec::error::ExecError> + core::marker::Send + 'static, impl core::ops::function::FnOnce() -> core::result::Result<lattice_engines::authors::AuthorRegistry, alloc::string::String> + core::marker::Send + 'static, lattice_api::exec_host::PolicyTable, lattice_api::exec_host::HostLimits) -> core::result::Result<Self, alloc::string::String> where I: lattice_seams::Io + 'static, C: lattice_seams::Clock + core::clone::Clone + 'static, R: lattice_seams::Rng + 'static
 pub fn lattice_api::exec_host::ExecHost::unattached_tables(&self) -> &[alloc::string::String]
+impl lattice_api::exec_host::ExecHost
+pub fn lattice_api::exec_host::ExecHost::sql_for(&self, lattice_api::principal::Principal) -> lattice_api::principal_sql::PrincipalSql
 impl core::ops::drop::Drop for lattice_api::exec_host::ExecHost
 pub fn lattice_api::exec_host::ExecHost::drop(&mut self)
 pub struct lattice_api::exec_host::ExecProxy
@@ -704,6 +706,12 @@ impl<'a> core::fmt::Debug for lattice_api::principal::QueryContext<'a>
 pub fn lattice_api::principal::QueryContext<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'a> core::marker::Copy for lattice_api::principal::QueryContext<'a>
 pub const lattice_api::principal::LOCAL_DEVELOPMENT_NAME: &str
+pub mod lattice_api::principal_sql
+pub struct lattice_api::principal_sql::PrincipalSql
+impl lattice_api::principal_sql::PrincipalSql
+pub fn lattice_api::principal_sql::PrincipalSql::principal(&self) -> &lattice_api::principal::Principal
+pub fn lattice_api::principal_sql::PrincipalSql::run(&mut self, &str, &[core::option::Option<alloc::vec::Vec<u8>>]) -> core::result::Result<lattice_api::session::QueryOutput, lattice_api::session::QueryError>
+pub fn lattice_api::principal_sql::PrincipalSql::run_cancellable(&mut self, &str, &[core::option::Option<alloc::vec::Vec<u8>>], &lattice_api::cancel::CancellationToken) -> core::result::Result<lattice_api::session::QueryOutput, lattice_api::session::QueryError>
 pub mod lattice_api::scram
 pub enum lattice_api::scram::ScramError
 pub lattice_api::scram::ScramError::Crypto

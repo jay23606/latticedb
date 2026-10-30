@@ -1044,6 +1044,7 @@ impl Caller {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolOutput {
     text: String,
+    is_error: bool,
 }
 
 /// The text given to [`ToolOutput::new`] exceeds [`MAX_OUTPUT_BYTES`].
@@ -1063,8 +1064,22 @@ impl ToolOutput {
         if text.len() > MAX_OUTPUT_BYTES {
             Err(OutputTooLarge)
         } else {
-            Ok(Self { text })
+            Ok(Self {
+                text,
+                is_error: false,
+            })
         }
+    }
+
+    /// A failure of the call that the model can see and correct (`isError: true`, as the
+    /// specification says for tool execution errors), bounded like any output. Unlike a protocol
+    /// error it does not abort the request; the backend chooses `text`, so it must not hold
+    /// caller-supplied or stored text.
+    #[must_use]
+    pub fn tool_error(text: String) -> Self {
+        let mut out = Self::or_notice(text);
+        out.is_error = true;
+        out
     }
 
     /// Like [`ToolOutput::new`], but an oversized text becomes the fixed [`OUTPUT_OMITTED`] notice.
@@ -1074,6 +1089,7 @@ impl ToolOutput {
     pub fn or_notice(text: String) -> Self {
         Self::new(text).unwrap_or_else(|_| Self {
             text: OUTPUT_OMITTED.to_owned(),
+            is_error: false,
         })
     }
 
@@ -1081,6 +1097,12 @@ impl ToolOutput {
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Whether the call failed in a way reported to the model (`isError: true`).
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.is_error
     }
 }
 
@@ -1296,7 +1318,7 @@ impl<B: ToolBackend> Server<B> {
             }
         }
         let (text, is_error) = match self.backend.call(caller, &call) {
-            Ok(o) => (o.text, false),
+            Ok(o) => (o.text, o.is_error),
             Err(BackendError::PolicyDenied) => {
                 return Err(RpcError::new(code::SCOPE_DENIED, "scope denied"));
             }
@@ -2450,5 +2472,29 @@ mod tests {
             let _ = s.handle(&c, call_msg("lattice_read", &args).as_bytes());
             prop_assert!(s.backend().calls.is_empty());
         }
+    }
+
+    #[test]
+    fn a_tool_error_is_reported_as_is_error_with_the_backend_text() {
+        let mut s = legacy(Mock {
+            reply: Some(Ok(ToolOutput::tool_error(
+                "{\"error\":\"not_found\"}".to_owned(),
+            ))),
+            ..Mock::default()
+        });
+        let out = s.handle(
+            &all("team"),
+            call_msg("lattice_read", r#"{"scope":"team","table":"t"}"#).as_bytes(),
+        );
+        assert_eq!(
+            out.as_deref(),
+            Some(
+                r#"{"jsonrpc":"2.0","id":7,"result":{"resultType":"complete","content":[{"type":"text","text":"{\"error\":\"not_found\"}"}],"isError":true}}"#
+            )
+        );
+        // An oversize error text is replaced by the fixed notice and stays an error.
+        let big = ToolOutput::tool_error("x".repeat(MAX_OUTPUT_BYTES + 1));
+        assert_eq!((big.text(), big.is_error()), (OUTPUT_OMITTED, true));
+        assert!(!ToolOutput::or_notice("{}".to_owned()).is_error());
     }
 }

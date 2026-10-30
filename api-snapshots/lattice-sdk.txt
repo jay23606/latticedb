@@ -565,9 +565,11 @@ impl<B: core::fmt::Debug> core::fmt::Debug for lattice_sdk::mcp::Server<B>
 pub fn lattice_sdk::mcp::Server<B>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct lattice_sdk::mcp::ToolOutput
 impl lattice_sdk::mcp::ToolOutput
+pub fn lattice_sdk::mcp::ToolOutput::is_error(&self) -> bool
 pub fn lattice_sdk::mcp::ToolOutput::new(alloc::string::String) -> core::result::Result<Self, lattice_sdk::mcp::OutputTooLarge>
 pub fn lattice_sdk::mcp::ToolOutput::or_notice(alloc::string::String) -> Self
 pub fn lattice_sdk::mcp::ToolOutput::text(&self) -> &str
+pub fn lattice_sdk::mcp::ToolOutput::tool_error(alloc::string::String) -> Self
 impl core::clone::Clone for lattice_sdk::mcp::ToolOutput
 pub fn lattice_sdk::mcp::ToolOutput::clone(&self) -> Self
 impl core::cmp::Eq for lattice_sdk::mcp::ToolOutput

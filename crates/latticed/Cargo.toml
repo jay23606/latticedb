@@ -17,6 +17,7 @@ lattice-identity = { path = "../lattice-identity" }
 lattice-service = { path = "../lattice-service" }
 lattice-packs = { path = "../lattice-packs" }
 lattice-api = { path = "../lattice-api" }
+lattice-sdk = { path = "../lattice-sdk" }
 
 lattice-intel = { path = "../lattice-intel", optional = true }
 
@@ -31,6 +32,8 @@ intel = ["dep:lattice-intel"]
 [dev-dependencies]
 lattice-core = { path = "../lattice-core", features = ["planted-bugs"] }
 lattice-api = { path = "../lattice-api", features = ["test-hooks"] }
+# Enables the planted-defect switches the MCP backend witnesses flip.
+lattice-core = { path = "../lattice-core", features = ["planted-bugs"] }
 rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
 base64 = "=0.22.1"
 hmac = "=0.13.0"

@@ -32,6 +32,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
+pub mod mcp_backend;
 mod sql;
 pub mod stop;
 mod tokens;

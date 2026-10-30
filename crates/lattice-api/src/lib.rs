@@ -7,6 +7,7 @@ pub mod exec_handler;
 pub mod exec_host;
 pub mod pgwire;
 pub mod principal;
+pub mod principal_sql;
 pub mod session;
 
 /// Layer marker used by the layer check. Do not remove.

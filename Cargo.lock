@@ -638,6 +638,7 @@ dependencies = [
  "lattice-identity",
  "lattice-intel",
  "lattice-packs",
+ "lattice-sdk",
  "lattice-seams",
  "lattice-service",
  "lattice-sys",

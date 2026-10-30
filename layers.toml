@@ -71,7 +71,7 @@ allow = ["lattice-abi", "lattice-sdk", "lattice-core", "lattice-seams", "lattice
 
 [crate.latticed]
 layer = 7
-allow = ["lattice-intel", "lattice-abi", "lattice-seams", "lattice-sys", "lattice-core", "lattice-engines", "lattice-identity", "lattice-service", "lattice-packs", "lattice-api"]
+allow = ["lattice-intel", "lattice-abi", "lattice-seams", "lattice-sys", "lattice-core", "lattice-engines", "lattice-identity", "lattice-service", "lattice-packs", "lattice-api", "lattice-sdk"]
 
 [crate.lattice-testkit]
 layer = 8
