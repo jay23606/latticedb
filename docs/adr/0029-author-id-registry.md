@@ -38,7 +38,7 @@ set or the feed. The format is experimental and not frozen.
   a registry lost after such a vacuum can restart the counter at an id that only vacuumed history carries.
 - **Bounds.** At most 20,000 ids ever assigned (live and retired), 8 MiB of file. Beyond the id bound a new
   account gets an error on its first statement.
-- **Permissions.** Created empty with mode 0600 in a 0700 directory. An existing file with group or other
+- **Permissions.** Created empty (the `Io` seam takes no mode) and narrowed to 0600 at once, inside a 0700 directory. A symbolic link in its place is refused. An existing file with group or other
   bits and any content is refused at start (Unix).
 - **Backup and restore.** Back up `authors.reg` together with the log, taken at the same point, and restore
   both. Restoring an older registry beside a newer log refuses startup rather than reissuing ids. Never edit

@@ -691,4 +691,25 @@ mod tests {
             "the planted defect must be visible to the test above"
         );
     }
+
+    #[test]
+    fn a_log_id_the_registry_does_not_list_is_refused_below_and_above_the_counter() {
+        // Counter 401, ids 256 and 400 listed: 300 is below the counter but was never assigned.
+        let d = disk();
+        put(&d, &format!("{HEADER}A\t256\talice\nA\t400\tbob\n"));
+        let reg = open(&d);
+        assert_eq!(reg.check_covers(&[256, 400].into()), Ok(()));
+        assert_eq!(reg.check_covers(&[300].into()), Err(AuthorError::BehindLog));
+        assert_eq!(
+            reg.check_covers(&[256, 300, 400].into()),
+            Err(AuthorError::BehindLog)
+        );
+        // Counter 259, ids 256..=258 listed: 300 is above the counter.
+        let mut reg = AuthorRegistry::in_memory();
+        for n in ["a", "b", "c"] {
+            reg.author_for_account(n).unwrap();
+        }
+        assert_eq!(reg.check_covers(&[258].into()), Ok(()));
+        assert_eq!(reg.check_covers(&[300].into()), Err(AuthorError::BehindLog));
+    }
 }

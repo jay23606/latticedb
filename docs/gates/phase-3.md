@@ -198,7 +198,7 @@ including near-collisions finds no shared id, legacy author 0 still reads, and S
 startup `user` do not change the author. Two planted defects are caught by those tests: `AuthorFromClient` (author read
 from the statement) and `AuthorIdTruncatedHash` (ids collide). Startup also checks the registry against the account ids in the retained log and refuses when the file is missing or
 older (`registry_missing_or_older_than_log_refuses_startup`, planted bug `AuthorRegistryLogCheckSkipped`; ids that vacuum
-already dropped cannot be checked). The file is created 0600. Not done: the `authors.reg` file is a new local sidecar,
+already dropped cannot be checked). The file is created, then narrowed to 0600 inside the 0700 data directory, and a symlink is refused. Not done: the `authors.reg` file is a new local sidecar,
 experimental and unfrozen ([ADR 0029](../adr/0029-author-id-registry.md), proposed, independent review pending; it is not
 in the WAL, the change set or the feed); retirement is manual and library-only: nothing calls `rename` or `retire`,
 removing an account from the credential or policy file does not retire it, and adding the same name back is the same

@@ -522,10 +522,16 @@ impl Drop for AliveGuard {
 }
 
 /// Makes sure `authors.reg` exists and is not open to group or others: it maps account names to the
-/// ids that appear in history. It is created empty with mode 0600 (the data directory is 0700 as
-/// well); an existing file with wider permissions is refused, as `latticed` refuses a wide directory.
+/// ids that appear in history. It is created empty (the `Io` seam has no mode argument) and narrowed to 0600
+/// at once, inside the 0700 data directory; a symlink in its place is refused; an existing file with wider permissions is refused, as `latticed` refuses a wide directory.
 fn private_registry_file(dir: &std::path::Path) -> Result<(), String> {
     let path = dir.join("authors.reg");
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!(
+            "{}: the author registry must not be a symbolic link",
+            path.display()
+        ));
+    }
     if !path.exists() {
         let mut io = StdIo::new(dir.to_path_buf());
         io.append("authors.reg", b"")
@@ -2530,6 +2536,18 @@ reader	allow-all
             .err()
             .expect("started on a world-readable registry");
         assert!(error.contains("0600"), "{error}");
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_registry_is_refused() {
+        let path = dir("authors-symlink");
+        std::os::unix::fs::symlink(path.join("elsewhere"), path.join("authors.reg")).unwrap();
+        let error = ExecHost::start_dir(path.clone(), accounts(&["alice"]), HostLimits::default())
+            .err()
+            .expect("started on a symlinked registry");
+        assert!(error.contains("symbolic link"), "{error}");
         let _ = std::fs::remove_dir_all(path);
     }
 }

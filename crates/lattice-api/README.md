@@ -64,7 +64,7 @@ grant on the table reach the scan today; the engine-side limit is issue #543. No
 Row commits made through `ExecHandler` carry an author id so change-feed events say who wrote. The id comes from the
 connection's `Principal` only: the fixed id 1 for local development, or the id `AuthorRegistry` assigns to the
 authenticated account name (injective, never reissued; `ExecHost::start_dir` keeps it in `authors.reg` beside the log
-and refuses to start on a damaged, colliding, missing or older-than-the-log file; the file is created 0600). An account that is in the credential store but not in the policy file still gets an id on its first statement. The SQL text, `application_name` and the startup `user` never
+and refuses to start on a damaged, colliding, missing or older-than-the-log file; the file is created empty and narrowed to 0600 inside the 0700 data directory, and a symlink is refused). An account that is in the credential store but not in the policy file still gets an id on its first statement. The SQL text, `application_name` and the startup `user` never
 reach it.
 
 `websocket` is a sans-I/O RFC 6455 server-side codec for the future sync gateway: the HTTP upgrade request (strict, bounded, origin hook, `lattice.sync.v1` subprotocol), the accept key, frame decode and encode, message reassembly with size caps and UTF-8 checks, ping/pong and close handling, and timers on a caller-supplied logical clock. It does no I/O and is not connected to a listener, TLS or authentication yet ([ADR 0027](../../docs/adr/0027-sync-transport-websocket-first.md), proposed).
