@@ -823,6 +823,12 @@ impl<I: Io, C: Clock + Clone, R: Rng> Exec<'_, '_, I, C, R> {
         if let (Datum::Text(s), Some(n)) = (&d, col.varchar_len)
             && s.chars().count() > n as usize
         {
+            // PostgreSQL drops trailing spaces that overflow the limit and refuses anything else.
+            let kept: String = s.chars().take(n as usize).collect();
+            let excess = s.get(kept.len()..).unwrap_or_default();
+            if excess.chars().all(|c| c == ' ') {
+                return Ok(Datum::Text(kept));
+            }
             return Err(ExecError::eval(
                 "22001",
                 format!("value too long for type character varying({n})"),
