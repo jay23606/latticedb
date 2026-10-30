@@ -2683,37 +2683,56 @@ reader	allow-all
         host.commit_notifier().latest()
     }
 
-    fn wake_is_published_only_after_the_commit_is_durable(bug: Option<Bug>) {
-        let (host, path) = notifier_host("notify-durable", bug);
+    fn wake_is_published_only_after_the_commit_is_durable(bug: Option<Bug>) -> Result<(), String> {
+        let (host, path) = notifier_host(
+            if bug.is_some() {
+                "notify-durable-planted"
+            } else {
+                "notify-durable"
+            },
+            bug,
+        );
         let notifier = host.commit_notifier();
         let head = table_t(&host);
         assert!(head > 0, "a committed statement must have been published");
         let (worker, release, entered) = held_insert(&host);
         entered.recv().unwrap();
         // The statement is dequeued and not yet run: nothing new may be announced.
-        assert_eq!(
-            notifier.wait_after(head, Duration::ZERO),
-            Err(WaitError::TimedOut)
-        );
+        let early = notifier.wait_after(head, Duration::ZERO);
         release.send(()).unwrap();
         worker.join().unwrap();
+        if early != Err(WaitError::TimedOut) {
+            drop(host);
+            std::fs::remove_dir_all(path).unwrap();
+            return Err(format!("announced before the commit ran: {early:?}"));
+        }
         let woken = notifier.wait_after(head, Duration::from_secs(60)).unwrap();
         assert!(woken > head);
         // The LSN a waiter is woken with is readable through the feed source.
         assert_eq!(newest_readable(&host), woken);
         drop(host);
         std::fs::remove_dir_all(path).unwrap();
+        Ok(())
     }
 
     #[test]
     fn wake_is_published_only_after_the_commit_is_durable_for_the_real_host() {
-        wake_is_published_only_after_the_commit_is_durable(None);
+        assert_eq!(
+            wake_is_published_only_after_the_commit_is_durable(None),
+            Ok(())
+        );
     }
 
     #[test]
-    #[should_panic(expected = "TimedOut")]
     fn a_planted_wake_before_the_commit_is_caught() {
-        wake_is_published_only_after_the_commit_is_durable(Some(Bug::NotifyBeforeDurable));
+        let caught =
+            wake_is_published_only_after_the_commit_is_durable(Some(Bug::NotifyBeforeDurable))
+                .unwrap_err();
+        // The early announcement is the next LSN, one past the head the host had published.
+        assert!(
+            caught.starts_with("announced before the commit ran: Ok("),
+            "{caught}"
+        );
     }
 
     #[test]
