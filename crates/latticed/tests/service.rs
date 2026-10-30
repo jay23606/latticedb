@@ -262,14 +262,10 @@ fn sigterm_stops_the_listener_cleanly_and_the_log_reopens_without_repair() {
         "the committed row is not in the log"
     );
 
-    // The data-directory lock was released and recovery has nothing to repair: the only thing the
-    // restart reports is the known note about column definitions.
+    // The data-directory lock was released and recovery has nothing to repair or report.
     let server = start(Stdin::Pipe, &args);
     let report = server.terminate_cleanly("TERM");
-    assert!(
-        report.starts_with("latticed: 1 recovered table(s) have no column definitions"),
-        "{report:?}"
-    );
+    assert_eq!(report, "latticed: stop signal received, shutting down\n");
     assert!(
         !report.contains("repair") && !report.contains("discard"),
         "{report:?}"

@@ -43,6 +43,7 @@ fn run() -> Result<Exit, String> {
     let mut gateway_listen = false;
     let mut gateway_tokens: Option<String> = None;
     let mut stdin_control = true;
+    let mut allow_format_upgrade = false;
     let mut stop_timeout = DEFAULT_STOP_TIMEOUT;
     let mut args = std::env::args().skip(1);
     while let Some(option) = args.next() {
@@ -52,7 +53,7 @@ fn run() -> Result<Exit, String> {
         }
         if option == "--help" || option == "-h" {
             println!(
-                "latticed [--listen IP:PORT] [--max-connections N] [--read-timeout-ms N] [--write-timeout-ms N] [--idle-timeout-ms N] [--response-timeout-ms N]\nLoopback development trust by default. Without --data-dir only SELECT 1 is answered. SQL: --data-dir DIR serves SQL from a durable data directory (statement ceiling --statement-timeout-max-ms N, default 30000; budget --statement-memory-bytes N, default 67108864; staged writes of one transaction --transaction-bytes N, default 268435456). Row policy is explicit: with development-trust pass --development-policy allow-all|deny-all; with scram-tls pass --account-policies FILE (one 'account<TAB>allow-all|deny-all' per line; unlisted accounts are denied). Committed rows and table names survive a restart; column definitions do not yet (#379). SCRAM requires --auth scram-tls --tls-cert FILE --tls-key FILE --scram-verifiers FILE --scram-decoy-secret FILE. Sync gateway (WebSocket, protocol lattice.sync.v1, path /sync, requires --data-dir; loopback only until TLS exists on it): --gateway-listen IP:PORT enables it; --gateway-tokens FILE makes it require 'Authorization: Bearer' tokens from a credential file (mode 0600), otherwise it serves the loopback development principal and only with development-trust; --gateway-max-connections N (default 32) and --gateway-handshake-timeout-ms N (default 5000) bound it. Optional --startup-timeout-ms N bounds startup/TLS/authentication. SIGTERM and SIGINT stop it cleanly; a second signal, or --stop-timeout-ms N (default 30000) elapsing, abandons a stop that does not finish. Stdin control is --stdin-control on|off (default on): with on, the line 'shutdown' on stdin stops the server and so does end-of-file, so run it with stdin held open; under a supervisor or container pass --stdin-control off, which never reads stdin. Exit status: 0 clean stop, 1 failure, 2 forced stop. Without --idle-timeout-ms the read timeout also disconnects idle sessions. The TLS key and decoy secret files must not be accessible to group or others (mode 0600)."
+                "latticed [--listen IP:PORT] [--max-connections N] [--read-timeout-ms N] [--write-timeout-ms N] [--idle-timeout-ms N] [--response-timeout-ms N]\nLoopback development trust by default. Without --data-dir only SELECT 1 is answered. SQL: --data-dir DIR serves SQL from a durable data directory (statement ceiling --statement-timeout-max-ms N, default 30000; budget --statement-memory-bytes N, default 67108864; staged writes of one transaction --transaction-bytes N, default 268435456). Row policy is explicit: with development-trust pass --development-policy allow-all|deny-all; with scram-tls pass --account-policies FILE (one 'account<TAB>allow-all|deny-all' per line; unlisted accounts are denied). Committed rows, tables and their column definitions survive a restart. A data directory written before table definitions existed refuses its first CREATE TABLE until --allow-format-upgrade on (older builds cannot open the directory afterwards and there is no downgrade: take a verified backup first); a new directory needs nothing. SCRAM requires --auth scram-tls --tls-cert FILE --tls-key FILE --scram-verifiers FILE --scram-decoy-secret FILE. Sync gateway (WebSocket, protocol lattice.sync.v1, path /sync, requires --data-dir; loopback only until TLS exists on it): --gateway-listen IP:PORT enables it; --gateway-tokens FILE makes it require 'Authorization: Bearer' tokens from a credential file (mode 0600), otherwise it serves the loopback development principal and only with development-trust; --gateway-max-connections N (default 32) and --gateway-handshake-timeout-ms N (default 5000) bound it. Optional --startup-timeout-ms N bounds startup/TLS/authentication. SIGTERM and SIGINT stop it cleanly; a second signal, or --stop-timeout-ms N (default 30000) elapsing, abandons a stop that does not finish. Stdin control is --stdin-control on|off (default on): with on, the line 'shutdown' on stdin stops the server and so does end-of-file, so run it with stdin held open; under a supervisor or container pass --stdin-control off, which never reads stdin. Exit status: 0 clean stop, 1 failure, 2 forced stop. Without --idle-timeout-ms the read timeout also disconnects idle sessions. The TLS key and decoy secret files must not be accessible to group or others (mode 0600)."
             );
             return Ok(Exit::Clean);
         }
@@ -66,6 +67,13 @@ fn run() -> Result<Exit, String> {
             "--scram-verifiers" => credentials = Some(value),
             "--scram-decoy-secret" => decoy_secret = Some(value),
             "--data-dir" => data_dir = Some(value),
+            "--allow-format-upgrade" => {
+                allow_format_upgrade = match value.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err("--allow-format-upgrade must be on or off".into()),
+                }
+            }
             "--stdin-control" => {
                 stdin_control = match value.as_str() {
                     "on" => true,
@@ -282,16 +290,11 @@ fn run() -> Result<Exit, String> {
                     data_dir: dir.into(),
                     policies,
                     limits,
+                    allow_format_upgrade,
                 },
                 gateway_listen.then_some(gateway),
             )
             .map_err(|e| e.to_string())?;
-            let unattached = server.unattached_tables().len();
-            if unattached > 0 {
-                eprintln!(
-                    "latticed: {unattached} recovered table(s) have no column definitions (they are not persisted yet, #379); SQL cannot address them"
-                );
-            }
             Running::Sql(server)
         }
     };

@@ -181,8 +181,8 @@ either (write-only and ddl-only tables are `UnknownScope`). The two cannot drift
 feed. The precondition still binds the Phase 4 policy language and any row-level policy. The
 `BadCursor` check against the newest applied LSN lets a principal who can read one table binary-search the global commit
 position, and gaps between cursor LSNs show activity on tables it cannot read (same class as issue #363, unchanged); a
-denied request still occupies an actor queue slot. The filtered-feed gap question (issue #363) is unchanged; column definitions are not recovered across a restart
-(#379); no transport supplies the principal, so nothing here is live end to end.
+denied request still occupies an actor queue slot. The filtered-feed gap question (issue #363) is unchanged; column definitions are recovered across a restart since
+issue 573; no transport supplies the principal, so nothing here is live end to end.
 Verification evidence, not an exit criterion: interim per-table grants (issue #522, part of #567, threat-model G-01).
 An account in the policy file can be `allow-all`, `deny-all` or `tables: name=bits, ...` with bits `r`, `w`, `d` per
 table and `*` for the rest; the most specific entry wins, nothing is merged, names match exactly, an unlisted account

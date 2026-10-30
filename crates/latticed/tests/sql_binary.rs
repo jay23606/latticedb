@@ -689,7 +689,7 @@ fn scram_accounts_get_their_own_row_policy_and_unlisted_accounts_are_denied() {
 }
 
 #[test]
-fn a_clean_stop_and_a_crash_both_keep_committed_rows_in_the_log_but_not_the_columns() {
+fn a_clean_stop_and_a_crash_both_keep_committed_rows_and_their_columns() {
     let scratch = Scratch::new("restart");
     let data = scratch.arg("data");
     let args = ["--data-dir", &data, "--development-policy", "allow-all"];
@@ -709,16 +709,23 @@ fn a_clean_stop_and_a_crash_both_keep_committed_rows_in_the_log_but_not_the_colu
         b"marker-clean-stop-4f1c"
     ));
 
-    // Second run: recovery replays the log. The table name is back, its columns are not.
+    // Second run: recovery replays the log. The table is back with its columns and its key.
     let server = start(&args).unwrap();
     let mut c = trust_connect(server.address);
-    assert_eq!(query(&mut c, "SELECT id FROM kept").code(), Some("42P01"));
+    let r = query(&mut c, "SELECT id, label FROM kept");
+    assert_eq!(
+        r.rows,
+        vec![vec![
+            Some("1".to_string()),
+            Some("marker-clean-stop-4f1c".to_string())
+        ]]
+    );
+    assert_eq!(
+        query(&mut c, "INSERT INTO kept VALUES (1, 'again')").code(),
+        Some("23505")
+    );
     let r = query(&mut c, "CREATE TABLE kept (id INT PRIMARY KEY, label TEXT)");
     assert_eq!(r.code(), Some("42P07"));
-    assert!(
-        r.error.unwrap().1.contains("columns are not attached"),
-        "the message must say why"
-    );
     // New tables work next to the recovered one.
     query(
         &mut c,
@@ -731,10 +738,7 @@ fn a_clean_stop_and_a_crash_both_keep_committed_rows_in_the_log_but_not_the_colu
     // Kill the process without a shutdown: the commit above already returned, so it must be on disk.
     terminate(c);
     let report = server.crash();
-    assert!(
-        report.contains("1 recovered table(s) have no column definitions"),
-        "{report:?}"
-    );
+    assert_eq!(report, "", "{report:?}");
     let log = directory_bytes(&scratch.path("data"));
     assert!(
         contains(&log, b"marker-before-crash-9b2e"),
@@ -746,13 +750,16 @@ fn a_clean_stop_and_a_crash_both_keep_committed_rows_in_the_log_but_not_the_colu
     );
 
     // Third run after a crash: the log recovers (the directory lock is released by the dead process)
-    // and both tables are known by name only.
+    // and both tables are queryable.
     let server = start(&args).unwrap();
-    let report = server.stop();
-    assert!(
-        report.contains("2 recovered table(s) have no column definitions"),
-        "{report:?}"
+    let mut c = trust_connect(server.address);
+    assert_eq!(query(&mut c, "SELECT id FROM kept").rows.len(), 1);
+    assert_eq!(
+        query(&mut c, "SELECT label FROM fresh").rows,
+        vec![vec![Some("marker-before-crash-9b2e".to_string())]]
     );
+    terminate(c);
+    assert_eq!(server.stop(), "");
 }
 
 #[test]

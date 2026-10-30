@@ -189,6 +189,11 @@ impl From<RowError> for ExecError {
                 ExecError::new(ErrorKind::Storage, "40003", "the commit outcome is unknown")
             }
             RowError::KeyTooLong { max, .. } => ExecError::key_too_long(max),
+            RowError::FormatUpgradeRequired => ExecError::new(
+                ErrorKind::Storage,
+                "55000",
+                "this data directory predates stored table definitions; the first CREATE TABLE changes its format and builds without that support cannot open it afterwards. Take a backup, then start the server with the allow format upgrade setting (latticed --allow-format-upgrade on)",
+            ),
             // Engine detail (paths, offsets, record contents) is not for clients.
             RowError::Corrupt(_) => ExecError::corrupt(),
             _ => ExecError::new(ErrorKind::Storage, "XX000", "internal storage error"),

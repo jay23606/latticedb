@@ -35,6 +35,8 @@ pub lattice_exec::schema::TableDef::columns: alloc::vec::Vec<lattice_exec::schem
 pub lattice_exec::schema::TableDef::id: u32
 pub lattice_exec::schema::TableDef::name: alloc::string::String
 pub lattice_exec::schema::TableDef::primary_key: alloc::vec::Vec<usize>
+pub lattice_exec::schema::TableDef::primary_key_name: alloc::string::String
+pub lattice_exec::schema::TableDef::unique_names: alloc::vec::Vec<alloc::string::String>
 pub lattice_exec::schema::TableDef::uniques: alloc::vec::Vec<alloc::vec::Vec<usize>>
 impl lattice_exec::schema::TableDef
 pub fn lattice_exec::schema::TableDef::decode_row(&self, &[u8]) -> core::result::Result<alloc::vec::Vec<lattice_exec::Datum>, lattice_exec::ExecError>
@@ -158,16 +160,15 @@ pub fn lattice_exec::schema::ColumnDef::fmt(&self, &mut core::fmt::Formatter<'_>
 impl core::marker::StructuralPartialEq for lattice_exec::schema::ColumnDef
 pub struct lattice_exec::Database<I: lattice_seams::Io, C: lattice_seams::Clock + core::clone::Clone, R: lattice_seams::Rng>
 impl<I: lattice_seams::Io, C: lattice_seams::Clock + core::clone::Clone, R: lattice_seams::Rng> lattice_exec::Database<I, C, R>
-pub fn lattice_exec::Database<I, C, R>::attach_table(&mut self, lattice_exec::schema::TableDef) -> core::result::Result<(), lattice_exec::ExecError>
 pub fn lattice_exec::Database<I, C, R>::catalog_version(&self) -> u64
 pub fn lattice_exec::Database<I, C, R>::catalog_view(&self) -> lattice_exec::schema::ExecCatalog<'_>
 pub fn lattice_exec::Database<I, C, R>::catalog_view_for<'a>(&'a self, &'a lattice_exec::ActorPolicy) -> lattice_exec::schema::ExecCatalog<'a>
 pub fn lattice_exec::Database<I, C, R>::create_table(&mut self, &lattice_sql::ast::CreateTable, &lattice_exec::ActorPolicy) -> core::result::Result<bool, lattice_exec::ExecError>
-pub fn lattice_exec::Database<I, C, R>::detach_table(&mut self, &str) -> bool
 pub fn lattice_exec::Database<I, C, R>::drop_table(&mut self, &str, bool, &lattice_exec::ActorPolicy) -> core::result::Result<bool, lattice_exec::ExecError>
 pub fn lattice_exec::Database<I, C, R>::last_access_paths(&self) -> alloc::vec::Vec<lattice_exec::AccessPath>
 pub fn lattice_exec::Database<I, C, R>::open(I, C, R, &lattice_core::kernel::Config) -> core::result::Result<Self, lattice_exec::ExecError>
 pub fn lattice_exec::Database<I, C, R>::schema(&self) -> &lattice_exec::schema::Schema
+pub fn lattice_exec::Database<I, C, R>::set_allow_format_upgrade(&mut self, bool)
 pub fn lattice_exec::Database<I, C, R>::store(&self) -> &lattice_engines::store::RowStore<I, C, R>
 pub fn lattice_exec::Database<I, C, R>::visible_table_id(&self, &lattice_exec::ActorPolicy, &str) -> core::option::Option<u32>
 pub struct lattice_exec::Decimal
@@ -287,6 +288,8 @@ pub lattice_exec::TableDef::columns: alloc::vec::Vec<lattice_exec::schema::Colum
 pub lattice_exec::TableDef::id: u32
 pub lattice_exec::TableDef::name: alloc::string::String
 pub lattice_exec::TableDef::primary_key: alloc::vec::Vec<usize>
+pub lattice_exec::TableDef::primary_key_name: alloc::string::String
+pub lattice_exec::TableDef::unique_names: alloc::vec::Vec<alloc::string::String>
 pub lattice_exec::TableDef::uniques: alloc::vec::Vec<alloc::vec::Vec<usize>>
 impl lattice_exec::schema::TableDef
 pub fn lattice_exec::schema::TableDef::decode_row(&self, &[u8]) -> core::result::Result<alloc::vec::Vec<lattice_exec::Datum>, lattice_exec::ExecError>

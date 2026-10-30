@@ -428,10 +428,9 @@ budget only up to 4 KiB per nesting level. `LIKE` stays O(text x pattern); no
 
 **What does not run.** Joins, `GROUP BY`, aggregates, `DISTINCT`, subqueries, `ALTER TABLE`, indexes
 (`CREATE INDEX`, and no scan uses an index), the `jsonb` operators, and DDL inside a transaction block.
-Column definitions are in memory and are not recovered after a restart (the host re-attaches them,
-and `attach_table` checks only the id and name, so it can silently stop enforcing a constraint; an
-in-process fingerprint refuses a different re-attach, see #379; RFC 0012 / ADR 0028 accept durable
-definitions; nothing is implemented yet), and the stored row layout is not a frozen format.
+Column definitions are recovered after a restart from the definition `CREATE TABLE` stores with the table
+(RFC 0012 / ADR 0028, issue 573; see "SQL definitions in the executor" below); `ALTER TABLE` and column names
+with ASCII capitals are not supported, and the stored row layout is not a frozen format.
 
 **sqllogictest.** All 21 scripts in `crates/lattice-testkit/tests/slt/` (669 records) run unchanged through
 the executor: **486 pass and 183 fail** (read from a local run of the executor-side test, `cargo test -p
@@ -492,10 +491,11 @@ server on the same directory is refused; a committed row is in the log after a c
 SIGKILL (the test looks for the row's bytes in the log files, since SQL cannot read it back, see below);
 the extended protocol with text parameters (Parse, Bind, Execute, Sync), including a `22P02` bad parameter; option validation. `lattice-api` has unit tests for the policy file and the database thread.
 
-**What does not survive a restart.** Rows and table names are recovered from the log. Column
-definitions are not (#379), so a recovered table cannot be addressed by SQL: `SELECT` is `42P01` and
-`CREATE TABLE` of the same name is `42P07`. "Create a table, insert, select and see the data survive a
-crash" from issue 345 is therefore **not met**: the data survives, SQL cannot read it back.
+**What survives a restart.** Rows, table names and, since issue 573, column definitions are recovered from
+the log, so a restarted server answers `SELECT` on a recovered table and keeps enforcing its constraints
+(see "SQL definitions in the executor" below). When this section was first written the columns were not
+recovered and "create a table, insert, select and see the data survive a crash" from issue 345 was not met;
+the restart proof with the real binary and the simulator is issue 574 and is not claimed here.
 
 **Limits.** One database thread runs statements serially; a connection waits at most the statement
 ceiling plus 5 s and then gets `57014` (the statement is cancelled and skipped if not started, and an open
@@ -607,8 +607,7 @@ agrees. Planted bugs (group `Bug::SQL_DEFINITIONS`, each with a clean control): 
 (also caught by the sweep), `SecondDefinitionReplaces`, `DefinitionForMissingTableAccepted`, `DefinitionOfExistingTableAccepted`,
 `DefinitionDropIgnored`, `FormatUpgradeUnchecked` (seven). The fuzz target `sqldef_decode` also decodes whole envelopes (selector 2 mod 3, new seeds).
 
-**Not done.** The executor does not call this: `lattice-exec` still keeps definitions in memory and `latticed` still reports
-unattached tables (issues 573 and 574). Not implemented from RFC 0012: the commit-time liveness check for row writes to a
+**Not done.** The executor now calls this (issue 573, next section). Not implemented from RFC 0012: the commit-time liveness check for row writes to a
 defined table and its marker tables (rule 5), the catalog-wide caps (owner decision 7 is open), vacuum pruning of dropped
 definitions, and `adopt_table`: definition-only adoption of an existing table is not implemented and is refused
 (`CatalogError::DefinitionNotInCreate`), so a definition can only arrive with the `Create` that the DDL grant judged;
@@ -643,7 +642,7 @@ part of CI, which needs no PostgreSQL server.
 | `05_extended` | psql `\bind`: Parse/Bind/Execute with text parameters, `RETURNING`, errors, an aborted block | pass |
 | `06_types` | smallint, bigint, double, text, varchar, bytea, date, uuid, timestamptz round trip; range, date, uuid errors | pass |
 | `scram_tls.sh` | SCRAM-SHA-256 over TLS with `sslmode=verify-full`: correct password runs SQL; wrong password and unknown account get the same `FATAL: password authentication failed`; untrusted CA, wrong host name and no TLS are refused | pass |
-| `known/restart_a` | write, then `shutdown` exits 0 | pass |
+| `restart_a`, `restart_b` | write, then `shutdown`; a second start on the same data directory returns the rows, accepts a new row and drops the table (issue 573; before it `restart_b` was a known failure answering `42P01`) | pass |
 
 Run locally (not in CI yet at the time of writing): a debug build of `latticed` at `47484d3d` with psql
 18.6 (libpq) and with psql 17.11, loopback and SCRAM over TLS, plus the self-test, all as listed above.
@@ -653,8 +652,6 @@ version (expected: the client on `ubuntu-latest`, PostgreSQL 16) are recorded he
 **Known gaps, listed and not hidden.** Each is a case in `tests/drivers/psql/known/` that must still
 equal the latticed output pinned next to it in a `.latticed` file, checked by hand against the issue. The run turns red when a case starts to match PostgreSQL, and also when its output changes to anything else:
 
-- Restart: after `shutdown` and a start on the same data directory the table is unknown, so the rows
-  written before are not queryable (`known/restart_b`, #573; today `42P01`).
 - `COMMIT` or `ROLLBACK` outside a block and `BEGIN` inside one send no `WARNING` (`25P01`, `25001`)
   (`known/03_transaction_misuse`, #674).
 - An unknown type name answers `0A000` instead of `42704` (`known/04_unknown_type`, #675).
@@ -672,3 +669,38 @@ equal the latticed output pinned next to it in a `.latticed` file, checked by ha
 - Binary result formats, `PREPARE`/`EXECUTE` (refused by the executor), `COPY`, other clients and
   drivers (#413, #576). This is one client, libpq's psql, and no driver conformance is claimed. No Phase 2
   exit criterion is claimed.
+
+## SQL definitions in the executor (RFC 0012 work package 5, issue 573)
+
+`CREATE TABLE` builds the table's definition (column names, types with the `varchar` limit, `NOT NULL`, primary key,
+`UNIQUE` constraints in declaration order, constant defaults, constraint names), validates it with the engine's structural
+rules, and commits it with `RowStore::commit_with_definitions` in the same change set as the `Create`. `Database::open`
+rebuilds the executor's schema from `Catalog::definitions` and the catalog names, re-checks what the engine cannot (numeric
+and `jsonb` defaults) and refuses to open on a definition it cannot serve. The `UNIQUE` marker tables come from the position
+in the record. `Database::attach_table`, `detach_table`, the in-process fingerprint, `ExecHost::unattached_tables` and the
+`latticed` startup report are removed. `--allow-format-upgrade on` (`ExecHost::start_dir_with`,
+`Database::set_allow_format_upgrade`) is the host setting for a directory written before definitions existed; without it
+`CREATE TABLE` there answers `55000` and writes nothing, and a new directory needs nothing. `DROP TABLE` marks the definition
+dropped and keeps it for `AS OF` reads; a recreated name gets a new id and its own definition.
+
+Evidence (`cargo test -p lattice-exec --features lattice-core/planted-bugs --test definitions`, 12 tests, plus the existing
+executor tests): a table with every column type, defaults, a unique `varchar` and a primary key reads back identically after
+a reopen, and its schema equals the one before; primary key, `UNIQUE` (including NULLs), `NOT NULL` and the `varchar` limit
+are still enforced; two tables with the same columns and `UNIQUE` constraints declared in opposite order keep their own marker
+mapping; a drop removes the definition from the current catalog and keeps it as of the earlier LSN; the upgrade setting is
+needed for a legacy directory and not for a new one; a stored `jsonb` default that is not JSON refuses the open; a power cut at
+every mutating storage operation of `CREATE TABLE` (4 shapes: with and without an earlier table, clean and crash-heavy disk)
+leaves the table whole or absent, keeps an acknowledged table, and frees the name when it is absent. The model test
+(`tests/model.rs`) gained a `Reopen` operation and still agrees with its oracle. Planted bug `ExecDefinitionNotPersisted`
+(group `Bug::EXEC_DEFINITIONS`) is caught by the restart check. `latticed` tests (`sql_binary`, `service`) and the psql
+scripts `restart_a` and `restart_b` now expect the rows and constraints after a restart; the README quickstart smoke job
+checks the same.
+
+**Behaviour changes and limits, listed and not hidden.** A quoted column name with an ASCII capital (`"Id"`) is refused with
+`0A000`; PostgreSQL accepts it, and `identifiers_pg` records the difference, because the record format
+(`formats/sql-definition-v1.md`) forbids capitals in column names. A numeric default is stored in canonical form, so
+`DEFAULT 1.50` reads `1.5` from the first statement on. `DEFAULT NULL` is the same as no default. A table created by an earlier
+build keeps its name but has no definition and is not addressable; adoption is not implemented. `ALTER TABLE` is out of scope.
+Not claimed: the restart proof with `kill -9` seeds against the real binary and the simulator workload (issue 574),
+power-loss durability, a phase gate or a release. The 10,000-case property volume, the mutation run, the real-binary psql job
+and the quickstart smoke job are left to CI.

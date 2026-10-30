@@ -93,19 +93,23 @@ run_loopback() {
       "${sql%.sql}.issue" "move it out of known/ and drop its issue note"
   done
 
-  # Restart on the same data directory. Run 1 must match exactly; run 2 is a known failure until
-  # column definitions are durable.
-  run_psql_script "$suite/known/restart_a.sql" "$work/loopback/restart_a.actual"
-  if diff -u "$suite/known/restart_a.expected" "$work/loopback/restart_a.actual"; then
-    echo "ok      known/restart_a"; passed=$((passed + 1))
+  # Restart on the same data directory: run 1 writes, the runner stops latticed with `shutdown`, run 2
+  # finds the table, its rows and its key (the table definition is durable, #573). Both must match
+  # PostgreSQL's output exactly.
+  run_psql_script "$suite/restart_a.sql" "$work/loopback/restart_a.actual"
+  if diff -u "$suite/restart_a.expected" "$work/loopback/restart_a.actual"; then
+    echo "ok      restart_a"; passed=$((passed + 1))
   else
-    echo "FAILED  known/restart_a" >&2; failed=$((failed + 1))
+    echo "FAILED  restart_a" >&2; failed=$((failed + 1))
   fi
   stop_server || failed=$((failed + 1))
   start_server "$work/loopback" second --listen "127.0.0.1:$port" --development-policy allow-all || return 1
-  run_psql_script "$suite/known/restart_b.sql" "$work/loopback/restart_b.actual"
-  check_known restart_b "$suite/known/restart_b.expected" "$suite/known/restart_b.latticed" \
-    "$work/loopback/restart_b.actual" "$suite/known/restart.issue" "move it into the numbered scripts"
+  run_psql_script "$suite/restart_b.sql" "$work/loopback/restart_b.actual"
+  if diff -u "$suite/restart_b.expected" "$work/loopback/restart_b.actual"; then
+    echo "ok      restart_b"; passed=$((passed + 1))
+  else
+    echo "FAILED  restart_b" >&2; failed=$((failed + 1))
+  fi
   stop_server || failed=$((failed + 1))
   echo "loopback: $passed passed, $failed failed, $xfailed known failing"
   [ "$passed" -gt 0 ] && [ "$failed" -eq 0 ]

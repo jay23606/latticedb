@@ -258,6 +258,9 @@ planted_bugs! {
     /// The first definition in a directory written before bit 3 existed is accepted without the
     /// explicit format-upgrade setting.
     FormatUpgradeUnchecked,
+    /// `CREATE TABLE` commits the table without its definition, so the executor knows the columns
+    /// only until the process restarts (the pre-RFC 0012 behaviour).
+    ExecDefinitionNotPersisted,
 }
 
 impl Bug {
@@ -313,6 +316,10 @@ impl Bug {
         Bug::DefinitionDropIgnored,
         Bug::FormatUpgradeUnchecked,
     ];
+
+    /// Executor defects in persisting SQL table definitions, detected by
+    /// `lattice-exec/tests/definitions.rs`.
+    pub const EXEC_DEFINITIONS: [Bug; 1] = [Bug::ExecDefinitionNotPersisted];
 
     /// Strict HLC snapshot defects, detected by the focused retention witness.
     pub const HLC_SNAPSHOT: [Bug; 1] = [Bug::HlcSnapshotClamped];
@@ -459,6 +466,7 @@ impl Bug {
         &Bug::KEY_LIMIT,
         &Bug::SQLDEF,
         &Bug::SQL_DEFINITIONS,
+        &Bug::EXEC_DEFINITIONS,
         &Bug::FENCE_ORDER,
         &Bug::RECOVERY_ORDER,
         &Bug::NON_PREFIX,

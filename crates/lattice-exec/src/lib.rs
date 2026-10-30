@@ -34,6 +34,7 @@
 mod access;
 mod db;
 mod decimal;
+mod definition;
 mod error;
 mod eval;
 mod exec;

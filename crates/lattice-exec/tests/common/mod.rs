@@ -47,6 +47,23 @@ pub fn fixture() -> Fixture {
     Fixture { db, disk, clock }
 }
 
+/// Closes the database and opens it again from the same disk, as after a process restart.
+pub fn reopen(f: Fixture) -> Fixture {
+    let Fixture { db, disk, clock } = f;
+    drop(db);
+    disk.restart_process();
+    let db = Database::open(
+        disk.clone(),
+        SharedClock(clock.clone()),
+        // A new seed for every start, as a restarted process draws new randomness: the same seed
+        // would hand out the change set ids the previous run already used.
+        SeededRng::new(99 + disk.mutating_ops()),
+        &config(),
+    )
+    .unwrap();
+    Fixture { db, disk, clock }
+}
+
 /// Runs a statement that must succeed.
 pub fn ok(db: &mut Db, s: &mut ExecSession, sql: &str) -> ExecResult {
     s.execute(db, sql).unwrap_or_else(|e| panic!("{sql}: {e}"))

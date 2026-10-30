@@ -88,14 +88,13 @@ The subset is in [sql-subset.md](sql-subset.md).
 
 ### What happens after a restart
 
-Committed rows and table names are recovered from the log. Column definitions are not, so a recovered
-table cannot be queried: `SELECT` answers `42P01` and `CREATE TABLE` of the same name answers `42P07`.
-`latticed` prints `N recovered table(s) have no column definitions` at startup. The smoke test asserts
-exactly this. The fix is the durable-definitions chain ([#379](https://github.com/moncifem/latticedb/issues/379),
-[#573](https://github.com/moncifem/latticedb/issues/573)). Its engine piece, which persists the
-definitions under WAL capability bit 3, is on `main` ([#694](https://github.com/moncifem/latticedb/pull/694)),
-but the executor does not call it yet, so the behaviour above still holds. Until the chain lands, use a new
-table name after each restart, or treat the data directory as scratch.
+Committed rows, tables and their column definitions (types, `NOT NULL`, primary key, `UNIQUE`, defaults) are
+recovered from the log ([#573](https://github.com/moncifem/latticedb/issues/573), RFC 0012): `SELECT` works and
+the constraints are enforced after a restart. A data directory written by an earlier build, which stored table
+names only, refuses its first `CREATE TABLE` (SQLSTATE `55000`) until `latticed` is started with
+`--allow-format-upgrade on`; older builds cannot open the directory afterwards and there is no downgrade, so take a
+backup first. A new directory needs nothing. Tables that earlier builds created keep their names but cannot be
+queried. A quoted column name with a capital letter is refused (`0A000`). The smoke test asserts the restart.
 
 ## Connect an agent client
 
@@ -155,7 +154,7 @@ optional models plugin; Windows.
 
 | Issue | What you will see |
 |---|---|
-| [#379](https://github.com/moncifem/latticedb/issues/379), [#573](https://github.com/moncifem/latticedb/issues/573) | Column definitions are lost on restart; recovered tables answer `42P01`. The smoke test asserts this. |
+| [#574](https://github.com/moncifem/latticedb/issues/574) | Restart is tested in-process, with a power-cut sweep and psql scripts; the `kill -9` seed sweep with the real binary and the simulator workload are not done yet. Process kill is not power loss. |
 | [#413](https://github.com/moncifem/latticedb/issues/413) | Only `psql` and a hand-framed client are tested. No driver matrix; text results only. |
 | [#363](https://github.com/moncifem/latticedb/issues/363) | A filtered change feed reveals the count of hidden writes through gaps in cursors and never says a row left a reader's scope. Disclosed, not fixed. |
 | [#543](https://github.com/moncifem/latticedb/issues/543) | A feed read still costs more than it should on a large or busy table; a quiet-table reader can get `Unavailable` on every poll after many other-table versions ([#661](https://github.com/moncifem/latticedb/issues/661)). |

@@ -386,16 +386,23 @@ The planted failure and the stall hooks used by those tests live behind the `tes
 -i lattice-api` lists no `test-hooks` (it does with `-e dev`), so a release build does not contain them.
 
 **What survives a restart or a crash.** Every committed statement is on disk when the client sees the
-command tag. Recovery replays the log, so committed rows and table names come back. **Column
-definitions do not** (#379): after a restart the recovered tables exist only by name, `SELECT` on one
-answers `42P01`, and `CREATE TABLE` of the same name answers `42P07`. The test that kills the process with SIGKILL shows the committed row's bytes are in the log files (they reached the operating system); that the log is `fsync`ed before the command tag is returned is the kernel's behaviour (its sync calls), not something that test proves. The server prints
-`N recovered table(s) have no column definitions` on stderr at startup. Until the schema is persisted
-(an RFC and an ADR, then a guarded log record), a data directory is useful for tables created in the
-current run only, and a new table name is needed after each restart. The stored row layout is not a
-frozen format.
+command tag. Recovery replays the log, so committed rows, tables and their column definitions (types,
+`NOT NULL`, primary key, `UNIQUE` constraints, defaults) come back: `CREATE TABLE` writes the definition in
+the same change set as the table (RFC 0012, issue 573), and a restarted server answers `SELECT` and
+enforces the constraints exactly as before. The test that kills the process with SIGKILL shows the committed row's bytes are in the log files (they reached the operating system); that the log is `fsync`ed before the command tag is returned is the kernel's behaviour (its sync calls), not something that test proves. Process kill is not power loss.
+
+**Upgrading an existing data directory.** A directory written by a build that did not store definitions
+refuses its first `CREATE TABLE` with `55000` until the server is started with `--allow-format-upgrade on`.
+The first definition adds a required capability to the log, so builds without definition support refuse the
+directory afterwards and there is no downgrade: take a verified backup first. A new, empty directory needs
+nothing. Tables that earlier builds created keep their names but have no stored definition, so SQL cannot
+address them (`SELECT` answers `42P01`, `CREATE TABLE` of the name `42P07`); adopting them is not done.
+A stored definition the executor cannot serve refuses startup. Column names with ASCII capitals (quoted
+identifiers) are refused with `0A000` because the record format forbids them. The stored row layout is
+not a frozen format.
 
 Not wired yet: the five-driver matrix (libpq, psycopg, pgx, JDBC, node-postgres), binary result
-formats, and a persisted schema. Text parameters of the extended protocol are tested. The tests in `tests/sql_binary.rs` use a plain client that frames
+formats. Text parameters of the extended protocol are tested. The tests in `tests/sql_binary.rs` use a plain client that frames
 messages itself, over loopback trust and over verified TLS with SCRAM.
 
 `load_credential_store` and `write_credential_store` read and replace the bearer-token credential file

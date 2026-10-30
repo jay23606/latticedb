@@ -57,6 +57,16 @@ impl Decimal {
         })
     }
 
+    /// The same value without trailing fractional zeros (`1.50` becomes `1.5`, `0.00` becomes `0`).
+    pub(crate) fn normalized(self) -> Self {
+        let (mut mantissa, mut scale) = (self.mantissa, self.scale);
+        while scale > 0 && mantissa % 10 == 0 {
+            mantissa /= 10;
+            scale -= 1;
+        }
+        Decimal { mantissa, scale }
+    }
+
     pub(crate) fn from_i64(v: i64) -> Self {
         Decimal {
             mantissa: i128::from(v),

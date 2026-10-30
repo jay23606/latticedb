@@ -57,6 +57,9 @@ enum Op {
     Begin,
     Commit,
     Rollback,
+    /// Closes the database and opens it again from the log (outside a transaction block); the
+    /// table, its constraints and its rows must come back unchanged.
+    Reopen,
 }
 
 fn lit<T: ToString>(v: &Option<T>, quote: bool) -> String {
@@ -98,6 +101,7 @@ impl Op {
             Op::Begin => "BEGIN".into(),
             Op::Commit => "COMMIT".into(),
             Op::Rollback => "ROLLBACK".into(),
+            Op::Reopen => "-- reopen".into(),
         }
     }
 }
@@ -129,6 +133,7 @@ fn op() -> impl Strategy<Value = Op> {
         2 => Just(Op::Begin),
         2 => Just(Op::Commit),
         1 => Just(Op::Rollback),
+        1 => Just(Op::Reopen),
     ]
 }
 
@@ -221,7 +226,7 @@ fn apply(t: &Table, op: &Op) -> (Option<Table>, Expect) {
                 .collect();
             (None, Expect::Rows(out))
         }
-        Op::Begin | Op::Commit | Op::Rollback => (None, Expect::Done),
+        Op::Begin | Op::Commit | Op::Rollback | Op::Reopen => (None, Expect::Done),
     }
 }
 
@@ -243,6 +248,7 @@ struct Model {
 /// Runs the workload and returns a description of the first disagreement, if any.
 fn check(ops: &[Op], mutate_oracle: bool) -> Result<(), String> {
     let f = fixture();
+    let (disk, clock) = (f.disk, f.clock);
     let (mut db, mut s, mut viewer): (Db, _, _) = (f.db, common::admin(), common::admin());
     s.execute(
         &mut db,
@@ -255,6 +261,32 @@ fn check(ops: &[Op], mutate_oracle: bool) -> Result<(), String> {
         failed: false,
     };
     for (step, op) in ops.iter().enumerate() {
+        if matches!(op, Op::Reopen) {
+            // Only committed state can be reopened: a block's session dies with the process, so a
+            // reopen inside a block is skipped rather than modelled.
+            if model.block.is_none() {
+                drop(db);
+                disk.restart_process();
+                db = Db::open(
+                    disk.clone(),
+                    lattice_testkit::scenario::SharedClock(clock.clone()),
+                    // Not a seed an earlier start used: a repeat would reissue its change set ids.
+                    lattice_sim::SeededRng::new(1_000 + step as u64),
+                    &common::config(),
+                )
+                .map_err(|e| format!("step {step}: reopen failed: {e}"))?;
+                s = common::admin();
+                viewer = common::admin();
+                let have = common::text(&s.execute(&mut db, DUMP).map_err(|e| e.to_string())?);
+                if have != table_rows(&model.committed) {
+                    return Err(format!(
+                        "step {step}: after reopen {have:?}, oracle {:?}",
+                        table_rows(&model.committed)
+                    ));
+                }
+            }
+            continue;
+        }
         let sql = op.sql();
         let got = s.execute(&mut db, &sql);
         let fail = |why: String| Err(format!("step {step} `{sql}`: {why}"));
@@ -412,7 +444,22 @@ fn a_fixed_workload_exercises_every_operation() {
         },
         SelectLike { prefix: "a".into() },
         Commit,
+        Reopen,
+        // The primary key and the UNIQUE constraint are still enforced by the rebuilt table.
+        Insert {
+            id: 1,
+            a: None,
+            b: None,
+            u: None,
+        },
+        Insert {
+            id: 6,
+            a: None,
+            b: None,
+            u: Some(1),
+        },
         DeleteRange { lo: 0, hi: 3 },
+        Reopen,
         Select {
             min_a: -5,
             limit: 5,

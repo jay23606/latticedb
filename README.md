@@ -41,8 +41,8 @@ write-ahead log that survives crashes.
 
 ## What is not there yet
 
-- Durable column definitions: after a restart, committed rows and table names come back but column
-  definitions do not, so a recovered table cannot be queried ([#379](https://github.com/moncifem/latticedb/issues/379)).
+- `ALTER TABLE`, and column names with capital letters (a quoted identifier such as `"Id"` is refused,
+  because the stored table definition keeps no ASCII capitals).
 - Joins, aggregates, `DISTINCT`, subqueries (they return `0A000`) and binary result formats.
 - A PostgreSQL driver compatibility matrix ([#413](https://github.com/moncifem/latticedb/issues/413)).
 - Authenticated agent permissions: each account is allow-all, deny-all or a list of read, write and ddl bits per table, supplied by the host in a file. No row predicates, roles or policy language yet (Phase 4).
@@ -79,7 +79,7 @@ flowchart LR
 |---|---|---|
 | 0 Repository and conventions | Done | [phase-0](docs/gates/phase-0.md) |
 | 1 Foundations and evaluation | Built. Gate open: 2 of 7 clean nightly runs recorded, Linux runtime numbers and two-maintainer sign-off pending | [phase-1](docs/gates/phase-1.md) |
-| 2 Storage engines and SQL | Storage, wire, auth, parser and single-table executor exist. Durable columns, joins and driver matrix open | [phase-2](docs/gates/phase-2.md) |
+| 2 Storage engines and SQL | Storage, wire, auth, parser and single-table executor with durable table definitions exist. Joins and driver matrix open | [phase-2](docs/gates/phase-2.md) |
 | 3 Sync, CRDTs and SDKs | Building blocks that need no server exist. Live sync not started | [phase-3](docs/gates/phase-3.md) |
 | 4 to 12 | Identity and policy, blobs and S3, schema packs, search, intelligence, role packs, cluster, optional models, 1.0 | [spec](docs/spec/README.md) |
 
@@ -109,9 +109,11 @@ INSERT INTO notes VALUES (1, 'write the spec', false);
 SELECT * FROM notes;
 ```
 
-After a restart the committed rows are recovered from the log, but column definitions are not (see
-above), so query the table in the run that created it. Without `--data-dir` the server only answers
-`SELECT 1`. For configured SCRAM over TLS, timeouts and the other flags, see the
+After a restart the tables, their columns and constraints and the committed rows are recovered from the
+log. A data directory written by a build that did not store table definitions refuses its first
+`CREATE TABLE` until you start with `--allow-format-upgrade on` (older builds cannot open it
+afterwards; take a backup first). A new directory needs nothing. Without `--data-dir` the server only
+answers `SELECT 1`. For configured SCRAM over TLS, timeouts and the other flags, see the
 [listener guide](crates/latticed/README.md). Known issues and the agent-client status are in the
 [alpha guide](docs/alpha.md).
 

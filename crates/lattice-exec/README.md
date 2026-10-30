@@ -143,14 +143,17 @@ streaming (the range is still materialised as row references before the first po
 
 ## Storage layout (experimental)
 
-The engine catalog persists table ids and names only. **Column definitions are kept in memory** (`Schema`);
-after a restart the host re-registers them with `Database::attach_table`, and until then the table is
-unknown to SQL. `attach_table` checks only the id and the name against the engine catalog, so a
-different column list or constraint set is accepted after a restart and can silently stop enforcing a
-constraint (#379). Within one process it additionally refuses a definition that differs from the first
-one registered for that id (`42P17`); `detach_table` and a later `attach_table` exercise it. This guard is
-not durable. A durable design is accepted in [RFC 0012](../../docs/rfc/0012-durable-sql-table-definitions.md)
-(accepted 2026-10-30, not yet implemented; merging its code waits for the comment period). Rows are encoded with the engine's typed row codec (`numeric` and `jsonb` as text,
+The engine catalog persists table ids and names and, since RFC 0012 (issue 573), the definition of each SQL
+table: `CREATE TABLE` commits it with `RowStore::commit_with_definitions` in the same change set as the
+`Create`, and `Database::open` rebuilds `Schema` from `Catalog::definitions`, so the log is the only
+durable source of a table's columns, constraints and the order of its `UNIQUE` constraints (which fixes
+their marker tables). A definition the executor cannot serve (for example a `jsonb` default that is not
+JSON) refuses the open. A table with no definition (created before definitions were durable) keeps its
+name and is not addressable. The first definition in a directory that already holds records needs
+`Database::set_allow_format_upgrade(true)`; otherwise `CREATE TABLE` answers `55000`. Limits: a column
+name with an ASCII capital is refused (`0A000`, the record keeps none), a numeric default is stored
+without trailing zeros, `DEFAULT NULL` equals no default, and `ALTER TABLE` does not exist.
+The host-supplied `attach_table` path is gone. Rows are encoded with the engine's typed row codec (`numeric` and `jsonb` as text,
 `double precision` as its bit pattern, `uuid` as 16 bytes, `date` and `timestamptz` as integers).
 Primary keys are order-preserving byte strings; a table without a key gets a process-local row id.
 `UNIQUE` constraints keep their entries in separate physical tables with ids

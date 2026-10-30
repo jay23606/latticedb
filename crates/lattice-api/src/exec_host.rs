@@ -30,8 +30,8 @@
 //!   actor for longer than [`HostLimits::shutdown_grace_ms`].
 //! - **Connections own their transactions.** When a proxy is dropped the actor drops that
 //!   connection's session; an open transaction block is abandoned without committing.
-//! - **Persistence** is whatever the [`Database`] persists: see the `lattice-exec` README. Column
-//!   definitions are not recovered after a restart (#379).
+//! - **Persistence** is whatever the [`Database`] persists: see the `lattice-exec` README. Tables
+//!   and their column definitions are recovered after a restart (#573).
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -592,7 +592,6 @@ pub struct ExecHost {
     requests: SyncSender<Request>,
     next_connection: AtomicU64,
     thread: Mutex<Option<JoinHandle<()>>>,
-    unattached: Vec<String>,
     alive: Arc<AtomicBool>,
     shared: Arc<HostShared>,
     /// How long a connection waits to be queued and answered: the statement ceiling plus slack, or
@@ -610,6 +609,20 @@ impl ExecHost {
         policies: PolicyTable,
         limits: HostLimits,
     ) -> Result<Self, String> {
+        Self::start_dir_with(directory, policies, limits, false)
+    }
+
+    /// Like [`ExecHost::start_dir`], and `allow_format_upgrade` lets the first `CREATE TABLE` of a
+    /// data directory that earlier builds can still open write the table definition (RFC 0012). That
+    /// adds a required capability to the log, so builds without it refuse the directory afterwards
+    /// and there is no downgrade: the caller must have a verified backup. Without it such a
+    /// directory refuses `CREATE TABLE` (SQLSTATE 55000). A new, empty directory never needs it.
+    pub fn start_dir_with(
+        directory: PathBuf,
+        policies: PolicyTable,
+        limits: HostLimits,
+        allow_format_upgrade: bool,
+    ) -> Result<Self, String> {
         // The executor reports every storage failure as an opaque internal error, so name the likely
         // causes here: an unreadable or corrupt log, or another process holding the directory.
         let hint = |e: String| {
@@ -620,12 +633,14 @@ impl ExecHost {
         let authors_dir = directory.clone();
         Self::start_with_authors(
             move || {
-                Database::open(
+                let mut db = Database::open(
                     StdIo::new(directory),
                     SystemClock,
                     OsRng,
                     &Config::default(),
-                )
+                )?;
+                db.set_allow_format_upgrade(allow_format_upgrade);
+                Ok(db)
             },
             // The registry of author ids lives beside the log. It is opened after the log, so the
             // directory lock is already held, and a damaged or colliding registry refuses startup.
@@ -699,27 +714,20 @@ impl ExecHost {
                     return;
                 }
                 let authors = Rc::new(RefCell::new(authors));
-                let names = db.store().catalog().current();
-                let unattached: Vec<String> = names
-                    .values()
-                    .filter(|n| db.schema().table(n).is_none())
-                    .cloned()
-                    .collect();
                 // A restarted database starts with its recovered head, so a waiter that has seen
                 // nothing is told at once that there is something to read.
                 thread_shared.notifier.publish(committed_lsn(&db));
-                if ready_tx.send(Ok(unattached)).is_err() {
+                if ready_tx.send(Ok(())).is_err() {
                     return;
                 }
                 serve(db, authors, inbox, &policies, limits, &thread_shared);
             })
             .map_err(|e| format!("cannot start the SQL thread: {e}"))?;
         match ready_rx.recv() {
-            Ok(Ok(unattached)) => Ok(ExecHost {
+            Ok(Ok(())) => Ok(ExecHost {
                 requests,
                 next_connection: AtomicU64::new(1),
                 thread: Mutex::new(Some(thread)),
-                unattached,
                 alive,
                 shared,
                 wait: limits
@@ -736,13 +744,6 @@ impl ExecHost {
                 Err("the SQL thread stopped while opening".to_string())
             }
         }
-    }
-
-    /// Tables the engine catalog recovered whose column definitions are not known to SQL. Until
-    /// definitions are persisted (#379) every table recovered from the log is in this list: its
-    /// rows are in the log, but SQL cannot address it.
-    pub fn unattached_tables(&self) -> &[String] {
-        &self.unattached
     }
 
     /// A handler for one connection. Cheap; the connection's session starts with its first statement.
@@ -1485,7 +1486,6 @@ mod tests {
             HostLimits::default(),
         )
         .unwrap();
-        assert!(host.unattached_tables().is_empty());
         assert_eq!(
             code(&run(&host, "CREATE TABLE t (id INT PRIMARY KEY, v TEXT)")),
             None
@@ -1529,7 +1529,7 @@ mod tests {
     }
 
     #[test]
-    fn a_restart_recovers_table_names_but_not_columns() {
+    fn a_restart_recovers_tables_with_their_columns() {
         let path = dir("restart");
         let host = ExecHost::start_dir(
             path.clone(),
@@ -1537,8 +1537,11 @@ mod tests {
             HostLimits::default(),
         )
         .unwrap();
-        run(&host, "CREATE TABLE t (id INT PRIMARY KEY)");
-        run(&host, "INSERT INTO t VALUES (1)");
+        run(
+            &host,
+            "CREATE TABLE t (id INT PRIMARY KEY, v TEXT NOT NULL)",
+        );
+        run(&host, "INSERT INTO t VALUES (1, 'a')");
         host.shutdown().unwrap();
         let host = ExecHost::start_dir(
             path.clone(),
@@ -1546,8 +1549,16 @@ mod tests {
             HostLimits::default(),
         )
         .unwrap();
-        assert_eq!(host.unattached_tables(), ["t".to_string()]);
-        assert_eq!(code(&run(&host, "SELECT id FROM t")), Some("42P01"));
+        let out = run(&host, "SELECT v FROM t WHERE id = 1");
+        assert!(out.contains(&Backend::DataRow(vec![Some(b"a".to_vec())])));
+        assert_eq!(
+            code(&run(&host, "INSERT INTO t VALUES (1, 'b')")),
+            Some("23505")
+        );
+        assert_eq!(
+            code(&run(&host, "INSERT INTO t VALUES (2, NULL)")),
+            Some("23502")
+        );
         assert_eq!(
             code(&run(&host, "CREATE TABLE t (id INT PRIMARY KEY)")),
             Some("42P07")

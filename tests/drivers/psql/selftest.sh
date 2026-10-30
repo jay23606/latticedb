@@ -30,6 +30,7 @@ expect_red() { # name, text the failure must print, then the command
 copy_suite() { # destination
   mkdir -p "$1"
   cp "$here"/[0-9][0-9]_*.sql "$here"/[0-9][0-9]_*.expected "$1/"
+  cp "$here"/restart_a.* "$here"/restart_b.* "$1/"
   cp -R "$here/known" "$1/known"
 }
 
@@ -59,6 +60,11 @@ copy_suite "$tmp/drift"
 printf 'ERROR:  42601\nERROR:  0A000\n' > "$tmp/drift/known/04_unknown_type.latticed"
 expect_red known_failure_with_new_output "differs from its pinned latticed output" \
   env LATTICE_PSQL_SUITE="$tmp/drift" "$here/run.sh" "$bin" loopback
+
+# 5b. a restart that loses the table: the second run must fail when its expectation is not met
+copy_suite "$tmp/restart"
+printf 'id|name\n1|before the restart\n(1 row)\n' > "$tmp/restart/restart_b.expected"
+expect_red restart_expectation_not_met "FAILED  restart_b" env LATTICE_PSQL_SUITE="$tmp/restart" "$here/run.sh" "$bin" loopback
 
 # 6. a psql that is too old for \bind
 printf '#!/bin/sh\necho "psql (PostgreSQL) 15.4"\n' > "$tmp/psql15"

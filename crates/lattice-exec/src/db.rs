@@ -5,44 +5,64 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use lattice_core::Config;
+use lattice_core::bugs::{self, Bug};
 use lattice_engines::catalog::{CatalogOp, DdlRef};
 use lattice_engines::limits::{AllowAll, PolicyEvaluator};
+use lattice_engines::sqldef::DefineTable;
 use lattice_engines::store::RowStore;
 use lattice_seams::{Clock, Io, Rng};
 use lattice_sql::ast::CreateTable;
 
 use crate::access::AccessPath;
+use crate::definition;
 use crate::error::{ErrorKind, ExecError};
 use crate::exec::ActorPolicy;
 use crate::schema::{ExecCatalog, MAX_TABLE_ID, Schema, TableDef, object_name};
 
 /// A row store plus the schema the executor needs to read and write it.
 ///
-/// Column definitions are held in memory only (see [`crate::schema`]); table ids and names survive a
-/// restart in the engine catalog, and [`Database::attach_table`] re-registers the columns.
+/// Column definitions are durable (RFC 0012): `CREATE TABLE` commits the definition in the same
+/// change set as the table, and [`Database::open`] rebuilds the schema from the definitions the
+/// engine catalog recovered from the log. The schema here is a projection of that record, not a
+/// second source of truth.
 pub struct Database<I: Io, C: Clock + Clone, R: Rng> {
     pub(crate) store: RowStore<I, C, R>,
     pub(crate) clock: C,
     pub(crate) schema: Schema,
     next_rowid: RefCell<BTreeMap<u32, u64>>,
-    /// The definition first registered for each table id in this process (not durable).
-    fingerprints: BTreeMap<u32, String>,
     /// How the scans of the last statement read their tables.
     access: RefCell<Vec<AccessPath>>,
 }
 
 impl<I: Io, C: Clock + Clone, R: Rng> Database<I, C, R> {
-    /// Opens (or creates) the log and rebuilds the row store from it. The schema starts empty.
+    /// Opens (or creates) the log, rebuilds the row store from it and rebuilds the schema from the
+    /// table definitions the log carries. Refuses to open when a definition cannot be served.
+    ///
+    /// A table the catalog knows by name but that has no definition (it predates durable
+    /// definitions) stays in the engine catalog and is not addressable by SQL.
     pub fn open(io: I, clock: C, rng: R, config: &Config) -> Result<Self, ExecError> {
         let store = RowStore::open(io, clock.clone(), rng, config)?;
+        let mut schema = Schema::new();
+        let names = store.catalog().current();
+        for (id, record) in store.catalog().definitions() {
+            let name = names.get(&id).ok_or_else(ExecError::corrupt)?;
+            schema.insert(definition::from_record(id, name, record)?);
+        }
         Ok(Database {
             store,
             clock,
-            schema: Schema::new(),
+            schema,
             next_rowid: RefCell::new(BTreeMap::new()),
-            fingerprints: BTreeMap::new(),
             access: RefCell::new(Vec::new()),
         })
+    }
+
+    /// Allows the first table definition to upgrade a data directory that earlier builds can still
+    /// open (RFC 0012). Off by default: such a directory refuses `CREATE TABLE` until the host sets
+    /// this, because older builds cannot open the directory afterwards and there is no downgrade.
+    /// A new, empty directory never needs it.
+    pub fn set_allow_format_upgrade(&mut self, allow: bool) {
+        self.store.set_allow_format_upgrade(allow);
     }
 
     /// How each scan of the most recent statement read its table, in execution order. Observability
@@ -155,7 +175,7 @@ impl<I: Io, C: Clock + Clone, R: Rng> Database<I, C, R> {
                 ErrorKind::Bind,
                 "42P07",
                 format!(
-                    "relation \"{name}\" exists in the catalog but its columns are not attached"
+                    "relation \"{name}\" exists in the catalog but has no stored definition, so SQL cannot address it"
                 ),
             ));
         }
@@ -174,81 +194,36 @@ impl<I: Io, C: Clock + Clone, R: Rng> Database<I, C, R> {
                 )
             })?;
         let def = TableDef::from_create(id, ct)?;
+        // The definition is validated and encoded before anything is written, so a shape the record
+        // cannot hold is a statement error and leaves no table behind.
+        let record = definition::to_record(&def)?;
         // `IdUsed` cannot happen here: `&mut self` is the only writer and `id` is above every used
         // id. If it ever did, it would be an internal error (XX000), not something to retry.
         let tx = self
             .store
             .begin_with_policy(policy.clone())
             .with_author(policy.author());
-        self.store.commit_with_catalog(
+        // The definition rides in the same change set as the table, so a crash leaves both or
+        // neither and a recovered table always has its columns.
+        let definitions = if bugs::active(Bug::ExecDefinitionNotPersisted) {
+            Vec::new()
+        } else {
+            vec![DefineTable {
+                table_id: id,
+                definition: record,
+            }]
+        };
+        self.store.commit_with_definitions(
             tx,
             vec![CatalogOp::Create {
                 table: id,
                 name: name.clone(),
             }],
             Vec::new(),
+            definitions,
         )?;
-        self.fingerprints.insert(def.id, fingerprint(&def));
         self.schema.insert(def);
         Ok(true)
-    }
-
-    /// Registers the columns of a table that already exists in the engine catalog, for example after
-    /// a restart. The id and name must match the catalog.
-    pub fn attach_table(&mut self, def: TableDef) -> Result<(), ExecError> {
-        if def.id > MAX_TABLE_ID {
-            return Err(ExecError::new(
-                ErrorKind::Bind,
-                "42P01",
-                format!(
-                    "table id {} is above the largest id the executor serves",
-                    def.id
-                ),
-            ));
-        }
-        let current = self.store.catalog().current();
-        if current.get(&def.id) != Some(&def.name) {
-            return Err(ExecError::new(
-                ErrorKind::Bind,
-                "42P01",
-                format!(
-                    "table {} (id {}) is not in the engine catalog",
-                    def.name, def.id
-                ),
-            ));
-        }
-        if self.schema.table(&def.name).is_some() {
-            return Err(relation_exists(&def.name));
-        }
-        // Only the id and name are checked against the engine catalog, so a different column list,
-        // key or constraint would be accepted and silently change what is enforced. Within one
-        // process a definition seen before must match. This does not survive a restart (#379).
-        let print = fingerprint(&def);
-        match self.fingerprints.get(&def.id) {
-            Some(first) if *first != print => {
-                return Err(ExecError::new(
-                    ErrorKind::Bind,
-                    "42P17",
-                    format!(
-                        "table {} (id {}) was registered earlier in this process with a different definition",
-                        def.name, def.id
-                    ),
-                ));
-            }
-            Some(_) => {}
-            None => {
-                self.fingerprints.insert(def.id, print);
-            }
-        }
-        self.schema.insert(def);
-        Ok(())
-    }
-
-    /// Removes a table's columns from the executor without touching the engine catalog or its rows,
-    /// so the host can attach them again. A later [`Database::attach_table`] must supply the
-    /// definition that was registered first in this process.
-    pub fn detach_table(&mut self, name: &str) -> bool {
-        self.schema.remove(name).is_some()
     }
 
     /// Drops a table; its rows stay in the log. Returns `false` when it did not exist and
@@ -328,10 +303,6 @@ fn ddl_denied() -> ExecError {
         "42501",
         "permission denied: the actor may not change the catalog",
     )
-}
-
-fn fingerprint(def: &TableDef) -> String {
-    format!("{def:?}")
 }
 
 fn relation_exists(name: &str) -> ExecError {

@@ -2,7 +2,7 @@ name: quickstart-smoke
 # Proves the README "Try it" section works: builds latticed, starts it exactly as the README does,
 # runs the README's own SQL through psql and checks the result, stops it with `shutdown` on stdin,
 # restarts it on the same data directory and checks the restart behaviour the README documents
-# (table names recovered, columns not queryable until #379). It fails when the README and the
+# (the table, its columns and its rows come back, issue 573). It fails when the README and the
 # binary drift apart. It is a smoke test of the quickstart, not a driver compatibility test (#413).
 on:
   pull_request:
@@ -101,13 +101,13 @@ jobs:
 
           echo "::group::restart on the same data directory"
           start_server second
-          grep -q '1 recovered table(s) have no column definitions' server-second.log \
-            || { echo "restart did not report the recovered table" >&2; exit 1; }
-          # Documented current behaviour (#379): the recovered table is unknown to SQL.
-          if err=$(psql_run -c 'SELECT * FROM notes;' 2>&1); then
-            echo "SELECT after restart unexpectedly succeeded: $err" >&2; exit 1
+          got=$(psql_run -c 'SELECT * FROM notes;')
+          echo "result after restart: $got"
+          [ "$got" = '1|write the spec|f' ] || { echo "the row did not survive the restart: $got" >&2; exit 1; }
+          if err=$(psql_run -c "INSERT INTO notes VALUES (1, 'again', true);" 2>&1); then
+            echo "duplicate key accepted after restart: $err" >&2; exit 1
           fi
-          echo "$err" | grep -q 42P01 || { echo "expected 42P01 after restart, got: $err" >&2; exit 1; }
+          echo "$err" | grep -q 23505 || { echo "expected 23505 after restart, got: $err" >&2; exit 1; }
           if err=$(psql_run -c 'CREATE TABLE notes (id INT PRIMARY KEY);' 2>&1); then
             echo "CREATE TABLE after restart unexpectedly succeeded: $err" >&2; exit 1
           fi

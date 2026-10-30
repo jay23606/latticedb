@@ -4,10 +4,11 @@
 //! connection gets a proxy handler that forwards its statements to it. Without a data directory the
 //! listener keeps its `SELECT 1` placeholder handler.
 //!
-//! What survives a restart: committed rows and table names, through the write-ahead log, which is
-//! replayed when the server starts. Column definitions are kept in memory only (#379), so after a
-//! restart every recovered table is unknown to SQL: `SELECT` answers `42P01` and `CREATE TABLE` of the
-//! same name answers `42P07`. The server reports the number of such tables at startup.
+//! What survives a restart: committed rows, tables and their column definitions (types, `NOT NULL`,
+//! primary key, `UNIQUE`, defaults), through the write-ahead log, which is replayed when the server
+//! starts. `CREATE TABLE` writes the definition in the same change set as the table (RFC 0012). A data
+//! directory written before definitions existed refuses its first `CREATE TABLE` until
+//! [`SqlConfig::allow_format_upgrade`] is set; a new directory needs nothing.
 
 use crate::ws::{CommitWake, GatewayConfig, GatewayHandle};
 use crate::{ServerConfig, ServerHandle};
@@ -27,6 +28,10 @@ pub struct SqlConfig {
     pub policies: PolicyTable,
     /// Statement timeout ceiling and memory budget applied to every connection.
     pub limits: HostLimits,
+    /// Lets the first `CREATE TABLE` upgrade a data directory that was written before table
+    /// definitions existed. Builds without definition support refuse the directory afterwards and
+    /// there is no downgrade, so take a verified backup first. A new directory never needs it.
+    pub allow_format_upgrade: bool,
 }
 
 /// A listener serving SQL from a data directory.
@@ -98,8 +103,13 @@ impl SqlServer {
             + 16
             + gateway.as_ref().map_or(0, |g| g.max_connections);
         let host = Arc::new(
-            ExecHost::start_dir(sql.data_dir, sql.policies, sql.limits)
-                .map_err(io::Error::other)?,
+            ExecHost::start_dir_with(
+                sql.data_dir,
+                sql.policies,
+                sql.limits,
+                sql.allow_format_upgrade,
+            )
+            .map_err(io::Error::other)?,
         );
         let factory = Arc::clone(&host);
         let server = ServerHandle::start_with_handler(config, move || factory.handler())?;
@@ -150,12 +160,6 @@ impl SqlServer {
             || !self.host.is_alive()
     }
 
-    /// Names of recovered tables that SQL cannot address because column definitions are not
-    /// persisted yet (#379).
-    pub fn unattached_tables(&self) -> &[String] {
-        self.host.unattached_tables()
-    }
-
     /// Stops the listener, waits for its workers, then stops the database thread and releases the
     /// directory. Connections waiting on the database thread are told to give up first, so a stuck
     /// thread delays this by at most `HostLimits::shutdown_grace_ms`, not forever.
@@ -195,6 +199,7 @@ mod tests {
                 data_dir: path.clone(),
                 policies: PolicyTable::new(Grant::AllowAll),
                 limits: HostLimits::default(),
+                allow_format_upgrade: false,
             },
         )
         .unwrap();

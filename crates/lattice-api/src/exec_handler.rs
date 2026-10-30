@@ -895,7 +895,7 @@ mod tests {
             expected,
             "history changed across a reopen"
         );
-        // Column definitions are not durable (#379), so the second life writes a new table.
+        // The second life writes a new table next to the recovered ones.
         let mut hd = open_accounts_handler(&db, &authors);
         sql(&mut hd, &dev, "CREATE TABLE u (id INT PRIMARY KEY)");
         let mut hc = open_accounts_handler(&db, &authors);

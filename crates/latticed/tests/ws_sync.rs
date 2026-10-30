@@ -87,6 +87,7 @@ fn start(name: &str, tune: impl FnOnce(&mut GatewayConfig)) -> Fixture {
             data_dir: dir.clone(),
             policies: PolicyTable::new(Grant::AllowAll).with_accounts(accounts),
             limits: HostLimits::default(),
+            allow_format_upgrade: false,
         },
         Some(gateway),
     )
@@ -560,6 +561,7 @@ fn a_non_loopback_gateway_address_is_refused_at_start() {
             data_dir: dir.clone(),
             policies: PolicyTable::new(Grant::DenyAll),
             limits: HostLimits::default(),
+            allow_format_upgrade: false,
         },
         Some(GatewayConfig {
             address: SocketAddr::from(([0, 0, 0, 0], 0)),

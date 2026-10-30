@@ -95,8 +95,8 @@ ordering, deduplication by key, cursors and permissions need no second mechanism
    defines the syntax (protocol v1 says so). Presence is `presence/<workspace>`.
 3. **The event payload on the sync wire is the canonical change-feed encoding.** The MCP surface returns
    decoded JSON rows (table name, key, columns, author, cursor) because agents read text. Decoding needs the
-   column definitions, which are not persisted across restarts yet (issue #379, RFC 0012 draft in PR #414),
-   so a restart in the slice demo is limited to what the catalog recovers.
+   column definitions, which are persisted with the table since issue 573 (RFC 0012),
+   so a restart keeps the tables and their columns.
 4. **Authentication of the upgrade is a per-account bearer token over TLS** (loopback development keeps the
    labelled development principal). SCRAM over HTTP, mTLS and query-string tokens are rejected; the ADR in
    [#521](https://github.com/moncifem/latticedb/issues/521) records this.
@@ -265,8 +265,7 @@ feed and sync encodings are unaccepted, experimental), the interim grants versus
    filtering is needed. The backpressure module is pure and unwired, so the real output budget does not
    exist yet ([#529](https://github.com/moncifem/latticedb/issues/529)).
 3. **The formats under it are unfrozen and incomplete.** The feed and sync encodings are experimental, so
-   a product built on them can be forced to change bytes. Author and turn are not recorded, column definitions
-   do not survive a restart (#379), `lattice-sdk` and `lattice-api` cannot share types (layering, #356) and the
+   a product built on them can be forced to change bytes. Author and turn are not recorded, `lattice-sdk` and `lattice-api` cannot share types (layering, #356) and the
    outbox speaks a session-record contract that has no kernel-backed server. Each is a package, and any that
    turns out to need a byte change stops for an RFC, an ADR and an independent review; the schedule above
    assumes none does.

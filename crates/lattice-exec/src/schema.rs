@@ -1,8 +1,9 @@
 //! Table definitions the executor knows, and how rows and keys are encoded.
 //!
-//! The engine catalog (`lattice_engines::catalog`) persists table ids and names only. Column
-//! definitions are held here, in memory, and are **not** persisted: after a restart the host must
-//! re-register them with [`crate::Database::attach_table`]. Rows are stored with the engine's typed row
+//! The engine catalog (`lattice_engines::catalog`) persists table ids and names, and, since RFC 0012,
+//! the definition of each SQL table written in the same change set as its `CREATE` (see
+//! the `definition` module). `Database::open` rebuilds this schema from those records; nothing here is
+//! the only copy of a table's shape. Rows are stored with the engine's typed row
 //! codec (`lattice_engines::typed`): `numeric` and `jsonb` as text, `double precision` as its bit
 //! pattern, `uuid` as 16 bytes, `date` and `timestamptz` as integers.
 
@@ -69,8 +70,12 @@ pub struct TableDef {
     pub columns: Vec<ColumnDef>,
     /// Column positions of the primary key; empty when the table has none (rows get a row id).
     pub primary_key: Vec<usize>,
-    /// Column positions of each `UNIQUE` constraint.
+    /// Column positions of each `UNIQUE` constraint; the position `k` is the marker table index.
     pub uniques: Vec<Vec<usize>>,
+    /// The primary key's constraint name (empty when the table has none), as stored in the record.
+    pub primary_key_name: String,
+    /// The name of each `UNIQUE` constraint, as stored in the record; same order as `uniques`.
+    pub unique_names: Vec<String>,
 }
 
 /// The table name of an object name, which may be qualified with `public`.
@@ -129,8 +134,15 @@ impl TableDef {
                 DataType::Varchar(n) => n,
                 _ => None,
             };
+            // `DEFAULT NULL` is the same as no default, and a numeric default is kept in the
+            // canonical spelling the durable record requires (no trailing fractional zeros), so a
+            // table behaves the same before and after a restart.
             let default = match &c.default {
-                Some(e) => Some(const_default(&e.kind, ty)?),
+                Some(e) => match const_default(&e.kind, ty)? {
+                    Datum::Null => None,
+                    Datum::Numeric(d) => Some(Datum::Numeric(d.normalized())),
+                    other => Some(other),
+                },
                 None => None,
             };
             columns.push(ColumnDef {
@@ -228,12 +240,22 @@ impl TableDef {
                 )));
             }
         }
+        let primary_key_name = if primary_key.is_empty() {
+            String::new()
+        } else {
+            format!("{name}_pkey")
+        };
+        let unique_names = (0..uniques.len())
+            .map(|k| format!("{name}_unique_{k}"))
+            .collect();
         Ok(TableDef {
             id,
             name,
             columns,
             primary_key,
             uniques,
+            primary_key_name,
+            unique_names,
         })
     }
 
@@ -253,14 +275,14 @@ impl TableDef {
         let mut indexes = Vec::new();
         if !self.primary_key.is_empty() {
             indexes.push(IndexInfo {
-                name: format!("{}_pkey", self.name),
+                name: self.primary_key_name.clone(),
                 columns: col_names(&self.primary_key),
                 unique: true,
             });
         }
         for (k, u) in self.uniques.iter().enumerate() {
             indexes.push(IndexInfo {
-                name: format!("{}_unique_{k}", self.name),
+                name: self.unique_name(k),
                 columns: col_names(u),
                 unique: true,
             });
@@ -345,7 +367,10 @@ impl TableDef {
 
     /// The name of a constraint for error messages.
     pub fn unique_name(&self, k: usize) -> String {
-        format!("{}_unique_{k}", self.name)
+        self.unique_names
+            .get(k)
+            .cloned()
+            .unwrap_or_else(|| format!("{}_unique_{k}", self.name))
     }
 }
 

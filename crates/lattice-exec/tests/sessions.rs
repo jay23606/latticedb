@@ -713,14 +713,13 @@ fn as_of_reads_an_earlier_snapshot_by_time_or_by_changeset() {
 }
 
 #[test]
-fn committed_rows_survive_a_restart_once_the_columns_are_attached_again() {
+fn committed_rows_and_their_columns_survive_a_restart() {
     let (mut f, mut s) = accounts();
     ok(&mut f.db, &mut s, "BEGIN");
     ok(&mut f.db, &mut s, "UPDATE acct SET bal = 7 WHERE id = 2");
     ok(&mut f.db, &mut s, "ROLLBACK");
     ok(&mut f.db, &mut s, "UPDATE acct SET bal = 8 WHERE id = 2");
     let def = f.db.schema().table("acct").unwrap().clone();
-    let version_before = f.db.catalog_version();
     drop(f.db);
     f.disk.restart_process();
     let mut db: Db = Database::open(
@@ -731,18 +730,12 @@ fn committed_rows_survive_a_restart_once_the_columns_are_attached_again() {
     )
     .unwrap();
     let mut s = common::admin();
-    // The engine remembers the table's name and id, but not its columns.
-    assert_eq!(
-        err(&mut db, &mut s, "SELECT * FROM acct").sqlstate(),
-        "42P01"
-    );
+    // The columns come back from the stored definition, exactly as they were created.
+    assert_eq!(db.schema().table("acct"), Some(&def));
     assert_eq!(
         err(&mut db, &mut s, "CREATE TABLE acct (a INT)").sqlstate(),
-        "42P07",
-        "the name is taken in the catalog"
+        "42P07"
     );
-    db.attach_table(def.clone()).unwrap();
-    assert!(db.catalog_version() > 0 && version_before > 0);
     assert_eq!(
         rows(&mut db, &mut s, "SELECT id, bal, tag FROM acct ORDER BY id"),
         strs(&[&["1", "100", "a"], &["2", "8", "b"]])
@@ -752,10 +745,6 @@ fn committed_rows_survive_a_restart_once_the_columns_are_attached_again() {
         err(&mut db, &mut s, "INSERT INTO acct VALUES (3, 1, 'a')").sqlstate(),
         "23505"
     );
-    // Attaching under the wrong id or name is refused.
-    let mut wrong = def;
-    wrong.id += 50;
-    assert_eq!(db.attach_table(wrong).unwrap_err().sqlstate(), "42P01");
 }
 
 // ----- interim rules recorded in the review -----
@@ -853,35 +842,6 @@ fn a_restrictive_policy_must_follow_the_owning_table_of_unique_entries() {
 }
 
 #[test]
-fn re_attaching_a_table_with_another_definition_in_the_same_process_is_refused() {
-    let (mut f, _s) = accounts();
-    let def = f.db.schema().table("acct").unwrap().clone();
-    assert!(f.db.detach_table("acct"));
-    assert_eq!(
-        common::err(&mut f.db, &mut common::admin(), "SELECT * FROM acct").sqlstate(),
-        "42P01"
-    );
-    // Dropping the UNIQUE constraint would silently stop enforcing it.
-    let mut weaker = def.clone();
-    weaker.uniques.clear();
-    let e = f.db.attach_table(weaker).unwrap_err();
-    assert_eq!(e.sqlstate(), "42P17");
-    let mut renumbered = def.clone();
-    renumbered.columns.truncate(2);
-    assert_eq!(
-        f.db.attach_table(renumbered).unwrap_err().sqlstate(),
-        "42P17"
-    );
-    // The original definition goes back in and the rows are intact.
-    f.db.attach_table(def).unwrap();
-    let mut s = common::admin();
-    assert_eq!(
-        rows(&mut f.db, &mut s, "SELECT id FROM acct"),
-        strs(&[&["1"], &["2"]])
-    );
-}
-
-#[test]
 fn an_expired_snapshot_is_its_own_retryable_kind() {
     let mut f = fixture();
     let mut s = common::admin();
@@ -973,15 +933,6 @@ fn the_host_ceiling_on_the_statement_timeout_cannot_be_lifted_by_the_client() {
     assert_eq!(s.limits().timeout_ms, Some(40), "a client may tighten it");
     ok(&mut f.db, &mut s, "SET statement_timeout = DEFAULT");
     assert_eq!(s.limits().timeout_ms, Some(100));
-}
-
-#[test]
-fn attaching_a_table_above_the_largest_id_is_refused() {
-    let (mut f, _s) = accounts();
-    let mut def = f.db.schema().table("acct").unwrap().clone();
-    f.db.detach_table("acct");
-    def.id = lattice_exec::schema::MAX_TABLE_ID + 1;
-    assert_eq!(f.db.attach_table(def).unwrap_err().sqlstate(), "42P01");
 }
 
 #[test]

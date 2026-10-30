@@ -41,13 +41,21 @@ const STEPS: &[(&str, &[&str])] = &[
         &["1|a", "2|b"],
     ),
     ("SELECT id AS Upper FROM mixed ORDER BY id LIMIT 1", &["1"]),
+    // PostgreSQL also accepts a quoted column name with capitals. The stored table definition cannot
+    // hold one yet (formats/sql-definition-v1.md allows no ASCII capital in a column name), so
+    // `CREATE TABLE` refuses it with 0A000 instead of keeping the column only until a restart.
     (
         "CREATE TABLE \"Quoted\" (\"Col A\" INT PRIMARY KEY, \"select\" TEXT)",
+        &["ERR 0A000"],
+    ),
+    (
+        "CREATE TABLE \"Quoted\" (\"col a\" INT PRIMARY KEY, \"select\" TEXT)",
         &["CREATE TABLE"],
     ),
     ("INSERT INTO \"Quoted\" VALUES (1, 'x')", &["INSERT 0 1"]),
-    ("SELECT \"Col A\", \"select\" FROM \"Quoted\"", &["1|x"]),
+    ("SELECT \"col a\", \"select\" FROM \"Quoted\"", &["1|x"]),
     ("SELECT col a FROM \"Quoted\"", &["ERR 42703"]),
+    ("SELECT \"Col A\" FROM \"Quoted\"", &["ERR 42703"]),
     ("SELECT * FROM quoted", &["ERR 42P01"]),
     ("SELECT * FROM Quoted", &["ERR 42P01"]),
     ("CREATE TABLE \"a\"\"b\" (x INT)", &["CREATE TABLE"]),
@@ -59,7 +67,8 @@ const STEPS: &[(&str, &[&str])] = &[
     ),
     ("CREATE TABLE select (a INT)", &["ERR 42601"]),
     ("CREATE TABLE \"\" (a INT)", &["ERR 42601"]),
-    ("CREATE TABLE t3 (a INT, \"A\" INT)", &["CREATE TABLE"]),
+    // PostgreSQL accepts the second, distinct column "A"; see the note above.
+    ("CREATE TABLE t3 (a INT, \"A\" INT)", &["ERR 0A000"]),
     ("CREATE TABLE t4 (a INT, A INT)", &["ERR 42701"]),
     ("CREATE TABLE t5 (user INT)", &["ERR 42601"]),
     (
