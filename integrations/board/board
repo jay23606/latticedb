@@ -1,0 +1,447 @@
+#!/bin/sh
+# board: an agent coordination board on Lattice, driven through psql.
+# Usage and rules: integrations/board/CONVENTIONS.md. Exit status: 0 ok, 1 error, 2 claim not won.
+#
+# Connection: LATTICE_BOARD_URL (a postgres:// URI without a password) or the usual PG* variables.
+# A password belongs in PGPASSWORD or ~/.pgpass, never in the URL or on the command line.
+# Author of every write: BOARD_AUTHOR, required for add, claim, note, done and decide. Give each
+# agent its own name: two agents with the same name are treated as one.
+# BOARD_PSQL names the psql program to run (default psql); the test suite uses it to spy on argv.
+#
+# Every user value reaches SQL only as a psql variable (-v) and is quoted by psql with :'name',
+# so titles and notes with quotes, semicolons or unicode are stored as given.
+
+set -u
+
+TAB=$(printf '\t')
+NL='
+'
+HERE=$(cd "$(dirname "$0")" && pwd) || exit 1
+SCHEMA="$HERE/schema.sql"
+TMP_ERR=$(mktemp "${TMPDIR:-/tmp}/board.XXXXXX") || exit 1
+trap 'rm -f "$TMP_ERR"' EXIT HUP INT TERM
+LC_MESSAGES=C
+export LC_MESSAGES
+
+usage() {
+  cat <<'USAGE'
+usage: board <command> [arguments]
+
+  init                          create or update the tables (safe to run again)
+  add TITLE [--priority N] [--parent ID] [--body TEXT]
+                                create an open task and print its id
+  list [open|claimed|done]      list tasks, highest priority first
+  show ID                       one task with its events and decisions
+  claim ID                      take an open task; exit 0 if won (or already yours), 2 if not
+  note ID TEXT                  append a progress note
+  done ID [TEXT]                mark a task done, with an optional closing note (once)
+  decide ID TEXT                record a decision on a task
+  since [EVENT_ID]              print events after EVENT_ID (default 0), oldest first
+  head                          print the newest event id (0 when there is none)
+
+add, claim, note, done and decide need BOARD_AUTHOR set to this agent's unique name.
+USAGE
+}
+
+die() {
+  printf 'board: %s\n' "$*" >&2
+  exit 1
+}
+
+# The psql calls. MODE is tuples (tab separated, no header), table (with header) or expanded.
+# Extra arguments are psql options and -v name=value pairs. SQL comes in as $2.
+# On success the output is in OUT; on failure psql's messages are in TMP_ERR.
+psql_run() {
+  pr_mode=$1
+  pr_sql=$2
+  shift 2
+  set -- -X -q -A -P footer=off -v ON_ERROR_STOP=1 -v VERBOSITY=verbose "$@"
+  case $pr_mode in
+    tuples) set -- -t -F "$TAB" "$@" ;;
+    table) set -- -F "$TAB" "$@" ;;
+    expanded) set -- -x "$@" ;;
+  esac
+  if [ -n "$BOARD_URL" ]; then
+    set -- -d "$BOARD_URL" "$@"
+  fi
+  if OUT=$(printf '%s\n' "$pr_sql" | "${BOARD_PSQL:-psql}" "$@" 2>"$TMP_ERR"); then
+    return 0
+  fi
+  return 1
+}
+
+# fail_db: report psql's last error and stop. Used when a read or a schema step fails.
+fail_db() {
+  cat "$TMP_ERR" >&2
+  exit 1
+}
+
+# tx SQL [-v name=value ...]: one write transaction. It is retried while the server reports a
+# serialization failure (40001), which is safe because nothing from a failed attempt commits.
+# On commit the rows the script printed are in OUT. Any other error ends the command.
+tx() {
+  tx_sql=$1
+  shift
+  tx_try=0
+  while :; do
+    tx_try=$((tx_try + 1))
+    if psql_run tuples "$tx_sql" "$@"; then
+      return 0
+    fi
+    case $(cat "$TMP_ERR") in
+      *40001:*)
+        [ "$tx_try" -lt 500 ] || die "gave up after $tx_try conflicting attempts"
+        printf 'board: retrying after a write conflict (attempt %s)\n' "$tx_try" >&2
+        sleep "0.0$(((tx_try + $$) % 9 + 1))"
+        ;;
+      *)
+        fail_db
+        ;;
+    esac
+  done
+}
+
+now() {
+  date +%s
+}
+
+need_author() {
+  [ -n "$AUTHOR" ] || die "BOARD_AUTHOR is required for $cmd: set a unique name for this agent"
+  case $AUTHOR in
+    *[!A-Za-z0-9._-]*) die "BOARD_AUTHOR may use only letters, digits, '.', '_' and '-'" ;;
+  esac
+  [ ${#AUTHOR} -le 64 ] || die "BOARD_AUTHOR is longer than 64 characters"
+}
+
+need_id() {
+  case $1 in
+    '' | *[!A-Za-z0-9_-]*) die "not a task id: '$1'" ;;
+  esac
+}
+
+# need_line NAME VALUE REQUIRED: one line of text. Refused: tabs, newlines, other control
+# characters (CR included), and backslashes. REQUIRED=1 also rejects an empty value.
+# A backslash is refused because psql quotes such a value as E'...', which Lattice does not
+# accept yet (SQLSTATE 0A000); refusing it here is clearer than a server error.
+need_line() {
+  case $2 in
+    *"$NL"* | *"$TAB"*) die "$1 must be one line without tab characters" ;;
+    *\\*) die "$1 must not contain a backslash (see integrations/board/CONVENTIONS.md, limits)" ;;
+  esac
+  if [ "$(printf '%s' "$2" | LC_ALL=C tr -d '\001-\037\177')" != "$2" ]; then
+    die "$1 must not contain control characters"
+  fi
+  if [ "$3" = 1 ] && [ -z "$2" ]; then
+    die "$1 must not be empty"
+  fi
+}
+
+need_int() {
+  case $2 in
+    '' | -) die "$1 must be a whole number" ;;
+    -*) case ${2#-} in '' | *[!0-9]*) die "$1 must be a whole number" ;; esac ;;
+    *[!0-9]*) die "$1 must be a whole number" ;;
+  esac
+}
+
+new_id() {
+  printf 't%s\n' "$(od -An -N5 -tx1 /dev/urandom | tr -d ' \n')"
+}
+
+# The counter step every write starts with. It bumps the shared counter, which makes
+# concurrent writers conflict, and reads back the id this transaction will use.
+# Test seam: when BOARD_TEST_HOLD_FILE is set, the transaction then waits (up to 20 s) until that
+# file exists, after creating FILE.started. The test suite uses it to force a 40001 retry.
+bump_sql() {
+  cat <<'SQL'
+BEGIN;
+UPDATE counters SET n = n + 1 WHERE name = 'events';
+SELECT n AS seq FROM counters WHERE name = 'events' \gset
+SQL
+  if [ -n "${BOARD_TEST_HOLD_FILE:-}" ]; then
+    cat <<'SQL'
+\! : > "$BOARD_TEST_HOLD_FILE.started"; i=0; while [ ! -f "$BOARD_TEST_HOLD_FILE" ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i + 1)); done
+SQL
+  fi
+}
+
+cmd_init() {
+  [ $# -eq 0 ] || die "init takes no arguments"
+  attempt=0
+  while :; do
+    attempt=$((attempt + 1))
+    if psql_run tuples "" -f "$SCHEMA"; then
+      break
+    fi
+    # Two inits racing on the first create may see "already exists"; the schema is idempotent, so
+    # run it again.
+    case $(cat "$TMP_ERR") in
+      *42P07:* | *23505:*) [ "$attempt" -lt 5 ] || fail_db; sleep 0.2 ;;
+      *) fail_db ;;
+    esac
+  done
+  psql_run tuples "SELECT n FROM counters WHERE name = 'events';" || fail_db
+  if [ -z "$OUT" ]; then
+    if ! psql_run tuples "INSERT INTO counters (name, n) VALUES ('events', 0);"; then
+      # Another init seeded the counter first: that is the state we want.
+      case $(cat "$TMP_ERR") in
+        *23505:*) ;;
+        *) fail_db ;;
+      esac
+    fi
+  fi
+  printf 'board ready\n'
+}
+
+cmd_add() {
+  [ $# -ge 1 ] || die "add needs a title"
+  title=$1
+  shift
+  priority=0
+  parent=
+  body=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --priority)
+        [ $# -ge 2 ] || die "--priority needs a value"
+        need_int priority "$2"
+        priority=$2
+        shift 2
+        ;;
+      --parent)
+        [ $# -ge 2 ] || die "--parent needs a task id"
+        need_id "$2"
+        parent=$2
+        shift 2
+        ;;
+      --body)
+        [ $# -ge 2 ] || die "--body needs a value"
+        body=$2
+        shift 2
+        ;;
+      *) die "unknown option for add: $1" ;;
+    esac
+  done
+  need_line title "$title" 1
+  need_line body "$body" 0
+  task=$(new_id)
+  if [ -n "$parent" ]; then
+    sql=$(bump_sql; cat <<'SQL'
+INSERT INTO tasks (id, title, state, owner, priority, parent_id, created_by, body, created_at, updated_at)
+  SELECT :'task', :'title', 'open', NULL, :priority, :'parent', :'author', :'body', :ts, :ts FROM tasks WHERE id = :'parent';
+INSERT INTO events (id, task_id, author, kind, body, created_at)
+  SELECT :seq, :'task', :'author', 'add', :'title', :ts FROM tasks WHERE id = :'task';
+SELECT id FROM events WHERE id = :seq;
+COMMIT;
+SQL
+)
+  else
+    sql=$(bump_sql; cat <<'SQL'
+INSERT INTO tasks (id, title, state, owner, priority, parent_id, created_by, body, created_at, updated_at)
+  VALUES (:'task', :'title', 'open', NULL, :priority, NULL, :'author', :'body', :ts, :ts);
+INSERT INTO events (id, task_id, author, kind, body, created_at)
+  VALUES (:seq, :'task', :'author', 'add', :'title', :ts);
+SELECT id FROM events WHERE id = :seq;
+COMMIT;
+SQL
+)
+  fi
+  tx "$sql" -v author="$AUTHOR" -v task="$task" -v title="$title" -v body="$body" \
+    -v priority="$priority" -v parent="$parent" -v ts="$(now)" || exit 1
+  if [ -z "$OUT" ]; then
+    die "parent task not found: $parent"
+  fi
+  printf '%s\n' "$task"
+}
+
+cmd_list() {
+  [ $# -le 1 ] || die "list takes at most one state"
+  state=${1:-}
+  case $state in
+    '' | open | claimed | done) ;;
+    *) die "state must be open, claimed or done" ;;
+  esac
+  psql_run table "SELECT id, state, priority, owner, title FROM tasks
+WHERE (state = :'state' OR :'state' = '') ORDER BY priority DESC, created_at, id;" \
+    -v state="$state" || fail_db
+  printf '%s\n' "$OUT"
+}
+
+cmd_show() {
+  [ $# -eq 1 ] || die "show takes one task id"
+  need_id "$1"
+  psql_run expanded "SELECT id, title, state, owner, priority, parent_id, created_by, body, created_at, updated_at
+FROM tasks WHERE id = :'task';" -v task="$1" || fail_db
+  if [ -z "$OUT" ]; then
+    die "no such task: $1"
+  fi
+  printf '%s\n' "$OUT"
+  psql_run table "SELECT id, author, kind, body FROM events WHERE task_id = :'task' ORDER BY id;" \
+    -v task="$1" || fail_db
+  printf 'events:\n%s\n' "$OUT"
+  psql_run table "SELECT id, author, body FROM decisions WHERE task_id = :'task' ORDER BY id;" \
+    -v task="$1" || fail_db
+  printf 'decisions:\n%s\n' "$OUT"
+}
+
+cmd_claim() {
+  [ $# -eq 1 ] || die "claim takes one task id"
+  need_id "$1"
+  task=$1
+  sql=$(bump_sql; cat <<'SQL'
+UPDATE tasks SET owner = :'author', state = 'claimed', claim_seq = :seq, updated_at = :ts
+  WHERE id = :'task' AND owner IS NULL AND state = 'open';
+INSERT INTO events (id, task_id, author, kind, body, created_at)
+  SELECT :seq, id, :'author', 'claim', '', :ts FROM tasks WHERE id = :'task' AND claim_seq = :seq;
+SELECT claim_seq = :seq AS won, owner, state FROM tasks WHERE id = :'task';
+COMMIT;
+SQL
+)
+  tx "$sql" -v author="$AUTHOR" -v task="$task" -v ts="$(now)" || exit 1
+  if [ -z "$OUT" ]; then
+    die "no such task: $task"
+  fi
+  won=$(printf '%s\n' "$OUT" | cut -f1)
+  owner=$(printf '%s\n' "$OUT" | cut -f2)
+  state=$(printf '%s\n' "$OUT" | cut -f3)
+  if [ "$won" = t ]; then
+    printf 'claimed %s\n' "$task"
+    return 0
+  fi
+  # Same name twice is treated as the same agent: both calls succeed, one claim is recorded.
+  if [ "$owner" = "$AUTHOR" ]; then
+    printf 'already yours: %s\n' "$task"
+    return 0
+  fi
+  printf 'not claimed: %s is %s, owner %s\n' "$task" "$state" "${owner:-none}"
+  return 2
+}
+
+cmd_note() {
+  [ $# -eq 2 ] || die "note takes a task id and a text"
+  need_id "$1"
+  need_line text "$2" 1
+  task=$1
+  sql=$(bump_sql; cat <<'SQL'
+UPDATE tasks SET updated_at = :ts WHERE id = :'task';
+INSERT INTO events (id, task_id, author, kind, body, created_at)
+  SELECT :seq, id, :'author', 'note', :'text', :ts FROM tasks WHERE id = :'task';
+SELECT id FROM events WHERE id = :seq;
+COMMIT;
+SQL
+)
+  tx "$sql" -v author="$AUTHOR" -v task="$task" -v text="$2" -v ts="$(now)" || exit 1
+  if [ -z "$OUT" ]; then
+    die "no such task: $task"
+  fi
+  printf 'noted %s as event %s\n' "$task" "$OUT"
+}
+
+cmd_done() {
+  [ $# -ge 1 ] && [ $# -le 2 ] || die "done takes a task id and an optional text"
+  need_id "$1"
+  text=${2:-}
+  need_line text "$text" 0
+  task=$1
+  # done_seq is set only when this transaction changes the state, so a second done writes nothing.
+  sql=$(bump_sql; cat <<'SQL'
+UPDATE tasks SET state = 'done', done_seq = :seq, updated_at = :ts WHERE id = :'task' AND state <> 'done';
+INSERT INTO events (id, task_id, author, kind, body, created_at)
+  SELECT :seq, id, :'author', 'done', :'text', :ts FROM tasks WHERE id = :'task' AND done_seq = :seq;
+SELECT id FROM events WHERE id = :seq;
+COMMIT;
+SQL
+)
+  tx "$sql" -v author="$AUTHOR" -v task="$task" -v text="$text" -v ts="$(now)" || exit 1
+  if [ -z "$OUT" ]; then
+    psql_run tuples "SELECT state FROM tasks WHERE id = :'task';" -v task="$task" || fail_db
+    if [ -z "$OUT" ]; then
+      die "no such task: $task"
+    fi
+    die "already done: $task"
+  fi
+  printf 'done %s as event %s\n' "$task" "$OUT"
+}
+
+cmd_decide() {
+  [ $# -eq 2 ] || die "decide takes a task id and a text"
+  need_id "$1"
+  need_line decision "$2" 1
+  task=$1
+  sql=$(bump_sql; cat <<'SQL'
+INSERT INTO decisions (id, task_id, author, body, created_at)
+  SELECT :seq, id, :'author', :'text', :ts FROM tasks WHERE id = :'task';
+INSERT INTO events (id, task_id, author, kind, body, created_at)
+  SELECT :seq, id, :'author', 'decision', :'text', :ts FROM tasks WHERE id = :'task';
+SELECT id FROM events WHERE id = :seq;
+COMMIT;
+SQL
+)
+  tx "$sql" -v author="$AUTHOR" -v task="$task" -v text="$2" -v ts="$(now)" || exit 1
+  if [ -z "$OUT" ]; then
+    die "no such task: $task"
+  fi
+  printf 'decided on %s as event %s\n' "$task" "$OUT"
+}
+
+cmd_since() {
+  [ $# -le 1 ] || die "since takes at most one event id"
+  last=${1:-0}
+  need_int event_id "$last"
+  psql_run tuples "SELECT id, task_id, author, kind, body FROM events WHERE id > :last ORDER BY id;" \
+    -v last="$last" || fail_db
+  if [ -n "$OUT" ]; then
+    printf '%s\n' "$OUT"
+  fi
+}
+
+cmd_head() {
+  [ $# -eq 0 ] || die "head takes no arguments"
+  psql_run tuples "SELECT id FROM events ORDER BY id DESC LIMIT 1;" || fail_db
+  printf '%s\n' "${OUT:-0}"
+}
+
+[ $# -ge 1 ] || { usage >&2; exit 1; }
+command -v "${BOARD_PSQL:-psql}" >/dev/null 2>&1 || die "psql is not on PATH"
+
+# Connection. A password in the URL would show in the process list (psql gets the URL as an
+# argument), so the password moves to PGPASSWORD and the URL that reaches psql has none.
+BOARD_URL=
+case ${LATTICE_BOARD_URL:-} in
+  '') ;;
+  *password=*) die "LATTICE_BOARD_URL must not carry a password; set PGPASSWORD or use ~/.pgpass" ;;
+  postgres://* | postgresql://*)
+    url_pw=$(printf '%s\n' "$LATTICE_BOARD_URL" | sed -n 's#^postgres\(ql\)\{0,1\}://[^:@/]*:\([^@]*\)@.*#\2#p')
+    case $url_pw in
+      *%*) die "LATTICE_BOARD_URL has a percent-encoded password; set PGPASSWORD or use ~/.pgpass" ;;
+    esac
+    if [ -n "$url_pw" ]; then
+      PGPASSWORD=$url_pw
+      export PGPASSWORD
+    fi
+    BOARD_URL=$(printf '%s\n' "$LATTICE_BOARD_URL" | sed 's#^\(postgres\(ql\)\{0,1\}://[^:@/]*\):[^@]*@#\1@#')
+    ;;
+  *) BOARD_URL=$LATTICE_BOARD_URL ;;
+esac
+
+AUTHOR=${BOARD_AUTHOR:-}
+cmd=$1
+shift
+case $cmd in
+  add | claim | note | done | decide) need_author ;;
+esac
+
+case $cmd in
+  init) cmd_init "$@" ;;
+  add) cmd_add "$@" ;;
+  list) cmd_list "$@" ;;
+  show) cmd_show "$@" ;;
+  claim) cmd_claim "$@" ;;
+  note) cmd_note "$@" ;;
+  done) cmd_done "$@" ;;
+  decide) cmd_decide "$@" ;;
+  since) cmd_since "$@" ;;
+  head) cmd_head "$@" ;;
+  help | -h | --help) usage ;;
+  *) usage >&2; exit 1 ;;
+esac

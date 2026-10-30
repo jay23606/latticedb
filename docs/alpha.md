@@ -241,6 +241,18 @@ another principal, and an agent that reads it is exposed to prompt injection. La
 or label stored text, so an agent client has to treat tool and query output as untrusted input and keep
 its write access as narrow as the task allows (grant only the tables it needs).
 
+### A task board over psql
+
+[`integrations/board`](../integrations/board/CONVENTIONS.md) is a shared task board for one maintainer
+agent and its subagents: tasks with claims, progress notes and decisions, and an event log that agents
+poll with `board since`. It is a POSIX shell helper and a schema, and it uses only the alpha SQL subset
+through `psql`. There is no push: agents poll.
+
+`integrations/board/test.sh` starts its own `latticed` on a free loopback port, has three claimers race
+for each of five tasks, checks a hostile title, restarts the server on the same data directory and
+removes what it made. The conventions file lists the subset limits the board works around. The board has no CI
+job yet; run the script by hand with `LATTICE_BIN_DIR` set to the binaries under test.
+
 ## Experimental and unstable
 
 - The change-feed and sync encodings (RFC 0009 and 0010, ADR 0023 and 0024) are published without an

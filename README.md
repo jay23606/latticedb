@@ -39,6 +39,9 @@ write-ahead log that survives crashes.
 | Schema language | LSL parser, validator, formatter, compatibility checker, typed-row codec |
 | Tooling | `lattice doctor`, results ledger, scorecards, benchmark gates, a risk gate and serial merger for pull requests |
 
+A shell helper and schema for a shared agent task board (claims, notes, decisions, a polled event log)
+run over `psql` are in [integrations/board](integrations/board/CONVENTIONS.md).
+
 ## What is not there yet
 
 - `ALTER TABLE`, and column names with capital letters (a quoted identifier such as `"Id"` is refused,
