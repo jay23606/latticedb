@@ -87,12 +87,17 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
 
+    // The counters are process-wide and the test threads run in parallel. Each test raises signals
+    // and reads a counter that the other test moves, so the two tests take this lock to run one at a time.
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     unsafe extern "C" {
         fn raise(signum: i32) -> i32;
     }
 
     #[test]
     fn each_signal_is_counted_once() {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         install_stop_handlers().unwrap();
         install_stop_handlers().unwrap();
         let before = stop_signals_received();
@@ -106,6 +111,7 @@ mod tests {
 
     #[test]
     fn a_reload_request_is_counted_apart_from_stop_signals() {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         install_reload_handler().unwrap();
         let stops = stop_signals_received();
         let before = reload_signals_received();
