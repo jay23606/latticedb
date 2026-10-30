@@ -19,7 +19,7 @@ VERSION="0.1.0-alpha.1"
 # cannot leak into a test and a missing gh is a real "gh is not installed".
 mk_toolpath() { # dir
   mkdir -p "$1"
-  for t in curl tar awk grep sed head mktemp rm mkdir cp chmod mv cat sha256sum shasum; do
+  for t in curl tar gzip awk grep sed head mktemp rm mkdir cp chmod mv cat sha256sum shasum; do
     p=$(command -v "$t" 2>/dev/null) || continue
     case "$p" in /*) ln -s "$p" "$1/$t" ;; esac
   done
@@ -238,6 +238,14 @@ install_uses_the_first_sha256sums_line_for_the_archive() {
   expect_status 0
 }
 
+install_names_a_missing_gzip_before_downloading() {
+  setup
+  rm -f "$tp/gzip"
+  FAKE_UNAME_S=Linux FAKE_UNAME_M=x86_64 run_install --prefix "$tmp/p" "$VERSION"
+  expect_nonzero
+  expect_out "gzip is required"
+}
+
 install_defaults_to_home_local_bin_and_leaves_profiles_alone() {
   setup
   make_release "$tmp/rel" x86_64-unknown-linux-gnu
@@ -264,6 +272,7 @@ for t in \
   install_rejects_a_version_with_a_newline \
   install_ignores_sha256sums_entries_that_only_contain_the_archive_name \
   install_uses_the_first_sha256sums_line_for_the_archive \
+  install_names_a_missing_gzip_before_downloading \
   install_defaults_to_home_local_bin_and_leaves_profiles_alone
 do
   if ( "$t" ); then echo "ok   $t"; else echo "FAIL $t"; failed=$((failed + 1)); fi

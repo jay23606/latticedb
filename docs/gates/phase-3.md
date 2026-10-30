@@ -92,7 +92,7 @@ is known to pass. The image still copies the same binaries into `ubuntu:24.04`. 
 
 Install script (issue #585, part of the Alpha 0.1 definition #567, no exit criterion): `scripts/install.sh` installs
 `lattice` and `latticed` for the three release targets after a SHA256SUMS check and, when `gh` is present, a
-`gh attestation verify`. `scripts/test_install.sh` runs 15 offline tests against a fake release directory (flipped-byte
+`gh attestation verify`. `scripts/test_install.sh` runs 16 offline tests against a fake release directory (flipped-byte
 checksum refusal, unknown-platform refusal, missing checksum entry, attestation pass and fail through a `gh` shim,
 newest pre-release lookup, no profile edits); the `install-script` workflow runs it with shellcheck. Not verified:
 the script against a real published release or its real attestation (`gh attestation verify` was only exercised through a

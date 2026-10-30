@@ -68,6 +68,8 @@ esac
 
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v tar >/dev/null 2>&1 || die "tar is required"
+# GNU tar runs gzip as a child process to read a .tar.gz.
+command -v gzip >/dev/null 2>&1 || die "gzip is required"
 if command -v sha256sum >/dev/null 2>&1; then
   sha256() { sha256sum "$1" | awk '{print $1}'; }
 elif command -v shasum >/dev/null 2>&1; then
