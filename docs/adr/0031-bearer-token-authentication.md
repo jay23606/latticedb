@@ -76,8 +76,8 @@ lattice-bearer-tokens v1
   the older one must expire no later than seven days after the newer one was created. The program that
   rotates sets that expiry. A third active token, or an overlap with no end, is a refused file. An expired token still counts toward the two-active limit until it is revoked. Equal creation seconds are ordered by id.
 
-Location and handling. The host will name the file on its command line (a `--bearer-tokens FILE` flag, like
-`--scram-verifiers`, added with the gateway; no flag exists yet) and the file lives outside the data directory, so a copy or backup of the data does not carry
+Location and handling. The host will name the file on its command line (`--gateway-tokens FILE`, which the
+gateway of #524 added beside `--scram-verifiers`) and the file lives outside the data directory, so a copy or backup of the data does not carry
 credentials. On Unix it must be a regular file with mode 0600 (0400 is accepted) in a directory that group
 and others cannot write to (create with 0700); `latticed::load_credential_store` refuses anything broader, and the gateway calls it at start and at every
 reload. Only mode bits are checked: file ownership is not. Writers replace the file atomically: a 0600
@@ -134,7 +134,7 @@ Decided here, implemented and tested in [#577](https://github.com/moncifem/latti
 - A revoked token never authenticates (the line is `revoked`); an expired one never does after its expiry.
 - The gateway reloads the file at most 5 seconds after it changes (a stat of path, modification time and
   size each interval) and on SIGHUP. Restart-only is not acceptable for revocation.
-- A reload that fails (permissions, parse) keeps the last good store and reports an error event. If reloads
+- A reload that fails (permissions, parse) keeps the last good store and reports an error event (until the security event log of #530 exists, that report is a stderr line naming the file and the reason, never a token). If reloads
   keep failing for 10 minutes, token authentication is refused until a good file loads, so a typo in a
   revocation edit cannot keep the old token alive indefinitely.
 - Every live connection records its account and token id. After each reload, and at a token's expiry,
@@ -192,9 +192,11 @@ Decided here, implemented and tested in [#577](https://github.com/moncifem/latti
 - The failure limiter fails open when its table is full, and clients behind one NAT share a budget.
 - Between a revocation edit and the next reload (up to 5 seconds, longer if reloads fail) the token still
   works. That window is the price of not restarting.
-- The gateway does not exist yet. Until [#524](https://github.com/moncifem/latticedb/issues/524) and
-  [#577](https://github.com/moncifem/latticedb/issues/577) land, nothing calls the verifier: this change
-  adds the credential format, the verifier, token generation and the file I/O, and no listener uses them.
+- The gateway transport is `latticed::ws` ([#524](https://github.com/moncifem/latticedb/issues/524), part 1).
+  Its TLS and connection bounds are [#578](https://github.com/moncifem/latticedb/issues/578) and are not
+  done, so a token travels over plaintext on loopback only. Reload, revocation and expiry of live connections
+  are implemented in #577 and tested over real sockets. Reloads are not an audit trail: the security event log
+  (#530) does not exist yet.
 
 ## Consequences
 

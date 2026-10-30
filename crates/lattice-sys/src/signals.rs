@@ -12,16 +12,21 @@
 //! while the `sigaction` struct layout is not; on those targets it installs a persistent handler.
 //! The module is built only for Linux and macOS: System V `signal()` semantics (illumos) reset the
 //! handler after the first delivery, which would break the second-signal rule.
+//!
+//! SIGHUP is a separate counter for a reload request (the bearer-token file, ADR 0031). It is installed
+//! only when a caller asks for it, so a process that never asks keeps the default action of SIGHUP.
 
 use std::io;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+const SIGHUP: i32 = 1;
 const SIGINT: i32 = 2;
 const SIGTERM: i32 = 15;
 /// `SIG_ERR`, the all-ones value `signal(2)` returns on failure.
 const SIG_ERR: usize = usize::MAX;
 
 static STOP_SIGNALS: AtomicU32 = AtomicU32::new(0);
+static RELOAD_SIGNALS: AtomicU32 = AtomicU32::new(0);
 
 unsafe extern "C" {
     fn signal(signum: i32, handler: usize) -> usize;
@@ -55,6 +60,28 @@ pub fn stop_signals_received() -> u32 {
     STOP_SIGNALS.load(Ordering::SeqCst)
 }
 
+extern "C" fn on_reload_signal(_signum: i32) {
+    RELOAD_SIGNALS.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Installs a counting handler for SIGHUP, the reload request. Calling it again is harmless.
+pub fn install_reload_handler() -> io::Result<()> {
+    let handler = on_reload_signal as extern "C" fn(i32) as usize;
+    // SAFETY: the same contract as `install_stop_handlers`: `signal` with this signature, and a handler
+    // that only performs an atomic add and lives for the whole program.
+    let previous = unsafe { signal(SIGHUP, handler) };
+    if previous == SIG_ERR {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// How many SIGHUP reload requests have arrived since [`install_reload_handler`].
+#[must_use]
+pub fn reload_signals_received() -> u32 {
+    RELOAD_SIGNALS.load(Ordering::SeqCst)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -75,5 +102,16 @@ mod tests {
             assert_eq!(unsafe { raise(signum) }, 0);
             assert_eq!(stop_signals_received(), before + n as u32 + 1);
         }
+    }
+
+    #[test]
+    fn a_reload_request_is_counted_apart_from_stop_signals() {
+        install_reload_handler().unwrap();
+        let stops = stop_signals_received();
+        let before = reload_signals_received();
+        // SAFETY: as in `each_signal_is_counted_once`: the handler has run when `raise` returns.
+        assert_eq!(unsafe { raise(SIGHUP) }, 0);
+        assert_eq!(reload_signals_received(), before + 1);
+        assert_eq!(stop_signals_received(), stops);
     }
 }

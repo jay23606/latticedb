@@ -181,12 +181,11 @@ latticed --auth scram-tls --scram-verifiers /secure/lattice/scram-verifiers \
 `--read`, `--write` and `--ddl` take comma-separated table names (`*` is every table) and become the
 `tables:` line of `account-policies` (`alice<TAB>tables: docs=r, work_items=rw`); none means `deny-all`.
 `scram-verifiers` appears with the first `account add` because `latticed` refuses an empty verifier file,
-and is removed with the last account. `bearer-tokens` holds only salted hashes (ADR 0031); no `latticed`
-flag reads it yet (the gateway, #524). A second active token needs `--rotate`, which ends the older one after
+and is removed with the last account. `bearer-tokens` holds only salted hashes (ADR 0031); `latticed --gateway-tokens` reads it. A second active token needs `--rotate`, which ends the older one after
 `--overlap-hours` (default 24, at most 168). `remove` revokes the account's tokens but the revoked lines
 stay in the file so their ids are never reissued; `token prune [--older-than-days N]` (default 30) deletes revoked and expired entries older than N days, and `token create` prunes entries older than 30 days by itself when the file holds its maximum of 1024. A token past its expiry counts as expired, not active, and no longer blocks a new token. Windows is refused until the ACL check (#577) exists.
 
-**What a running `latticed` sees.** `latticed` reads these files when it starts and has no reload yet (bearer-token reload is #577). `account remove`, `token revoke` and a changed password therefore take effect after a restart, not on the running process. SCRAM verifiers use 4096 PBKDF2 iterations (ADR 0021), so a stolen `scram-verifiers` file is cheap to attack offline: keep it owner-only like a key and prefer the generated passwords. `--password-stdin` refuses a terminal because the typed password would echo; pipe it in. The tool wipes its own buffers for passwords, tokens and verifier text on a best-effort basis; what the terminal or the pipe does with the printed output is outside its control.
+**What a running `latticed` sees.** A running `latticed` with `--gateway-tokens` re-reads the bearer-token file within 5 seconds of a change, so `token revoke` and `account remove` close the revoked tokens' live gateway connections without a restart (#577). The SCRAM verifiers, the decoy secret and the `account-policies` file are read when `latticed` starts only: after a changed password, an account add or an account remove, restart it. SCRAM verifiers use 4096 PBKDF2 iterations (ADR 0021), so a stolen `scram-verifiers` file is cheap to attack offline: keep it owner-only like a key and prefer the generated passwords. `--password-stdin` refuses a terminal because the typed password would echo; pipe it in. The tool wipes its own buffers for passwords, tokens and verifier text on a best-effort basis; what the terminal or the pipe does with the printed output is outside its control.
 
 ```sh
 cargo run -p latticed -- --auth scram-tls --listen 127.0.0.1:5432 \
@@ -413,7 +412,10 @@ messages itself, over loopback trust and over verified TLS with SCRAM.
 can access (anything but mode 0600 or 0400), a directory they can write to, a file over 256 KiB and any
 malformed content, and on platforms without Unix mode bits it refuses every file until an ACL check exists
 (#577). The writer creates a 0600 temporary file next to the target, syncs it, renames it over the target
-and syncs the directory. `--gateway-tokens` loads the file at start.
+and syncs the directory. `--gateway-tokens` loads the file at start and then watches it (#577): a changed file is
+read at the next check, at most 1 second after the change (the library setting `credential_poll` is 1 ms to 5 s), and
+a file that does not load keeps the tokens in use. The first failed load of a run of failures is reported on stderr, with the path and the
+reason, never a token; a file that has not loaded for 10 minutes refuses every token until one loads.
 
 ## Sync gateway (WebSocket)
 
@@ -425,7 +427,7 @@ server names the gateway address.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--gateway-listen IP:PORT` | off | Enables the gateway. Needs `--data-dir`. A non-loopback address is refused: there is no TLS on this port yet (#578). |
-| `--gateway-tokens FILE` | none | Require `Authorization: Bearer lat_...` from this credential file (mode 0600). The connection is the token's account and its table grants (`--account-policies`, which this flag also allows with `--auth development-trust`). Without it the gateway serves the loopback development principal and only with `--auth development-trust`. |
+| `--gateway-tokens FILE` | none | Require `Authorization: Bearer lat_...` from this credential file (mode 0600), re-read within 5 seconds of a change and on SIGHUP (SIGHUP is caught only when this flag is set). A file that does not load keeps the tokens in use. SCRAM verifiers and policies are not re-read. The connection is the token's account and its table grants (`--account-policies`, which this flag also allows with `--auth development-trust`). Without it the gateway serves the loopback development principal and only with `--auth development-trust`. |
 | `--gateway-max-connections N` | 32 | Connections at once, including upgrades in progress (at most 8 of those). The next one gets `503`. |
 | `--gateway-handshake-timeout-ms N` | 5000 | One absolute budget from accept to the `101` response. |
 
@@ -436,9 +438,20 @@ the connection is. Reads wake on the executor's commit notifier and go through t
 the rest of the server; a fallback read every second means a lost wake costs latency only. The connection thread
 looks at the wake between socket reads of up to 20 ms, so a wake adds up to that. A client that stops reading is
 disconnected at the write budget; resume by subscribing again with the last acknowledged cursor. Not done here:
-TLS, an idle deadline (#578), byte budgets per principal (#529), the security event log (#530) and token reload
-and rotation (#577; the embedding API has `GatewayHandle::replace_credentials`, which closes connections whose
-token no longer verifies).
+TLS, an idle deadline (#578), byte budgets per principal (#529) and the security event log (#530). Token reload,
+revocation of live connections and expiry are done (#577): a revoked or expired token's connection is closed with
+1008 after the change is read, and a token that expires is closed at its expiry (within the 5 second revalidation).
+Rotation is the credential file's rule: two active tokens per account, the older ending at most seven days after the
+newer was created. Not done: the Windows ACL check (the file is refused on Windows).
+
+Notes on the reload (#577): SIGHUP through the real `latticed` process is not verified end to end; the evidence is the
+`lattice-sys` counter test and the unit test with a bumped request count. The SIGHUP handler is installed after the
+server and the gateway have started (`main.rs`, just before the startup banner), so a SIGHUP in that gap ends the process
+with the default action. With `--gateway-tokens` set, the daemon no longer dies on terminal hangup, because SIGHUP is caught
+after start. A header-only credential file parses as an empty store and revokes every token (fail-closed; the writer's
+atomic rename makes a torn file unlikely, but truncating the file by hand revokes everything). The reload reads the file
+on the gateway's accept thread (bounded, `O_NONBLOCK`), so a hung network filesystem holding the file would stall accepts;
+keep the credential directory on local storage.
 
 
 ## MCP tool backend

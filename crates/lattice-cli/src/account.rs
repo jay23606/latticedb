@@ -7,7 +7,7 @@
 //! | `scram-verifiers` | `--scram-verifiers` | `account TAB SCRAM-SHA-256$4096:salt$StoredKey:ServerKey`, never a password |
 //! | `scram-decoy-secret` | `--scram-decoy-secret` | 32 random bytes that make unknown accounts look like known ones |
 //! | `account-policies` | `--account-policies` | `account TAB deny-all` or `account TAB tables: t=rw, ...` |
-//! | `bearer-tokens` | the gateway (ADR 0031; no flag exists yet) | salted token hashes, never a token |
+//! | `bearer-tokens` | `latticed --gateway-tokens` (ADR 0031) | salted token hashes, never a token |
 //!
 //! Secrets are never accepted on the command line and never logged: a password comes from stdin or
 //! is generated, and is printed once on standard output; a token is generated and printed once.
@@ -72,7 +72,7 @@ ASCII characters) or generated; it is printed once and never stored. `token crea
 token once; only a salted hash is stored. A second active token needs --rotate, which ends the older
 one after --overlap-hours (default 24, at most 168). `remove` deletes the account and revokes its
 tokens. Passwords and tokens are never accepted as arguments. Files are created with mode 0600 and
-existing files are never overwritten by `init`. `token prune` deletes revoked and expired entries older than N days (default 30; the store holds at most 1024 entries). Commands that change the directory take a lock on DIR/.lock and wait for each other. A running latticed does not notice changes: restart it after remove, token revoke or a password change. SCRAM verifiers use 4096 PBKDF2 iterations, so a stolen verifier file is cheap to attack offline: protect it like a key and use long random passwords (the generated ones are). --password-stdin refuses a terminal because it would echo; pipe the password in.
+existing files are never overwritten by `init`. `token prune` deletes revoked and expired entries older than N days (default 30; the store holds at most 1024 entries). Commands that change the directory take a lock on DIR/.lock and wait for each other. A running latticed with `--gateway-tokens` reads a changed bearer-token file within 5 seconds, so a revoke or a remove closes that account's live gateway connections without a restart. SCRAM verifiers and account policies are read at start only: restart latticed after a password change, an account add or an account remove. SCRAM verifiers use 4096 PBKDF2 iterations, so a stolen verifier file is cheap to attack offline: protect it like a key and use long random passwords (the generated ones are). --password-stdin refuses a terminal because it would echo; pipe the password in.
 ";
 
 /// Everything a command needs from outside: stdin, randomness, the clock.
@@ -418,7 +418,7 @@ fn flags_text(dir: &Dir) -> String {
     let absolute = std::path::absolute(&dir.0).unwrap_or_else(|_| dir.0.clone());
     let at = |name: &str| absolute.join(name).display().to_string();
     format!(
-        "latticed flags:\n  --auth scram-tls --scram-verifiers {} --scram-decoy-secret {} \\\n  --account-policies {} --tls-cert CERT.pem --tls-key KEY.pem\nbearer tokens: {} (no latticed flag reads it yet)\n",
+        "latticed flags:\n  --auth scram-tls --scram-verifiers {} --scram-decoy-secret {} \\\n  --account-policies {} --tls-cert CERT.pem --tls-key KEY.pem\nbearer tokens: {} (latticed --gateway-tokens; reloaded within 5 seconds)\n",
         at(VERIFIERS),
         at(DECOY),
         at(POLICIES),

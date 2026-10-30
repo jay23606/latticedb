@@ -170,6 +170,33 @@ pub fn install_stop_signal_handlers() -> io::Result<()> {
     }
 }
 
+/// Installs the SIGHUP counter that asks for a credential reload (ADR 0031). A no-op where there are
+/// no unix signals. Called only when a credential file is configured: without it SIGHUP keeps its
+/// default action.
+pub fn install_reload_signal_handler() -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        lattice_sys::signals::install_reload_handler()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Ok(())
+    }
+}
+
+/// How many reload requests (SIGHUP) have arrived since [`install_reload_signal_handler`].
+#[must_use]
+pub fn reload_signals_received() -> u32 {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        lattice_sys::signals::reload_signals_received()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        0
+    }
+}
+
 /// How many stop signals have arrived since [`install_stop_signal_handlers`].
 #[must_use]
 pub fn stop_signals_received() -> u32 {

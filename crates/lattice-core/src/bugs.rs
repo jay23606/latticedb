@@ -226,6 +226,10 @@ planted_bugs! {
     /// A live gateway connection is never checked again against the current credential store, so a
     /// revoked token keeps its stream (authentication).
     GatewayRevalidationSkipped,
+    /// The bearer verifier accepts a token whose line says `revoked`, so a revocation written to the
+    /// credential file never takes effect, neither for new upgrades nor for live connections
+    /// (authentication; issue #577).
+    RevokedTokenStillAccepted,
     /// The MCP tool backend runs a call that carries a caller other than the one derived from its
     /// bound principal, instead of refusing it (confused deputy: a client string names the
     /// identity).
@@ -357,7 +361,7 @@ impl Bug {
         Bug::GrantTableMatchByPrefix,
     ];
     /// Bearer-token defect, detected by the prefix witness in `lattice-api::bearer`.
-    pub const BEARER: [Bug; 1] = [Bug::TokenAcceptsPrefix];
+    pub const BEARER: [Bug; 2] = [Bug::TokenAcceptsPrefix, Bug::RevokedTokenStillAccepted];
 
     /// Credential tool defects (issue 582), caught by the tests of `lattice-api::bearer`,
     /// `latticed::files` and `lattice-cli::account`.

@@ -105,6 +105,7 @@ pub lattice_core::bugs::Bug::NotifyBeforeDurable
 pub lattice_core::bugs::Bug::NotifyWaitIgnoresPublished
 pub lattice_core::bugs::Bug::RecoveryDropsLastRecord
 pub lattice_core::bugs::Bug::RequiredGuardOmitted
+pub lattice_core::bugs::Bug::RevokedTokenStillAccepted
 pub lattice_core::bugs::Bug::RotateHeaderNotSynced
 pub lattice_core::bugs::Bug::RotateWithoutDirSync
 pub lattice_core::bugs::Bug::RowConflictCheckSkipped
@@ -141,7 +142,7 @@ pub const lattice_core::bugs::Bug::ACCOUNT_TOOL: [lattice_core::bugs::Bug; 4]
 pub const lattice_core::bugs::Bug::ADMISSION: [lattice_core::bugs::Bug; 3]
 pub const lattice_core::bugs::Bug::ALL: [lattice_core::bugs::Bug; 21]
 pub const lattice_core::bugs::Bug::AUTHOR: [lattice_core::bugs::Bug; 3]
-pub const lattice_core::bugs::Bug::BEARER: [lattice_core::bugs::Bug; 1]
+pub const lattice_core::bugs::Bug::BEARER: [lattice_core::bugs::Bug; 2]
 pub const lattice_core::bugs::Bug::CATALOG_INDEX: [lattice_core::bugs::Bug; 2]
 pub const lattice_core::bugs::Bug::CRDT: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::CRDT_PEER: [lattice_core::bugs::Bug; 9]

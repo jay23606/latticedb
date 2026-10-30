@@ -10,16 +10,20 @@
     clippy::disallowed_types
 )]
 
-use lattice_api::bearer::{CredentialStore, issue};
+use lattice_api::bearer::{CredentialStore, TokenId, issue};
 use lattice_api::exec_host::{Grant, HostLimits, PolicyTable};
 use lattice_api::sync::{self, ErrorCode, Event, Message};
 use lattice_api::websocket::{self, Opcode, close_code};
 use lattice_seams::OsRng;
+#[cfg(unix)]
+use latticed::load_credential_store;
+#[cfg(unix)]
+use latticed::write_credential_store;
 use latticed::ws::{GatewayAuth, GatewayConfig};
 use latticed::{ServerConfig, SqlConfig, SqlServer};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 struct Tokens {
@@ -34,6 +38,8 @@ struct Fixture {
     ws: SocketAddr,
     tokens: Tokens,
     dir: PathBuf,
+    /// The directory of the credential file, when the test serves tokens from one.
+    creds: Option<PathBuf>,
 }
 
 impl Drop for Fixture {
@@ -42,6 +48,9 @@ impl Drop for Fixture {
             let _ = server.shutdown();
         }
         let _ = std::fs::remove_dir_all(&self.dir);
+        if let Some(creds) = &self.creds {
+            let _ = std::fs::remove_dir_all(creds);
+        }
     }
 }
 
@@ -61,18 +70,45 @@ fn store_and_tokens() -> (CredentialStore, Tokens) {
 }
 
 fn start(name: &str, tune: impl FnOnce(&mut GatewayConfig)) -> Fixture {
+    start_gateway(name, false, tune).0
+}
+
+/// A gateway whose tokens come from a credential file (mode 0600 in a 0700 directory). The test
+/// edits the file; the gateway has to notice on its own.
+#[cfg(unix)]
+fn start_file(name: &str, tune: impl FnOnce(&mut GatewayConfig)) -> (Fixture, PathBuf) {
+    let (fixture, file) = start_gateway(name, true, tune);
+    (fixture, file.expect("a credential file was requested"))
+}
+
+fn start_gateway(
+    name: &str,
+    from_file: bool,
+    tune: impl FnOnce(&mut GatewayConfig),
+) -> (Fixture, Option<PathBuf>) {
     let dir = std::env::temp_dir().join(format!("latticed-ws-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let (store, tokens) = store_and_tokens();
     // carol has a token but no entry in the policy file, so she is denied everything.
     let accounts =
         PolicyTable::parse_accounts("alice\ttables: *=rwd\nbob\ttables: notes=r\n").unwrap();
+    let (auth, creds, file) = if from_file {
+        let (creds, path) = credential_file(name, &store);
+        (
+            GatewayAuth::BearerFile(path.clone()),
+            Some(creds),
+            Some(path),
+        )
+    } else {
+        (GatewayAuth::Bearer(store), None, None)
+    };
     let mut gateway = GatewayConfig {
         address: SocketAddr::from(([127, 0, 0, 1], 0)),
-        auth: GatewayAuth::Bearer(store),
+        auth,
         slice: Duration::from_millis(10),
         fallback_poll: Duration::from_millis(50),
         revalidate_every: Duration::from_millis(100),
+        credential_poll: Duration::from_millis(50),
         failure_limit: 3,
         batch_events: 3,
         ..GatewayConfig::default()
@@ -92,13 +128,53 @@ fn start(name: &str, tune: impl FnOnce(&mut GatewayConfig)) -> Fixture {
         Some(gateway),
     )
     .unwrap();
-    Fixture {
+    let fixture = Fixture {
         sql: server.local_addr(),
         ws: server.gateway_addr().unwrap(),
         server: Some(server),
         tokens,
         dir,
-    }
+        creds,
+    };
+    (fixture, file)
+}
+
+/// A fresh 0700 directory holding `bearer-tokens` with `store`; returns the directory and the file.
+#[cfg(unix)]
+fn credential_file(name: &str, store: &CredentialStore) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("latticed-ws-{name}-creds-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file = dir.join("bearer-tokens");
+    write_credential_store(&file, store).unwrap();
+    (dir, file)
+}
+
+#[cfg(not(unix))]
+fn credential_file(_name: &str, _store: &CredentialStore) -> (PathBuf, PathBuf) {
+    unreachable!("the credential file tests run on unix only (no ACL check yet, ADR 0031)")
+}
+
+/// Applies `edit` to the store the file holds, and writes it back the way the CLI does.
+#[cfg(unix)]
+fn edit_file(file: &Path, edit: impl FnOnce(&mut CredentialStore)) {
+    let mut store = load_credential_store(file).unwrap();
+    edit(&mut store);
+    write_credential_store(file, &store).unwrap();
+}
+
+/// The lookup id of a token: the 16 hex digits after `lat_`.
+fn id_of(token: &str) -> TokenId {
+    TokenId::parse(&token[4..20]).unwrap()
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 // --- a minimal PostgreSQL trust client, enough to run statements ---------------------------------
@@ -740,4 +816,98 @@ fn a_revoked_slow_reader_is_cut_between_frames_not_at_the_end_of_the_step() {
     );
     // The step was nowhere near done: 128 frames of 30 KB, of which the reader took far fewer.
     assert!(received < 3_000_000, "{received}");
+}
+
+// --- live credential changes (issue #577, ADR 0031) -------------------------------------------------
+//
+// The tests below edit the credential file on disk and expect the running gateway to act without a
+// restart. The periodic revalidation is set to a minute in the first one, so the only thing that can
+// close the connection in time is the file reload.
+
+#[cfg(unix)]
+#[test]
+fn revoked_token_closes_live_gateway_connections() {
+    let (f, file) = start_file("revoke-live", |g| {
+        g.revalidate_every = Duration::from_secs(60);
+    });
+    let mut alice = Ws::open(f.ws, &f.tokens.alice);
+    alice.hello("a");
+    let mut bob = Ws::open(f.ws, &f.tokens.bob);
+    bob.hello("b");
+    let alice_id = id_of(&f.tokens.alice);
+    edit_file(&file, |store| assert!(store.revoke(alice_id)));
+    // The reload is at most one poll interval away; the close follows at once.
+    assert_eq!(
+        alice.next(Duration::from_secs(5)),
+        Got::Close(Some(close_code::POLICY))
+    );
+    // Bob's token is still valid and his connection stays open.
+    assert_eq!(bob.next_opt(Duration::from_millis(400)), None);
+    // A new upgrade with the revoked token gets the same 401 as any unknown token.
+    let (status, head, _) = http(f.ws, request("/sync", &bearer(&f.tokens.alice)).as_bytes());
+    assert_eq!(status, 401, "{head}");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_expiring_token_closes_its_live_connection_at_the_expiry() {
+    let (f, file) = start_file("expire-live", |_| {});
+    let mut alice = Ws::open(f.ws, &f.tokens.alice);
+    alice.hello("a");
+    let alice_id = id_of(&f.tokens.alice);
+    let expires = unix_now() + 2;
+    edit_file(&file, |store| store.set_expiry(alice_id, expires).unwrap());
+    assert_eq!(
+        alice.next(Duration::from_secs(8)),
+        Got::Close(Some(close_code::POLICY))
+    );
+    // Not before the expiry second: a token that verifies is never cut early.
+    assert!(
+        unix_now() >= expires,
+        "closed before the token expired at {expires}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_broken_credential_file_keeps_the_tokens_in_use() {
+    let (f, file) = start_file("keep-live", |_| {});
+    let mut alice = Ws::open(f.ws, &f.tokens.alice);
+    alice.hello("a");
+    // A garbage file is refused (it is not an empty store, which would revoke everything): several
+    // polls pass and alice keeps her connection and her token.
+    std::fs::write(&file, b"not a credential file\n").unwrap();
+    assert_eq!(alice.next_opt(Duration::from_millis(600)), None);
+    let (status, head, _) = http(f.ws, request("/sync", &bearer(&f.tokens.alice)).as_bytes());
+    assert_eq!(status, 101, "{head}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_missing_credential_file_stops_the_start() {
+    let dir = std::env::temp_dir().join(format!("latticed-ws-missing-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let result = SqlServer::start_with_gateway(
+        ServerConfig {
+            address: SocketAddr::from(([127, 0, 0, 1], 0)),
+            ..ServerConfig::default()
+        },
+        SqlConfig {
+            data_dir: dir.join("data"),
+            policies: PolicyTable::new(Grant::AllowAll),
+            limits: HostLimits::default(),
+            allow_format_upgrade: false,
+        },
+        Some(GatewayConfig {
+            address: SocketAddr::from(([127, 0, 0, 1], 0)),
+            auth: GatewayAuth::BearerFile(dir.join("no-such-file")),
+            ..GatewayConfig::default()
+        }),
+    );
+    let message = match result {
+        Ok(_) => panic!("a gateway without its token file must not start"),
+        Err(error) => error.to_string(),
+    };
+    assert!(message.contains("no-such-file"), "{message}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

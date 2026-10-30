@@ -41,17 +41,24 @@
 //!
 //! # Credentials over time
 //!
-//! The store is loaded once. [`GatewayHandle::replace_credentials`] swaps it, and a live connection
-//! checks the header it presented against the current store every
-//! [`GatewayConfig::revalidate_every`]; if it no longer verifies for the same account the connection
-//! is closed with 1008. Reloading the file on a signal, a timer and rotation overlap are issue #577;
-//! nothing calls `replace_credentials` yet.
+//! With [`GatewayAuth::BearerFile`] the accept thread checks the credential file every
+//! [`GatewayConfig::credential_poll`] and reloads it when it changed, or when SIGHUP asked for a
+//! reload (issue #577, ADR 0031). A file that does not load keeps the store in use; after ten minutes
+//! of failed loads no token authenticates until one loads. [`GatewayHandle::replace_credentials`]
+//! swaps the store directly. Whatever the source, a live connection re-checks the header it presented
+//! against the current store when the store changes, and otherwise every
+//! [`GatewayConfig::revalidate_every`] (which also catches a token that expires). If it no longer
+//! verifies for the same account the connection is closed with 1008.
+//!
+//! Not reloaded: SCRAM verifiers, the decoy secret and the account policies (the PostgreSQL listener
+//! and the row policy read them at start only).
 //!
 //! # Not here
 //!
 //! TLS on the gateway port (so a non-loopback address is refused at start), idle deadlines, a byte
 //! budget per principal, the security event log and the same-port protocol sniff are #578, #529, #530.
 
+use crate::tokens::{CredentialWatch, Reload};
 use lattice_api::bearer::{CredentialStore, FailureLimiter, verify_bearer};
 use lattice_api::principal::Principal;
 use lattice_api::subscribe::{CloseReason, EventSource, HostConfig, Output, SubscriptionHost};
@@ -63,11 +70,15 @@ use lattice_api::websocket::{
 use lattice_core::bugs::{self, Bug};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
+
+/// A credential file that has not loaded for this long refuses every token until it loads (ADR 0031).
+pub const REFUSE_AFTER: Duration = Duration::from_secs(600);
 
 /// The only request target the gateway upgrades. Other routes (the MCP endpoint of issue #527) will
 /// be added beside it, so an unknown path is `404`, not a fallback to the sync protocol.
@@ -127,8 +138,12 @@ pub enum GatewayAuth {
     /// No credential: the connection is the fixed development principal (ADR 0026). The listener
     /// refuses to bind a non-loopback address in this mode.
     LocalDevelopment,
-    /// An `Authorization: Bearer` token from this store (ADR 0031).
+    /// An `Authorization: Bearer` token from this store (ADR 0031). The store is fixed: nothing reads
+    /// a file, and [`GatewayHandle::replace_credentials`] is the only way to change it.
     Bearer(CredentialStore),
+    /// An `Authorization: Bearer` token from this credential file, which is read at start (the start
+    /// fails if it does not load) and then watched: see [`GatewayConfig::credential_poll`].
+    BearerFile(PathBuf),
 }
 
 /// Settings of the gateway listener.
@@ -158,8 +173,13 @@ pub struct GatewayConfig {
     /// A connection reads the feed at least this often even when the wake token did not move, so a
     /// lost wake costs latency only.
     pub fallback_poll: Duration,
-    /// How often a live connection is checked against the current credential store.
+    /// How often a live connection is checked against the current credential store when nothing
+    /// replaced the store. A token that expires is therefore closed within this interval.
     pub revalidate_every: Duration,
+    /// For [`GatewayAuth::BearerFile`], how often the file is checked, `1 ms..=5 s` (ADR 0031 bounds
+    /// the reload at 5 seconds). A change is loaded at the first check after it, and a revoked
+    /// connection is closed at once after that.
+    pub credential_poll: Duration,
     /// Authentication failures per client address within `failure_window` before further attempts
     /// are refused with `429`.
     pub failure_limit: usize,
@@ -190,6 +210,7 @@ impl Default for GatewayConfig {
             slice: Duration::from_millis(20),
             fallback_poll: Duration::from_secs(1),
             revalidate_every: Duration::from_secs(5),
+            credential_poll: Duration::from_secs(1),
             failure_limit: 10,
             failure_window: Duration::from_secs(60),
             max_subscriptions: 16,
@@ -229,6 +250,11 @@ impl GatewayConfig {
         }
         if self.slice.is_zero() || self.slice > Duration::from_secs(1) {
             return bad("gateway slice must be 1 ms to 1 s");
+        }
+        if self.credential_poll < Duration::from_millis(1)
+            || self.credential_poll > Duration::from_secs(5)
+        {
+            return bad("gateway credential poll must be 1 ms to 5 s");
         }
         if self.failure_limit == 0 {
             return bad("gateway failure limit must be positive");
@@ -485,6 +511,10 @@ fn unauthorized() -> Vec<u8> {
 struct Shared {
     cfg: GatewayConfig,
     credentials: Mutex<Arc<CredentialStore>>,
+    /// Bumped after every store change; a live connection re-checks its token when it moves.
+    generation: AtomicU64,
+    /// The credential file, for [`GatewayAuth::BearerFile`].
+    watch: Option<Mutex<CredentialWatch>>,
     bearer: bool,
     counters: Arc<Counters>,
     gate: AuthGate,
@@ -500,6 +530,46 @@ impl Shared {
 
     fn store(&self) -> Arc<CredentialStore> {
         Arc::clone(&locked(&self.credentials))
+    }
+
+    fn install(&self, store: CredentialStore) {
+        *locked(&self.credentials) = Arc::new(store);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Looks at the credential file once its poll interval has passed and applies what it found. The
+    /// accept thread calls this on every turn, so a stopped gateway stops reloading too.
+    // The stderr line is the only report of a reload until the security event log (#530) exists. It
+    // names the file and the reason, never a token.
+    #[allow(clippy::print_stderr)]
+    fn reload_credentials(&self) {
+        let Some(watch) = &self.watch else {
+            return;
+        };
+        let outcome = locked(watch).check(Instant::now(), crate::stop::reload_signals_received());
+        match outcome {
+            None => {}
+            Some(Reload::Loaded(store)) => {
+                self.install(store);
+                let path = locked(watch).path().display().to_string();
+                eprintln!("latticed: bearer-token file {path} reloaded");
+            }
+            // The reason is an I/O or content error that names no token; the operator sees it here
+            // until the security event log (issue #530) exists.
+            Some(Reload::Kept(error)) => {
+                let path = locked(watch).path().display().to_string();
+                eprintln!(
+                    "latticed: bearer-token file {path} did not load, keeping the tokens in use: {error}"
+                );
+            }
+            Some(Reload::Refused) => {
+                self.install(CredentialStore::empty());
+                let path = locked(watch).path().display().to_string();
+                eprintln!(
+                    "latticed: bearer-token file {path} has not loaded for ten minutes; refusing every bearer token until it does"
+                );
+            }
+        }
     }
 }
 
@@ -527,9 +597,19 @@ impl GatewayHandle {
         F: Fn() -> S + Send + Sync + 'static,
     {
         config.validate()?;
-        let (store, bearer) = match &config.auth {
-            GatewayAuth::LocalDevelopment => (CredentialStore::empty(), false),
-            GatewayAuth::Bearer(store) => (store.clone(), true),
+        let (store, bearer, watch) = match &config.auth {
+            GatewayAuth::LocalDevelopment => (CredentialStore::empty(), false, None),
+            GatewayAuth::Bearer(store) => (store.clone(), true, None),
+            GatewayAuth::BearerFile(path) => {
+                let (watch, store) = CredentialWatch::open(
+                    path,
+                    config.credential_poll,
+                    REFUSE_AFTER,
+                    crate::stop::reload_signals_received(),
+                )
+                .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+                (store, true, Some(Mutex::new(watch)))
+            }
         };
         let listener = TcpListener::bind(config.address)?;
         listener.set_nonblocking(true)?;
@@ -538,6 +618,8 @@ impl GatewayHandle {
             counters: Counters::new(config.max_connections, config.max_handshakes),
             gate: AuthGate::new(config.failure_limit, config.failure_window),
             credentials: Mutex::new(Arc::new(store)),
+            generation: AtomicU64::new(0),
+            watch,
             bearer,
             epoch: Instant::now(),
             stopping: AtomicBool::new(false),
@@ -570,15 +652,14 @@ impl GatewayHandle {
         self.acceptor.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
-    /// Replaces the credential store. Live connections are checked against it within
-    /// [`GatewayConfig::revalidate_every`]: a token that no longer verifies for its account closes
-    /// the connection with 1008. Returns false (and changes nothing) when the gateway does not use
-    /// bearer tokens.
+    /// Replaces the credential store. Live connections are checked against it at once: a token that
+    /// no longer verifies for its account closes the connection with 1008. Returns false (and changes
+    /// nothing) when the gateway does not use bearer tokens.
     pub fn replace_credentials(&self, store: CredentialStore) -> bool {
         if !self.shared.bearer {
             return false;
         }
-        *locked(&self.shared.credentials) = Arc::new(store);
+        self.shared.install(store);
         true
     }
 
@@ -620,6 +701,7 @@ where
         if shared.stopping.load(Ordering::Acquire) {
             break Ok(());
         }
+        shared.reload_credentials();
         workers.retain_mut(|worker| {
             if worker.thread.is_finished() {
                 // A panicked connection ends only itself.
@@ -781,6 +863,7 @@ fn serve<S: EventSource>(
         seen: 0,
         last_poll: Instant::now(),
         last_check: Instant::now(),
+        checked_generation: None,
         deadline: None,
     }
     .run();
@@ -915,6 +998,9 @@ struct Live<'a, S: EventSource> {
     seen: u64,
     last_poll: Instant,
     last_check: Instant,
+    /// The store generation the last credential check ran against; `None` until the first check, so
+    /// a connection is checked as soon as it starts.
+    checked_generation: Option<u64>,
     /// One absolute deadline for everything a step writes; `None` outside a step.
     deadline: Option<Instant>,
 }
@@ -979,9 +1065,14 @@ impl<S: EventSource> Live<'_, S> {
             return Some((close_code::GOING_AWAY, "server stopping"));
         }
         let header = self.credential.as_ref()?;
-        if self.last_check.elapsed() < self.shared.cfg.revalidate_every {
+        // The generation is read before the store, so a change made after this read is seen at the
+        // next turn. A store that changed since the last check is checked now, not at the interval.
+        let generation = self.shared.generation.load(Ordering::Acquire);
+        let changed = self.checked_generation != Some(generation);
+        if !changed && self.last_check.elapsed() < self.shared.cfg.revalidate_every {
             return None;
         }
+        self.checked_generation = Some(generation);
         self.last_check = Instant::now();
         let store = self.shared.store();
         if still_valid(header, self.host.principal(), &store, unix_secs()) {
@@ -1367,6 +1458,31 @@ mod tests {
     }
 
     #[test]
+    fn a_planted_revoked_acceptance_is_caught_by_the_revalidation_witness() {
+        let (token, entry) = issue("alice", 1, None, &mut OsRng).unwrap();
+        let mut store = CredentialStore::empty();
+        store.insert(entry).unwrap();
+        let header = format!("Bearer {}", token.expose_secret());
+        let alice = match AuthGate::new(5, Duration::from_secs(60)).authenticate(
+            Ok(Some(header.as_bytes())),
+            &store,
+            ADDR,
+            0,
+            10,
+        ) {
+            Ok(Identity::Account(p, _)) => p,
+            _ => panic!("expected an account"),
+        };
+        assert!(store.revoke(token.id()));
+        assert!(!still_valid(header.as_bytes(), &alice, &store, 10));
+        bugs::clear();
+        bugs::enable(Bug::RevokedTokenStillAccepted);
+        let still = still_valid(header.as_bytes(), &alice, &store, 10);
+        bugs::clear();
+        assert!(still, "the planted bug must keep a revoked connection");
+    }
+
+    #[test]
     fn the_configuration_is_validated_before_binding() {
         let ok = GatewayConfig {
             address: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -1419,6 +1535,14 @@ mod tests {
             },
             GatewayConfig {
                 failure_limit: 0,
+                ..ok.clone()
+            },
+            GatewayConfig {
+                credential_poll: Duration::ZERO,
+                ..ok.clone()
+            },
+            GatewayConfig {
+                credential_poll: Duration::from_secs(6),
                 ..ok.clone()
             },
             GatewayConfig {

@@ -370,7 +370,11 @@ pub fn verify_bearer(
         got.as_slice().ct_eq(expected.as_slice()) & Choice::from(u8::from(entry.is_some()));
     match entry {
         Some(entry) if bool::from(matched) => match entry.status {
-            TokenStatus::Revoked => Err(AuthError::Rejected(RejectReason::Revoked)),
+            // Planted defect: a revoked line authenticates like an active one.
+            TokenStatus::Revoked if !bugs::active(Bug::RevokedTokenStillAccepted) => {
+                Err(AuthError::Rejected(RejectReason::Revoked))
+            }
+            TokenStatus::Revoked => Ok(Principal::account(&entry.account)),
             TokenStatus::Active if entry.expires.is_some_and(|at| now_secs >= at) => {
                 Err(AuthError::Rejected(RejectReason::Expired))
             }
@@ -1170,6 +1174,22 @@ mod tests {
         assert_eq!(sibling_accepted.unwrap(), Principal::account("dan"));
         // Defect off again: the sibling is refused, so the defect is what let it in.
         assert!(verify_bearer(Some(&header(&sibling)), &issued, 0).is_err());
+    }
+
+    #[test]
+    fn a_planted_revoked_acceptance_is_caught_by_the_witness() {
+        let revoked = LINE.replace("active", "revoked");
+        let store = store(&[&revoked]);
+        bugs::clear();
+        bugs::enable(Bug::RevokedTokenStillAccepted);
+        let accepted = verify_bearer(Some(&header(TOKEN)), &store, 0);
+        bugs::clear();
+        assert_eq!(accepted.unwrap(), Principal::account("alice"));
+        // Defect off again: the same revoked line is refused.
+        assert_eq!(
+            verify_bearer(Some(&header(TOKEN)), &store, 0),
+            Err(AuthError::Rejected(RejectReason::Revoked))
+        );
     }
 
     #[test]
