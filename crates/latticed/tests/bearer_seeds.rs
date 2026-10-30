@@ -1,9 +1,10 @@
 //! Replays the `bearer_verify` fuzz seeds through the same checks the fuzz target makes, so a seed
 //! that breaks an invariant fails in the pull request gate and not only in a scheduled fuzz run.
+// latticed may read files; lattice-api may not, which is why the replay lives here.
 #![allow(
     clippy::unwrap_used,
     clippy::indexing_slicing,
-    clippy::disallowed_methods // the test reads the seed files from the repository
+    clippy::disallowed_methods
 )]
 
 use lattice_api::bearer::{CredentialStore, STORE_HEADER, verify_bearer};
