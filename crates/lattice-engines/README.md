@@ -42,7 +42,11 @@ back, and recovery rebuilds it from the log. A commit without one, and all histo
 `authors.reg`, beside the log (experimental, not frozen, not part of the WAL): a `lattice-authors v1` line, then
 `A<TAB>id<TAB>name` (assign), `R<TAB>id<TAB>new name` (rename, id kept) and `D<TAB>id` (retire, id never reissued).
 A line is written and synced before its id is used; a torn last line is cut at open; a repeated live name, a repeated
-or decreasing id or a malformed line fails the open. The caller passes an authenticated account name, never client text.
+or decreasing id or a malformed line fails the open. The caller passes an authenticated account name, never client text. Names are byte exact (case sensitive, confusable names
+differ). A host calls `check_covers(store.account_authors())` at startup and refuses a registry that is missing or
+older than the retained log; ids vacuum already removed cannot be checked. Retirement is manual: nothing calls `rename`
+or `retire`, and re-adding a removed account name gives it the old id. Commits through `RowStore::commit_catalog`,
+the standalone catalog store and all older history have author 0. See [ADR 0029](../../docs/adr/0029-author-id-registry.md).
 
 ## Testing the checks
 

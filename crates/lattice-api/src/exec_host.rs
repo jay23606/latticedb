@@ -521,6 +521,38 @@ impl Drop for AliveGuard {
     }
 }
 
+/// Makes sure `authors.reg` exists and is not open to group or others: it maps account names to the
+/// ids that appear in history. It is created empty with mode 0600 (the data directory is 0700 as
+/// well); an existing file with wider permissions is refused, as `latticed` refuses a wide directory.
+fn private_registry_file(dir: &std::path::Path) -> Result<(), String> {
+    let path = dir.join("authors.reg");
+    if !path.exists() {
+        let mut io = StdIo::new(dir.to_path_buf());
+        io.append("authors.reg", b"")
+            .map_err(|e| format!("cannot create the author registry: {e}"))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path)
+            .map_err(|e| format!("cannot read the author registry: {e}"))?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            let empty = std::fs::metadata(&path).is_ok_and(|m| m.len() == 0);
+            if !empty {
+                return Err(format!(
+                    "{}: the author registry must not be accessible to group or others (mode 0600)",
+                    path.display()
+                ));
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| format!("cannot restrict the author registry: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 /// The running database actor. Share it behind an `Arc`; every method takes `&self`.
 pub struct ExecHost {
     requests: SyncSender<Request>,
@@ -564,6 +596,7 @@ impl ExecHost {
             // The registry of author ids lives beside the log. It is opened after the log, so the
             // directory lock is already held, and a damaged or colliding registry refuses startup.
             move || {
+                private_registry_file(&authors_dir)?;
                 AuthorRegistry::open(Box::new(StdIo::new(authors_dir)))
                     .map_err(|e| format!("cannot open the author registry: {e}"))
             },
@@ -619,12 +652,19 @@ impl ExecHost {
                     }
                 };
                 let authors = match open_authors() {
-                    Ok(authors) => Rc::new(RefCell::new(authors)),
+                    Ok(authors) => authors,
                     Err(e) => {
                         let _ = ready_tx.send(Err(e));
                         return;
                     }
                 };
+                // A registry that is missing or older than the log would hand out ids that history
+                // already carries. Refuse before serving anyone.
+                if let Err(e) = authors.check_covers(&db.store().account_authors()) {
+                    let _ = ready_tx.send(Err(format!("author registry: {e}")));
+                    return;
+                }
+                let authors = Rc::new(RefCell::new(authors));
                 let names = db.store().catalog().current();
                 let unattached: Vec<String> = names
                     .values()
@@ -2435,6 +2475,61 @@ reader	allow-all
             !error.contains("alice") && !error.contains("bob"),
             "{error}"
         );
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn registry_missing_or_older_than_log_refuses_startup() {
+        let path = dir("authors-behind");
+        let table = accounts(&["alice", "bob"]);
+        let host = ExecHost::start_dir(path.clone(), table.clone(), HostLimits::default()).unwrap();
+        as_account(&host, "alice", "CREATE TABLE t (id INT PRIMARY KEY)");
+        as_account(&host, "alice", "INSERT INTO t VALUES (1)");
+        as_account(&host, "bob", "INSERT INTO t VALUES (2)");
+        host.shutdown().unwrap();
+        drop(host);
+        let full = StdIo::new(path.clone()).read("authors.reg").unwrap();
+        let start = |p: &std::path::Path| {
+            ExecHost::start_dir(p.to_path_buf(), table.clone(), HostLimits::default())
+        };
+        // Control: the intact registry starts.
+        start(&path).unwrap().shutdown().unwrap();
+        // Older than the log: the second account's line is gone.
+        let header_and_first = {
+            let text = String::from_utf8(full.clone()).unwrap();
+            let end = text.match_indices('\n').nth(1).unwrap().0 + 1;
+            text.as_bytes()[..end].to_vec()
+        };
+        let mut io = StdIo::new(path.clone());
+        io.truncate("authors.reg", header_and_first.len() as u64)
+            .unwrap();
+        let error = start(&path).err().expect("started on an older registry");
+        assert!(error.contains("author registry"), "{error}");
+        // Missing altogether.
+        StdIo::new(path.clone()).remove("authors.reg").unwrap();
+        let error = start(&path).err().expect("started without a registry");
+        assert!(error.contains("older than the log"), "{error}");
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_registry_file_is_private_and_a_wide_one_with_data_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir("authors-mode");
+        let table = accounts(&["alice"]);
+        let host = ExecHost::start_dir(path.clone(), table.clone(), HostLimits::default()).unwrap();
+        as_account(&host, "alice", "CREATE TABLE t (id INT PRIMARY KEY)");
+        host.shutdown().unwrap();
+        drop(host);
+        let file = path.join("authors.reg");
+        let mode = |f: &std::path::Path| std::fs::metadata(f).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&file), 0o600);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let error = ExecHost::start_dir(path.clone(), table, HostLimits::default())
+            .err()
+            .expect("started on a world-readable registry");
+        assert!(error.contains("0600"), "{error}");
         let _ = std::fs::remove_dir_all(path);
     }
 }

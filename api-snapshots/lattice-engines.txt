@@ -1,6 +1,7 @@
 pub mod lattice_engines
 pub mod lattice_engines::authors
 pub enum lattice_engines::authors::AuthorError
+pub lattice_engines::authors::AuthorError::BehindLog
 pub lattice_engines::authors::AuthorError::Corrupt
 pub lattice_engines::authors::AuthorError::Corrupt::line: usize
 pub lattice_engines::authors::AuthorError::Full
@@ -23,6 +24,7 @@ pub struct lattice_engines::authors::AuthorRegistry
 impl lattice_engines::authors::AuthorRegistry
 pub fn lattice_engines::authors::AuthorRegistry::accounts(&self) -> impl core::iter::traits::iterator::Iterator<Item = (&str, u128)>
 pub fn lattice_engines::authors::AuthorRegistry::author_for_account(&mut self, &str) -> core::result::Result<u128, lattice_engines::authors::AuthorError>
+pub fn lattice_engines::authors::AuthorRegistry::check_covers(&self, &alloc::collections::btree::set::BTreeSet<u128>) -> core::result::Result<(), lattice_engines::authors::AuthorError>
 pub fn lattice_engines::authors::AuthorRegistry::id_of(&self, &str) -> core::option::Option<u128>
 pub fn lattice_engines::authors::AuthorRegistry::in_memory() -> Self
 pub fn lattice_engines::authors::AuthorRegistry::is_retired(&self, u128) -> bool
@@ -664,6 +666,7 @@ impl<'l, T: core::fmt::Debug> core::fmt::Debug for lattice_engines::store::Charg
 pub fn lattice_engines::store::Charged<'l, T>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct lattice_engines::store::RowStore<I: lattice_seams::Io, C: lattice_seams::Clock, R: lattice_seams::Rng>
 impl<I: lattice_seams::Io, C: lattice_seams::Clock, R: lattice_seams::Rng> lattice_engines::store::RowStore<I, C, R>
+pub fn lattice_engines::store::RowStore<I, C, R>::account_authors(&self) -> alloc::collections::btree::set::BTreeSet<u128>
 pub fn lattice_engines::store::RowStore<I, C, R>::applied_lsn(&self) -> u64
 pub fn lattice_engines::store::RowStore<I, C, R>::author_at(&self, u64) -> u128
 pub fn lattice_engines::store::RowStore<I, C, R>::begin(&self) -> lattice_engines::store::RowTx

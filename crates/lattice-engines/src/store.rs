@@ -958,6 +958,17 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
             .unwrap_or(AUTHOR_UNKNOWN)
     }
 
+    /// The distinct author ids in the retained log that are account ids (at or above
+    /// `FIRST_ACCOUNT_AUTHOR`). A host checks its author registry against this at startup. Ids of
+    /// commits that vacuum already dropped are not here.
+    pub fn account_authors(&self) -> std::collections::BTreeSet<u128> {
+        self.commit_authors
+            .values()
+            .copied()
+            .filter(|a| *a >= crate::authors::FIRST_ACCOUNT_AUTHOR)
+            .collect()
+    }
+
     fn record_author(&mut self, lsn: u64, author: u128) {
         if author != AUTHOR_UNKNOWN {
             self.commit_authors.insert(lsn, author);

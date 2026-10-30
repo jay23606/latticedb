@@ -211,6 +211,7 @@ impl ExecSession {
     /// Rebinds the author of later commits. The host calls it with an id it assigned to the
     /// authenticated principal; a statement, a parameter or a `SET` never reaches it. A transaction
     /// block already open keeps the author it began with.
+    #[doc(hidden)]
     pub fn set_author(&mut self, author: u128) {
         self.policy = self.policy.clone().with_author(author);
     }

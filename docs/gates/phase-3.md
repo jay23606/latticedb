@@ -196,9 +196,15 @@ and `-p lattice-api --lib exec_handler exec_host` passed: events name the right 
 and after a kill and reopen, the same account keeps its id across a host restart, a proptest over generated names
 including near-collisions finds no shared id, legacy author 0 still reads, and SQL text, `application_name` and the
 startup `user` do not change the author. Two planted defects are caught by those tests: `AuthorFromClient` (author read
-from the statement) and `AuthorIdTruncatedHash` (ids collide). Not done: the `authors.reg` file is a new local sidecar,
-experimental and unfrozen (it is not in the WAL, the change set or the feed, and has no RFC); account delete and
-rename have no operator command, only the library calls; the MCP write path (#526) and the arbiter must pass the
+from the statement) and `AuthorIdTruncatedHash` (ids collide). Startup also checks the registry against the account ids in the retained log and refuses when the file is missing or
+older (`registry_missing_or_older_than_log_refuses_startup`, planted bug `AuthorRegistryLogCheckSkipped`; ids that vacuum
+already dropped cannot be checked). The file is created 0600. Not done: the `authors.reg` file is a new local sidecar,
+experimental and unfrozen ([ADR 0029](../adr/0029-author-id-registry.md), proposed, independent review pending; it is not
+in the WAL, the change set or the feed); retirement is manual and library-only: nothing calls `rename` or `retire`,
+removing an account from the credential or policy file does not retire it, and adding the same name back is the same
+account with the same id; names are byte exact (case sensitive; confusable names are different accounts) and an account in the credential
+store but not in the policy file still gets an id on its first statement; commits that bypass the executor
+(`RowStore::commit_catalog`, the standalone catalog store) and older history carry author 0; the MCP write path (#526) and the arbiter must pass the
 principal's id the same way when they land; the filtered-feed leak (#363) is untouched. The full `cargo xtask ci` gate was
 not run locally.
 Verification evidence, not an exit criterion: `lattice-api::backpressure` (WP38, issue #240) is a pure module

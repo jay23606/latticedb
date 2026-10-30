@@ -48,6 +48,7 @@ pub lattice_core::bugs::Bug::AcceptTornTail
 pub lattice_core::bugs::Bug::AckBeforeSync
 pub lattice_core::bugs::Bug::AuthorFromClient
 pub lattice_core::bugs::Bug::AuthorIdTruncatedHash
+pub lattice_core::bugs::Bug::AuthorRegistryLogCheckSkipped
 pub lattice_core::bugs::Bug::BatchDuplicateAckedEarly
 pub lattice_core::bugs::Bug::CheckpointIgnoresInFlight
 pub lattice_core::bugs::Bug::CrcSkipsPayload
@@ -108,7 +109,7 @@ pub lattice_core::bugs::Bug::ZeroFilledTailKept
 impl lattice_core::bugs::Bug
 pub const lattice_core::bugs::Bug::ADMISSION: [lattice_core::bugs::Bug; 2]
 pub const lattice_core::bugs::Bug::ALL: [lattice_core::bugs::Bug; 21]
-pub const lattice_core::bugs::Bug::AUTHOR: [lattice_core::bugs::Bug; 2]
+pub const lattice_core::bugs::Bug::AUTHOR: [lattice_core::bugs::Bug; 3]
 pub const lattice_core::bugs::Bug::CATALOG_INDEX: [lattice_core::bugs::Bug; 2]
 pub const lattice_core::bugs::Bug::CRDT: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::CRDT_PEER: [lattice_core::bugs::Bug; 9]

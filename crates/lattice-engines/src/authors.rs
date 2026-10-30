@@ -24,7 +24,7 @@
 
 use lattice_core::bugs::{self, Bug};
 use lattice_seams::Io;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// The author of changes whose writer is not recorded: all history from before author ids existed,
@@ -61,6 +61,9 @@ pub enum AuthorError {
         /// The line that broke a rule, or 0 for a whole-file problem.
         line: usize,
     },
+    /// The retained log carries an author id the registry does not list: the registry file is
+    /// missing, restored from an older backup, or lost a line that a commit had already used.
+    BehindLog,
     /// The storage failed. The registry refuses further changes until it is reopened, because the
     /// file may now end in bytes it did not intend.
     Io(String),
@@ -73,6 +76,7 @@ impl fmt::Display for AuthorError {
             Self::Unknown => f.write_str("unknown account"),
             Self::Taken => f.write_str("an account with that name exists"),
             Self::Full => f.write_str("the author registry is full"),
+            Self::BehindLog => f.write_str("the author registry is missing or older than the log"),
             Self::Corrupt { line } => write!(f, "the author registry is corrupt (line {line})"),
             Self::Io(e) => write!(f, "author registry storage failed: {e}"),
         }
@@ -273,6 +277,23 @@ impl AuthorRegistry {
         self.live.insert(name.to_string(), id);
         self.next = id.saturating_add(1);
         Ok(id)
+    }
+
+    /// Refuses a registry that does not cover the account author ids found in the retained log: every
+    /// id must be one the registry assigned (live or retired). Without this a deleted or older file
+    /// restarts the counter at ids history already carries and two accounts would share one. Ids that
+    /// vacuum already removed from the retained log cannot be checked.
+    pub fn check_covers(&self, ids: &BTreeSet<u128>) -> Result<(), AuthorError> {
+        if bugs::active(Bug::AuthorRegistryLogCheckSkipped) {
+            return Ok(());
+        }
+        if ids
+            .iter()
+            .any(|id| *id >= self.next || !self.by_id.contains_key(id))
+        {
+            return Err(AuthorError::BehindLog);
+        }
+        Ok(())
     }
 
     /// The id of a live account, without assigning one.
@@ -637,5 +658,37 @@ mod tests {
         }
         bugs::clear();
         assert!(ids.len() < names, "the planted truncation was not visible");
+    }
+
+    #[test]
+    fn a_registry_that_does_not_cover_the_log_is_refused() {
+        let d = disk();
+        let mut reg = open(&d);
+        reg.author_for_account("alice").unwrap();
+        reg.author_for_account("bob").unwrap();
+        let log: BTreeSet<u128> = [256, 257].into();
+        assert_eq!(reg.check_covers(&log), Ok(()));
+        assert_eq!(reg.check_covers(&BTreeSet::new()), Ok(()));
+        // A fresh registry, and one that lost its last line, are both behind the log.
+        assert_eq!(
+            AuthorRegistry::in_memory().check_covers(&log),
+            Err(AuthorError::BehindLog)
+        );
+        assert_eq!(
+            AuthorRegistry::in_memory().check_covers(&[300].into()),
+            Err(AuthorError::BehindLog)
+        );
+        // A retired account's id still counts as known.
+        reg.retire("bob").unwrap();
+        assert_eq!(reg.check_covers(&log), Ok(()));
+        bugs::clear();
+        bugs::enable(Bug::AuthorRegistryLogCheckSkipped);
+        let skipped = AuthorRegistry::in_memory().check_covers(&log);
+        bugs::clear();
+        assert_eq!(
+            skipped,
+            Ok(()),
+            "the planted defect must be visible to the test above"
+        );
     }
 }
