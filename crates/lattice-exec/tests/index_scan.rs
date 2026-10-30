@@ -920,3 +920,32 @@ fn predicates_made_only_of_total_terms_still_narrow_the_scan() {
         );
     }
 }
+
+#[test]
+fn a_constant_nested_past_the_planner_depth_is_not_used_to_narrow_the_scan() {
+    let mut f = fixture();
+    let mut s = common::admin();
+    setup_t(&mut f.db, &mut s);
+    ok(
+        &mut f.db,
+        &mut s,
+        "INSERT INTO t VALUES (1, 1, 5), (2, 2, 0)",
+    );
+    // The planner looks at most 250 levels into an expression (`MAX_DEPTH` in access.rs) and treats
+    // anything deeper as "may read a column". The constant below is the right side of `=` (level 0 is
+    // the CAST) with `n` additions under it, so its deepest leaf is at level `n + 1`: 250 for n = 249,
+    // which is still looked at, and 251 for n = 250, which is not. Float arithmetic keeps the binder
+    // from folding the chain into one literal. The rows are the same either way.
+    for (n, path) in [
+        (10, AccessPath::PrimaryKeyPoint),
+        (249, AccessPath::PrimaryKeyPoint),
+        (250, AccessPath::FullScan),
+    ] {
+        let sql = format!(
+            "SELECT id FROM t WHERE id = CAST(1.0{} AS BIGINT)",
+            " + 0.0".repeat(n)
+        );
+        assert_eq!(rows(&mut f.db, &mut s, &sql), vec![vec!["1"]], "n = {n}");
+        assert_eq!(f.db.last_access_paths(), vec![path], "n = {n}");
+    }
+}
