@@ -130,7 +130,7 @@ impl Accounts {
 }
 /// The one account namespace: SCRAM accounts and bearer-token accounts (ADR 0031) name the same
 /// principal with the same rule, 1 to 63 bytes without control characters.
-pub(crate) fn valid_account_name(name: &str) -> bool {
+pub fn valid_account_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 63 && !name.chars().any(char::is_control)
 }
 fn decode_key(encoded: &str) -> Result<Zeroizing<[u8; 32]>, ScramError> {

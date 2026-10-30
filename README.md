@@ -109,6 +109,11 @@ above), so query the table in the run that created it. Without `--data-dir` the 
 `SELECT 1`. For configured SCRAM over TLS, timeouts and the other flags, see the
 [listener guide](crates/latticed/README.md).
 
+To run with SCRAM over TLS instead of loopback trust, provision the credential files with
+`lattice account init DIR` and `lattice account add DIR NAME --read t1 --write t1` (passwords come from
+stdin or are generated and shown once); it prints the exact `latticed` flags. See the
+[listener guide](crates/latticed/README.md#provisioning-with-lattice-account).
+
 Other commands:
 
 ```bash

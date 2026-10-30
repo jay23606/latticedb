@@ -4,6 +4,7 @@
 //!
 //! `lattice doctor [--dir DATA_DIR] [--wal NAME]` verifies a data directory without modifying it.
 //! `lattice ledger show [--dir DIR]` lists the runs recorded in a results ledger.
+//! `lattice account init|add|list|remove|token ...` provisions the credential files `latticed` reads.
 //! `lattice lsl check FILE`, `lsl fmt FILE [--write|--check]` and `lsl compat OLD NEW` work on schemas.
 #![forbid(unsafe_code)]
 #![allow(
@@ -15,11 +16,13 @@
 
 use lattice_core::ledger;
 use lattice_core::scrub::{Issue, scrub};
-use lattice_seams::{Io, OsRng, StdIo, SystemClock};
+use lattice_seams::{Clock, Io, OsRng, StdIo, SystemClock};
 use std::process::ExitCode;
 
 /// Scrubs the log in `wal` and returns the report text and whether the log is healthy.
 mod lsl;
+
+mod account;
 
 fn doctor<I: Io>(io: &I, wal: &str) -> (String, bool) {
     let report = match scrub(io, wal) {
@@ -284,6 +287,31 @@ fn lsl_command(args: &[String]) -> ExitCode {
     }
 }
 
+/// Runs `lattice account` against real stdin, the OS random source and the system clock.
+fn account_command(args: &[String]) -> ExitCode {
+    use std::io::IsTerminal as _;
+    let mut stdin = std::io::stdin().lock();
+    let stdin_is_terminal = stdin.is_terminal();
+    let mut rng = OsRng;
+    let now_secs = SystemClock.now_ms() / 1000;
+    let mut env = account::Env {
+        stdin: &mut stdin,
+        rng: &mut rng,
+        now_secs,
+        stdin_is_terminal,
+    };
+    match account::run(args, &mut env) {
+        Ok(text) => {
+            print!("{}", *text);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("lattice account: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -354,6 +382,7 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("account") => account_command(args.get(1..).unwrap_or_default()),
         Some("lsl") => lsl_command(args.get(1..).unwrap_or_default()),
         _ => {
             eprintln!("usage: lattice doctor [--dir DATA_DIR] [--wal NAME]");
@@ -361,6 +390,9 @@ fn main() -> ExitCode {
             eprintln!("       lattice ledger check [--dir DIR]");
             eprintln!("       lattice ledger export [--dir DIR]");
             eprintln!("       lattice ledger record --kind KIND --json FILE [--dir DIR]");
+            eprintln!(
+                "       lattice account init|add|list|remove|token ... (see `lattice account --help`)"
+            );
             eprintln!(
                 "       lattice lsl check FILE | fmt FILE [--write|--check] | compat OLD NEW"
             );

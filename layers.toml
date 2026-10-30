@@ -65,9 +65,12 @@ allow = ["lattice-abi", "lattice-seams", "lattice-core", "lattice-engines", "lat
 layer = 6
 allow = ["lattice-abi", "lattice-lsl", "lattice-proto"]
 
+# lattice-cli -> latticed: the credential tool reuses latticed::files (owner-only atomic files, the
+# directory lock) and the token file I/O, which pulls the listener into the CLI build. Accepted for
+# now because no lower crate may do file I/O with libc; tracked in #686.
 [crate.lattice-cli]
 layer = 7
-allow = ["lattice-abi", "lattice-sdk", "lattice-core", "lattice-seams", "lattice-lsl"]
+allow = ["lattice-abi", "lattice-sdk", "lattice-core", "lattice-seams", "lattice-lsl", "lattice-api", "latticed"]
 
 [crate.latticed]
 layer = 7

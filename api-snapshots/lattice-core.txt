@@ -46,6 +46,9 @@ pub fn lattice_core::admission::guarded_header(u64) -> core::result::Result<allo
 pub mod lattice_core::bugs
 #[non_exhaustive] pub enum lattice_core::bugs::Bug
 pub lattice_core::bugs::Bug::AcceptTornTail
+pub lattice_core::bugs::Bug::AccountFileOverwritten
+pub lattice_core::bugs::Bug::AccountNoLock
+pub lattice_core::bugs::Bug::AccountRemoveKeepsTokens
 pub lattice_core::bugs::Bug::AckBeforeSync
 pub lattice_core::bugs::Bug::AuthorFromClient
 pub lattice_core::bugs::Bug::AuthorIdTruncatedHash
@@ -123,8 +126,10 @@ pub lattice_core::bugs::Bug::TreeNodeLimitSkipped
 pub lattice_core::bugs::Bug::TreeOriginQuotaSkipped
 pub lattice_core::bugs::Bug::TreeReplayBudgetSkipped
 pub lattice_core::bugs::Bug::VacuumDropsVisibleVersion
+pub lattice_core::bugs::Bug::WeakPasswordAccepted
 pub lattice_core::bugs::Bug::ZeroFilledTailKept
 impl lattice_core::bugs::Bug
+pub const lattice_core::bugs::Bug::ACCOUNT_TOOL: [lattice_core::bugs::Bug; 4]
 pub const lattice_core::bugs::Bug::ADMISSION: [lattice_core::bugs::Bug; 3]
 pub const lattice_core::bugs::Bug::ALL: [lattice_core::bugs::Bug; 21]
 pub const lattice_core::bugs::Bug::AUTHOR: [lattice_core::bugs::Bug; 3]

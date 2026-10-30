@@ -450,14 +450,23 @@ dependencies = [
 name = "lattice-cli"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "base64 0.22.1",
+ "hmac",
  "lattice-abi",
+ "lattice-api",
  "lattice-core",
  "lattice-lsl",
  "lattice-sdk",
  "lattice-seams",
  "lattice-sim",
  "lattice-testkit",
+ "latticed",
+ "pbkdf2",
+ "rcgen",
+ "rustls",
  "serde_json",
+ "sha2",
+ "zeroize",
 ]
 
 [[package]]

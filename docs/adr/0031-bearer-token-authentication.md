@@ -66,7 +66,7 @@ lattice-bearer-tokens v1
   be after the creation time.
 - Every line, including the last, ends in `\n`: a truncated file is refused. No blank lines, comments,
   carriage returns, extra fields, upper-case hex or repeated ids.
-- Bounds, checked before parsing: 256 KiB, 1,024 entries (revoked ones included; they cannot be pruned until the credential tool adds retire or compact, #582; the longest possible
+- Bounds, checked before parsing: 256 KiB, 1,024 entries (revoked ones included; they are removed only by `lattice account token prune` (#582); the longest possible
   1,024 lines are about 220 KiB). A revoked entry stays so its id is never reissued and so a stolen,
   revoked token can be recognised in the log.
 - Version: the header line. A format change is `v2`, refused by `v1` readers. This is operator
@@ -204,7 +204,7 @@ Decided here, implemented and tested in [#577](https://github.com/moncifem/latti
   covers the comparison.
 - Threat-model rows for B4 and gaps G-03 and G-05 are updated; the gate page records what was and was not
   run.
-- The credential tool ([#582](https://github.com/moncifem/latticedb/issues/582)), reload, revocation and
+- The credential tool (`lattice account`, [#582](https://github.com/moncifem/latticedb/issues/582): creates tokens, revokes them by id or with their account, and sets the older token's expiry on `--rotate`), reload, revocation and
   the permission check per OS ([#577](https://github.com/moncifem/latticedb/issues/577)) and the endpoint
   ([#524](https://github.com/moncifem/latticedb/issues/524)) build on this file format.
 - `latticed` now depends directly on `libc` (`=0.2.191`, default features off), only for the `O_NONBLOCK` and

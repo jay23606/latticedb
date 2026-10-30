@@ -17,9 +17,20 @@ lattice-sdk = { path = "../lattice-sdk" }
 lattice-core = { path = "../lattice-core" }
 lattice-seams = { path = "../lattice-seams" }
 lattice-lsl = { path = "../lattice-lsl" }
+lattice-api = { path = "../lattice-api" }
+latticed = { path = "../latticed" }
 serde_json.workspace = true
+zeroize = { version = "=1.9.1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
+# Switches the planted credential-tool defects on in the unit tests of `account`.
+lattice-core = { path = "../lattice-core", features = ["planted-bugs"] }
+base64 = "=0.22.1"
+hmac = "=0.13.0"
+sha2 = "=0.11.1"
+pbkdf2 = { version = "=0.13.0", features = ["hmac"] }
+rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
 lattice-sim = { path = "../lattice-sim" }
 lattice-testkit = { path = "../lattice-testkit" }
 

@@ -115,6 +115,20 @@ impl Verifier {
         })
     }
 
+    /// The line a credential file holds after the account name and a tab:
+    /// `SCRAM-SHA-256$<iterations>:<base64 salt>$<base64 StoredKey>:<base64 ServerKey>`, the form
+    /// `Accounts::parse` reads. Holds key material: the caller writes it to an owner-only file and
+    /// never to a log.
+    pub fn to_line(&self) -> Zeroizing<String> {
+        Zeroizing::new(format!(
+            "{MECHANISM}${}:{}${}:{}",
+            self.iterations,
+            STANDARD.encode(&self.salt),
+            STANDARD.encode(self.stored_key.as_ref()),
+            STANDARD.encode(self.server_key.as_ref()),
+        ))
+    }
+
     /// Derives a verifier during provisioning, never while processing an authentication message.
     ///
     /// Caller must apply its password-preparation policy first. This function treats bytes exactly
@@ -367,6 +381,16 @@ mod tests {
     )]
     use super::*;
     use proptest::prelude::*;
+    #[test]
+    fn to_line_writes_the_rfc_7677_credential_for_pencil() {
+        // RFC 7677 section 3 (user "user", password "pencil"): the published salt, 4096
+        // iterations, and the StoredKey and ServerKey computed outside this crate (Python hashlib).
+        let salt = STANDARD.decode("W22ZaJ0SNY7soEsUEjb6gQ==").unwrap();
+        let derived = Verifier::from_prepared_password(b"pencil", &salt, 4096).unwrap();
+        let expected = "SCRAM-SHA-256$4096:W22ZaJ0SNY7soEsUEjb6gQ==$WG5d8oPm3OtcPnkdi4Uo7BkeZkBFzpcXkuLmtbsT4qY=:wfPLwcE6nTWhTAmQ7tl2KeoiWGPlZqQxSrmfPwDl2dU=";
+        assert_eq!(&**derived.to_line(), expected);
+        assert_eq!(derived.to_line().len(), expected.len());
+    }
     const CLIENT: &str = "n,,n=user,r=rOprNGfwEbeRWgbNEkqO";
     const SUFFIX: &str = "%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0";
     const FIRST: &str =

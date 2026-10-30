@@ -15,6 +15,7 @@ impl core::fmt::Debug for lattice_api::auth::DecoySecret
 pub fn lattice_api::auth::DecoySecret::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub const lattice_api::auth::MAX_ACCOUNTS: usize
 pub const lattice_api::auth::MAX_CREDENTIAL_BYTES: usize
+pub fn lattice_api::auth::valid_account_name(&str) -> bool
 pub mod lattice_api::backpressure
 pub enum lattice_api::backpressure::AckError
 pub lattice_api::backpressure::AckError::Closed
@@ -232,11 +233,17 @@ pub struct lattice_api::bearer::CredentialStore
 impl lattice_api::bearer::CredentialStore
 pub fn lattice_api::bearer::CredentialStore::empty() -> Self
 pub fn lattice_api::bearer::CredentialStore::entries(&self) -> impl core::iter::traits::iterator::Iterator<Item = &lattice_api::bearer::TokenEntry>
+pub fn lattice_api::bearer::CredentialStore::get(&self, lattice_api::bearer::TokenId) -> core::option::Option<&lattice_api::bearer::TokenEntry>
 pub fn lattice_api::bearer::CredentialStore::insert(&mut self, lattice_api::bearer::TokenEntry) -> core::result::Result<(), lattice_api::bearer::StoreError>
 pub fn lattice_api::bearer::CredentialStore::is_empty(&self) -> bool
 pub fn lattice_api::bearer::CredentialStore::len(&self) -> usize
 pub fn lattice_api::bearer::CredentialStore::parse(&str) -> core::result::Result<Self, lattice_api::bearer::StoreError>
+pub fn lattice_api::bearer::CredentialStore::prune(&mut self, u64, u64) -> usize
 pub fn lattice_api::bearer::CredentialStore::render(&self) -> alloc::string::String
+pub fn lattice_api::bearer::CredentialStore::revoke(&mut self, lattice_api::bearer::TokenId) -> bool
+pub fn lattice_api::bearer::CredentialStore::revoke_account(&mut self, &str) -> usize
+pub fn lattice_api::bearer::CredentialStore::revoke_expired(&mut self, u64) -> usize
+pub fn lattice_api::bearer::CredentialStore::set_expiry(&mut self, lattice_api::bearer::TokenId, u64) -> core::result::Result<(), lattice_api::bearer::StoreError>
 impl core::clone::Clone for lattice_api::bearer::CredentialStore
 pub fn lattice_api::bearer::CredentialStore::clone(&self) -> Self
 impl core::default::Default for lattice_api::bearer::CredentialStore
@@ -268,6 +275,8 @@ impl core::fmt::Debug for lattice_api::bearer::TokenEntry
 pub fn lattice_api::bearer::TokenEntry::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for lattice_api::bearer::TokenEntry
 pub struct lattice_api::bearer::TokenId(_)
+impl lattice_api::bearer::TokenId
+pub fn lattice_api::bearer::TokenId::parse(&str) -> core::option::Option<Self>
 impl core::clone::Clone for lattice_api::bearer::TokenId
 pub fn lattice_api::bearer::TokenId::clone(&self) -> Self
 impl core::cmp::Eq for lattice_api::bearer::TokenId
@@ -746,6 +755,7 @@ pub struct lattice_api::scram::Verifier
 impl lattice_api::scram::Verifier
 pub fn lattice_api::scram::Verifier::from_keys(&[u8], u32, [u8; 32], [u8; 32]) -> core::result::Result<Self, lattice_api::scram::ScramError>
 pub fn lattice_api::scram::Verifier::from_prepared_password(&[u8], &[u8], u32) -> core::result::Result<Self, lattice_api::scram::ScramError>
+pub fn lattice_api::scram::Verifier::to_line(&self) -> zeroize::Zeroizing<alloc::string::String>
 impl core::clone::Clone for lattice_api::scram::Verifier
 pub fn lattice_api::scram::Verifier::clone(&self) -> Self
 impl core::fmt::Debug for lattice_api::scram::Verifier

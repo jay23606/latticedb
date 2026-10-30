@@ -147,6 +147,44 @@ unregister recover the lock only to cancel/clean up safely.
 
 ## Configured SCRAM over TLS
 
+### Provisioning with `lattice account`
+
+`lattice account` (crate `lattice-cli`) writes the files below so that nobody has to compute a SCRAM
+verifier by hand. It never takes a password or token as an argument: a password is read from stdin
+(`--password-stdin`, one line of 12 to 256 printable ASCII characters) or generated, and is printed once.
+Every file is created or replaced atomically with mode 0600 inside a directory that only the owner may
+write; `init` refuses to overwrite an existing file. Keep the directory outside the data directory. Run one
+command that changes the directory takes an exclusive lock on `DIR/.lock` and holds it across its read-modify-write, so concurrent runs queue and a token created during a revocation cannot undo it. It does not make TLS keys: use a
+pinned `openssl` command for the certificate.
+
+```sh
+lattice account init /secure/lattice          # decoy secret, empty policy and token files; prints the flags
+printf '%s\n' "$PASSWORD" | lattice account add /secure/lattice alice --read work_items,docs --write work_items --password-stdin
+lattice account add /secure/lattice bob       # generated password, printed once; no grants (denied everything)
+lattice account list /secure/lattice
+lattice account token create /secure/lattice alice [--expires-days N] [--rotate [--overlap-hours N]]
+lattice account token revoke /secure/lattice TOKEN_ID
+lattice account remove /secure/lattice alice  # login, grants and bearer tokens
+```
+
+The flags it prints for `latticed`:
+
+```sh
+latticed --auth scram-tls --scram-verifiers /secure/lattice/scram-verifiers \
+  --scram-decoy-secret /secure/lattice/scram-decoy-secret \
+  --account-policies /secure/lattice/account-policies --tls-cert CERT.pem --tls-key KEY.pem
+```
+
+`--read`, `--write` and `--ddl` take comma-separated table names (`*` is every table) and become the
+`tables:` line of `account-policies` (`alice<TAB>tables: docs=r, work_items=rw`); none means `deny-all`.
+`scram-verifiers` appears with the first `account add` because `latticed` refuses an empty verifier file,
+and is removed with the last account. `bearer-tokens` holds only salted hashes (ADR 0031); no `latticed`
+flag reads it yet (the gateway, #524). A second active token needs `--rotate`, which ends the older one after
+`--overlap-hours` (default 24, at most 168). `remove` revokes the account's tokens but the revoked lines
+stay in the file so their ids are never reissued; `token prune [--older-than-days N]` (default 30) deletes revoked and expired entries older than N days, and `token create` prunes entries older than 30 days by itself when the file holds its maximum of 1024. A token past its expiry counts as expired, not active, and no longer blocks a new token. Windows is refused until the ACL check (#577) exists.
+
+**What a running `latticed` sees.** `latticed` reads these files when it starts and has no reload yet (bearer-token reload is #577). `account remove`, `token revoke` and a changed password therefore take effect after a restart, not on the running process. SCRAM verifiers use 4096 PBKDF2 iterations (ADR 0021), so a stolen `scram-verifiers` file is cheap to attack offline: keep it owner-only like a key and prefer the generated passwords. `--password-stdin` refuses a terminal because the typed password would echo; pipe it in. The tool wipes its own buffers for passwords, tokens and verifier text on a best-effort basis; what the terminal or the pipe does with the printed output is outside its control.
+
 ```sh
 cargo run -p latticed -- --auth scram-tls --listen 127.0.0.1:5432 \
   --tls-cert /secure/server-chain.pem --tls-key /secure/server-key.pem \
@@ -154,7 +192,7 @@ cargo run -p latticed -- --auth scram-tls --listen 127.0.0.1:5432 \
   --startup-timeout-ms 10000
 ```
 
-Provision those files externally. The decoy-secret file is mandatory and must contain exactly 32
+Provision those files with `lattice account` (below), or externally. The decoy-secret file is mandatory and must contain exactly 32
 cryptographically random binary bytes (not hex/Base64 text or a trailing newline). Generate it once
 with an operating-system cryptographic RNG, restrict access like the verifier file, and persist the
 same file across reloads/restarts and instances serving the same account set. The listener never

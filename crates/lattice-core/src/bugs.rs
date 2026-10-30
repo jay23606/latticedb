@@ -182,6 +182,17 @@ planted_bugs! {
     /// Only the first bytes of a bearer token's secret reach its verifier, so a token that shares
     /// that prefix authenticates (authentication).
     TokenAcceptsPrefix,
+    /// `CredentialStore::revoke_account` revokes nothing, so removing an account with the
+    /// credential tool leaves its bearer tokens working (authentication).
+    AccountRemoveKeepsTokens,
+    /// The credential tool's create-new write replaces an existing file instead of refusing, so
+    /// `account init` run twice destroys the decoy secret (credential loss).
+    AccountFileOverwritten,
+    /// The credential tool accepts a password shorter than its minimum (weak credential).
+    WeakPasswordAccepted,
+    /// The credential tool does not take its directory lock, so a token creation racing a
+    /// revocation can write back the older file and undo the revocation (lost update).
+    AccountNoLock,
     /// The engine's feed read ignores the caller's event limit and returns everything after the
     /// cursor (unbounded memory and executor time per read).
     FeedLimitIgnored,
@@ -309,6 +320,15 @@ impl Bug {
     ];
     /// Bearer-token defect, detected by the prefix witness in `lattice-api::bearer`.
     pub const BEARER: [Bug; 1] = [Bug::TokenAcceptsPrefix];
+
+    /// Credential tool defects (issue 582), caught by the tests of `lattice-api::bearer`,
+    /// `latticed::files` and `lattice-cli::account`.
+    pub const ACCOUNT_TOOL: [Bug; 4] = [
+        Bug::AccountRemoveKeepsTokens,
+        Bug::AccountFileOverwritten,
+        Bug::WeakPasswordAccepted,
+        Bug::AccountNoLock,
+    ];
     /// Feed read-bound defects, detected by the bounded-read witnesses in `lattice-engines`
     /// (`feed_emit` tests).
     pub const FEED_BOUND: [Bug; 3] = [
@@ -397,6 +417,7 @@ impl Bug {
         &Bug::FEED_SOURCE,
         &Bug::TABLE_GRANTS,
         &Bug::BEARER,
+        &Bug::ACCOUNT_TOOL,
         &Bug::FEED_BOUND,
         &Bug::NOTIFY,
         &Bug::EXEC_INDEX,

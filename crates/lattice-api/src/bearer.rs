@@ -62,6 +62,10 @@ const DECOY_VERIFIER: [u8; 32] = [0xa5; 32];
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TokenId([u8; ID_BYTES]);
 impl TokenId {
+    /// Reads the 16 lowercase hex digits `Display` writes; anything else is `None`.
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::from_hex(text.as_bytes())
+    }
     fn from_hex(text: &[u8]) -> Option<Self> {
         let mut id = [0; ID_BYTES];
         decode_hex(text, &mut id)?;
@@ -498,6 +502,84 @@ impl CredentialStore {
         }
         let mut next = self.entries.clone();
         next.insert(entry.id, entry);
+        check_rotation(&next)?;
+        self.entries = next;
+        Ok(())
+    }
+
+    /// The entry with `id`, if any.
+    pub fn get(&self, id: TokenId) -> Option<&TokenEntry> {
+        self.entries.get(&id)
+    }
+
+    /// Revokes the token `id` (the line stays, so the id is never reissued). Returns whether the
+    /// id exists; revoking a revoked token is not an error.
+    pub fn revoke(&mut self, id: TokenId) -> bool {
+        match self.entries.get_mut(&id) {
+            Some(entry) => {
+                entry.status = TokenStatus::Revoked;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Revokes every active token of `account` and returns how many it revoked.
+    pub fn revoke_account(&mut self, account: &str) -> usize {
+        // Planted defect: removing an account leaves its tokens working.
+        if bugs::active(Bug::AccountRemoveKeepsTokens) {
+            return 0;
+        }
+        let mut revoked = 0;
+        for entry in self.entries.values_mut() {
+            if entry.account == account && entry.status == TokenStatus::Active {
+                entry.status = TokenStatus::Revoked;
+                revoked += 1;
+            }
+        }
+        revoked
+    }
+
+    /// Revokes every active token whose expiry has passed at `now_secs` and returns how many.
+    /// Expired tokens never authenticate; this lets them leave the two-active-per-account count
+    /// and become eligible for [`CredentialStore::prune`].
+    pub fn revoke_expired(&mut self, now_secs: u64) -> usize {
+        let mut revoked = 0;
+        for entry in self.entries.values_mut() {
+            if entry.status == TokenStatus::Active && entry.expires.is_some_and(|e| e <= now_secs) {
+                entry.status = TokenStatus::Revoked;
+                revoked += 1;
+            }
+        }
+        revoked
+    }
+
+    /// Removes entries that can no longer authenticate (revoked, or expired by `now_secs`) and
+    /// whose reference time is at least `older_than_secs` old, and returns how many. The reference
+    /// time is the expiry when it has passed, else the creation time. A removed id could in theory
+    /// be issued again (64 random bits), so prune only what the log no longer needs.
+    pub fn prune(&mut self, now_secs: u64, older_than_secs: u64) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|_, e| {
+            let expired = e.expires.is_some_and(|at| at <= now_secs);
+            if e.status == TokenStatus::Active && !expired {
+                return true;
+            }
+            let reference = e.expires.filter(|at| *at <= now_secs).unwrap_or(e.created);
+            reference.saturating_add(older_than_secs) > now_secs
+        });
+        before - self.entries.len()
+    }
+
+    /// Sets the expiry of token `id`, the way a rotation ends the older token. The expiry must be
+    /// after the creation time and keep the rotation rule; the store is unchanged on error.
+    pub fn set_expiry(&mut self, id: TokenId, expires: u64) -> Result<(), StoreError> {
+        let mut next = self.entries.clone();
+        let entry = next.get_mut(&id).ok_or(StoreError::Malformed(0))?;
+        if expires <= entry.created {
+            return Err(StoreError::InvalidExpiry);
+        }
+        entry.expires = Some(expires);
         check_rotation(&next)?;
         self.entries = next;
         Ok(())
@@ -1088,6 +1170,88 @@ mod tests {
         assert_eq!(sibling_accepted.unwrap(), Principal::account("dan"));
         // Defect off again: the sibling is refused, so the defect is what let it in.
         assert!(verify_bearer(Some(&header(&sibling)), &issued, 0).is_err());
+    }
+
+    #[test]
+    fn revoke_and_set_expiry_change_exactly_the_named_token() {
+        // LINE is alice's token (created 1000, no expiry); LINE_2 is bob's (created 2000, expires 3000).
+        let mut s = store(&[LINE, LINE_2]);
+        let alice = TokenId::parse("0001020304050607").unwrap();
+        let bob = TokenId::parse("ffffffffffffffff").unwrap();
+        assert_eq!(TokenId::parse("FFFFFFFFFFFFFFFF"), None);
+        assert_eq!(TokenId::parse("ff"), None);
+        assert!(!s.revoke(TokenId::parse("1111111111111111").unwrap()));
+        assert!(s.revoke(alice));
+        assert!(s.revoke(alice), "revoking twice is not an error");
+        assert_eq!(s.get(alice).unwrap().status(), TokenStatus::Revoked);
+        assert_eq!(s.get(bob).unwrap().status(), TokenStatus::Active);
+        assert!(matches!(
+            verify_bearer(Some(&header(TOKEN)), &s, 0),
+            Err(AuthError::Rejected(RejectReason::Revoked))
+        ));
+        assert!(verify_bearer(Some(&header(TOKEN_2)), &s, 0).is_ok());
+        // An expiry must be after creation; the store is unchanged on error.
+        assert_eq!(s.set_expiry(bob, 2000), Err(StoreError::InvalidExpiry));
+        assert_eq!(s.get(bob).unwrap().expires(), Some(3000));
+        s.set_expiry(bob, 2500).unwrap();
+        assert_eq!(s.get(bob).unwrap().expires(), Some(2500));
+        assert!(
+            s.set_expiry(TokenId::parse("1111111111111111").unwrap(), 9)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn revoke_account_revokes_every_active_token_of_that_account_only() {
+        let mut s = store(&[LINE, LINE_2]);
+        assert_eq!(s.revoke_account("carol"), 0);
+        assert_eq!(s.revoke_account("alice"), 1);
+        assert_eq!(s.revoke_account("alice"), 0, "already revoked");
+        assert!(verify_bearer(Some(&header(TOKEN)), &s, 0).is_err());
+        assert!(verify_bearer(Some(&header(TOKEN_2)), &s, 0).is_ok());
+        // A planted defect that revokes nothing is caught by the assertions above.
+        let mut kept = store(&[LINE]);
+        bugs::clear();
+        bugs::enable(Bug::AccountRemoveKeepsTokens);
+        let revoked = kept.revoke_account("alice");
+        bugs::clear();
+        assert_eq!(revoked, 0);
+        assert!(verify_bearer(Some(&header(TOKEN)), &kept, 0).is_ok());
+    }
+
+    #[test]
+    fn revoke_expired_and_prune_remove_only_what_can_no_longer_authenticate() {
+        // alice: created 1000, no expiry. bob: created 2000, expires 3000.
+        let mut s = store(&[LINE, LINE_2]);
+        assert_eq!(
+            s.revoke_expired(2999),
+            0,
+            "bob is still valid one second before"
+        );
+        assert_eq!(s.revoke_expired(3000), 1, "expired at its expiry second");
+        assert_eq!(
+            s.get(TokenId::parse("ffffffffffffffff").unwrap())
+                .unwrap()
+                .status(),
+            TokenStatus::Revoked
+        );
+        assert_eq!(s.revoke_expired(9999), 0);
+        // Reference time of bob is his expiry (3000); alice is live and never pruned.
+        assert_eq!(s.prune(3000 + 99, 100), 0);
+        assert_eq!(s.prune(3000 + 100, 100), 1);
+        assert_eq!(s.len(), 1);
+        assert_eq!(
+            s.prune(u64::MAX, 0),
+            0,
+            "a live token stays whatever the age"
+        );
+        // An expired but never revoked entry is dead too; a revoked one is aged by creation.
+        let mut t = store(&[LINE, LINE_2]);
+        t.revoke(TokenId::parse("0001020304050607").unwrap());
+        assert_eq!(t.prune(1000 + 50, 100), 0);
+        assert_eq!(t.prune(1000 + 100, 100), 1, "alice: revoked, created 1000");
+        assert_eq!(t.prune(3000, 0), 1, "bob: expired, unrevoked");
+        assert!(t.is_empty());
     }
 
     fn ip(n: u8) -> IpAddr {

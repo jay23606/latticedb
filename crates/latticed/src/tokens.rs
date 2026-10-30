@@ -12,8 +12,6 @@ use lattice_api::bearer::CredentialStore;
 #[cfg(unix)]
 use lattice_api::bearer::MAX_STORE_BYTES;
 use std::io;
-#[cfg(unix)]
-use std::io::{Read, Write};
 use std::path::Path;
 
 /// Reads and parses the credential file at `path`.
@@ -31,46 +29,12 @@ pub fn load_credential_store(path: &Path) -> io::Result<CredentialStore> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        require_private_directory(path)?;
-        // O_NONBLOCK so a FIFO at the path cannot block the open forever, O_NOFOLLOW so a symlink
-        // is refused; the regular-file check then runs on the open descriptor.
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-            .open(path)?;
-        crate::require_private_file(&file)?;
-        let mut bytes = Vec::new();
-        file.take(MAX_STORE_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)?;
+        let bytes = crate::files::read_private(path, MAX_STORE_BYTES)?;
         let text = std::str::from_utf8(&bytes).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "credential file is not UTF-8")
         })?;
         CredentialStore::parse(text).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
-}
-
-#[cfg(unix)]
-fn parent_of(path: &Path) -> &Path {
-    path.parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
-}
-
-/// A directory that others can write to lets them swap the file after the check.
-#[cfg(unix)]
-fn require_private_directory(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let metadata = std::fs::metadata(parent_of(path))?;
-    if !metadata.is_dir() {
-        return Err(io::Error::other("credential directory is not a directory"));
-    }
-    if metadata.permissions().mode() & 0o022 != 0 {
-        return Err(io::Error::other(
-            "credential directory is writable by group or others (use mode 0700)",
-        ));
-    }
-    Ok(())
 }
 
 /// Atomically replaces the credential file at `path` with `store` (mode 0600).
@@ -87,41 +51,11 @@ pub fn write_credential_store(path: &Path, store: &CredentialStore) -> io::Resul
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
         let text = store.render();
         if text.len() > MAX_STORE_BYTES {
             return Err(io::Error::other("credential file would be too large"));
         }
-        require_private_directory(path)?;
-        let dir = parent_of(path);
-        let name = path
-            .file_name()
-            .ok_or_else(|| io::Error::other("credential path has no file name"))?;
-        let mut temporary = name.to_os_string();
-        // Unique per write; `create_new` below refuses a name that already exists.
-        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let serial = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        temporary.push(format!(".tmp{}-{serial}", std::process::id()));
-        let temporary = dir.join(temporary);
-        // Only a file this call created is ever removed.
-        let mut created = false;
-        let result = (|| {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&temporary)?;
-            created = true;
-            file.write_all(text.as_bytes())?;
-            file.sync_all()?;
-            drop(file);
-            std::fs::rename(&temporary, path)?;
-            std::fs::File::open(dir)?.sync_all()
-        })();
-        if result.is_err() && created {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        result
+        crate::files::replace_private(path, text.as_bytes())
     }
 }
 
