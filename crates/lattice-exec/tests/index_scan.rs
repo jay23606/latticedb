@@ -949,3 +949,56 @@ fn a_constant_nested_past_the_planner_depth_is_not_used_to_narrow_the_scan() {
         assert_eq!(f.db.last_access_paths(), vec![path], "n = {n}");
     }
 }
+
+#[test]
+fn an_expression_that_mentions_a_column_never_narrows_even_when_it_would_not_read_it() {
+    let mut f = fixture();
+    let mut s = common::admin();
+    ok(
+        &mut f.db,
+        &mut s,
+        "CREATE TABLE h (b BOOLEAN PRIMARY KEY, c BOOLEAN)",
+    );
+    ok(
+        &mut f.db,
+        &mut s,
+        "INSERT INTO h VALUES (true, true), (false, false)",
+    );
+    // Each right-hand side names the column `c` but is true or false on every row without reading
+    // it (`true OR c` is true for any `c`). It is still not a constant: the planner only narrows on
+    // expressions that contain no column at all, whichever node holds the column.
+    let right_sides = [
+        "(true OR c)",
+        "(false AND c)",
+        "(NOT (true OR c))",
+        "((true OR c) IS NULL)",
+        "(true IN (true, c))",
+        "(true NOT IN (true, c))",
+        "(CAST((true OR c) AS BOOLEAN))",
+        "(true OR (false AND c))",
+    ];
+    for right in right_sides {
+        let sql = format!("SELECT b FROM h WHERE b = {right}");
+        let got = rows(&mut f.db, &mut s, &sql);
+        assert_eq!(got.len(), 1, "{sql}");
+        assert_eq!(
+            f.db.last_access_paths(),
+            vec![AccessPath::FullScan],
+            "{sql}"
+        );
+    }
+    // The same shapes without the column are constants and narrow the scan.
+    for right in [
+        "(true OR false)",
+        "(true IN (true, false))",
+        "(NOT (true OR false))",
+    ] {
+        let sql = format!("SELECT b FROM h WHERE b = {right}");
+        rows(&mut f.db, &mut s, &sql);
+        assert_eq!(
+            f.db.last_access_paths(),
+            vec![AccessPath::PrimaryKeyPoint],
+            "{sql}"
+        );
+    }
+}
