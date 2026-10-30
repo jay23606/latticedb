@@ -1,0 +1,100 @@
+name: install-script
+# Checks scripts/install.sh (issue #585): shellcheck, actionlint on this workflow, and the offline tests
+# in scripts/test_install.sh on the three platforms the script supports. The offline tests use a fake
+# local release directory, so they need no network and no release. The `rehearsal` job runs the script
+# against the archives of a manual `release` workflow run (publish is false for those); it runs only when
+# dispatched with the run id of such a rehearsal.
+on:
+  pull_request:
+    paths:
+      - "scripts/**"
+      - ".github/workflows/install-script.yml"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - ".github/workflows/install-script.yml"
+  workflow_dispatch:
+    inputs:
+      release_run:
+        description: "Run id of a release workflow rehearsal (workflow_dispatch) whose archives to install; empty skips the rehearsal job"
+        required: false
+        default: ""
+permissions:
+  contents: read
+concurrency:
+  group: install-script-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: shellcheck is present
+        run: |
+          command -v shellcheck >/dev/null || sudo apt-get install -y -q shellcheck
+          shellcheck --version
+      - name: shellcheck (POSIX sh)
+        run: shellcheck -s sh scripts/install.sh scripts/test_install.sh
+      - name: actionlint on this workflow (pinned release image, runs shellcheck on the run steps too)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color .github/workflows/install-script.yml
+
+  offline-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: offline install tests
+        run: /bin/sh scripts/test_install.sh
+      - name: the same tests under dash when it is installed
+        run: |
+          if command -v dash >/dev/null; then dash scripts/test_install.sh; else echo "dash not installed, skipped"; fi
+
+  rehearsal:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_run != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: fetch the rehearsal archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.release_run }}
+          TARGET: ${{ matrix.target }}
+        run: gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name "archive-$TARGET" --dir "$RUNNER_TEMP/rel"
+      - name: SHA256SUMS the way the package workflow writes it
+        # A rehearsal publishes nothing, so no SHA256SUMS and no attestation exist; this writes the sums
+        # file in the same format. That means only the archive layout and the install path are proven here.
+        working-directory: ${{ runner.temp }}/rel
+        run: |
+          if command -v sha256sum >/dev/null; then sha256sum -- *.tar.gz > SHA256SUMS; else shasum -a 256 -- *.tar.gz > SHA256SUMS; fi
+          cat SHA256SUMS
+      - name: install and run both programs
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          archive=$(basename "$RUNNER_TEMP"/rel/lattice-*-"$TARGET".tar.gz)
+          version=${archive#lattice-}
+          version=${version%-"$TARGET".tar.gz}
+          LATTICE_INSTALL_BASE="file://$RUNNER_TEMP/rel" /bin/sh scripts/install.sh --prefix "$RUNNER_TEMP/prefix" "$version"
+          "$RUNNER_TEMP/prefix/bin/lattice" --version
+          "$RUNNER_TEMP/prefix/bin/latticed" --version

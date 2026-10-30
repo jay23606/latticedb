@@ -82,6 +82,30 @@ sha256sum --check --ignore-missing SHA256SUMS
 
 A bad release is superseded by a new patch version; tags are never moved or deleted.
 
+## Installing a release
+
+`scripts/install.sh` installs `lattice` and `latticed` for macOS arm64, Linux x86_64 or Linux arm64 into
+`<prefix>/bin` (default `~/.local/bin`):
+
+```sh
+sh install.sh [--prefix DIR] [VERSION]
+```
+
+`VERSION` is such as `0.1.0-alpha.1` or `nightly`. Without it the script reads the GitHub releases listing and
+takes the newest tag of the form `vX.Y.Z-suffix`, and fails with a message when there is none (so before the
+first alpha tag it needs an explicit `nightly`). It downloads the archive and `SHA256SUMS` of that tag, refuses
+on a missing entry or any checksum mismatch, and runs `gh attestation verify` when the `gh` CLI is installed
+(refusing if that fails; without `gh` it says the attestation was skipped). It uses no sudo, edits no shell
+profile, supports no Windows and does not update itself. Fetch the script from the same tagged release, not
+from `main`; publishing it as a release asset is not wired yet, and the README one-liner waits for the first
+alpha tag.
+
+The `install-script` workflow runs shellcheck, actionlint and `scripts/test_install.sh` (offline, against a
+fake release directory) on every change to `scripts/`. To prove the script against real archives, rehearse
+the release (`gh workflow run release.yml`), then run
+`gh workflow run install-script.yml -f release_run=<run id>`; a rehearsal has no `SHA256SUMS` or attestation,
+so that job writes the sums file itself and proves the archive layout and install path only.
+
 ## Packages
 
 Binaries and the container image are published now. Crates are not published to crates.io:
