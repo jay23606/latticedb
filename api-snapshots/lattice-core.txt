@@ -99,6 +99,7 @@ pub lattice_core::bugs::Bug::SetTagLimitSkipped
 pub lattice_core::bugs::Bug::SkipFsync
 pub lattice_core::bugs::Bug::SkipRecoverySync
 pub lattice_core::bugs::Bug::SubscribePrincipalDropped
+pub lattice_core::bugs::Bug::TokenAcceptsPrefix
 pub lattice_core::bugs::Bug::TreeCycleCheckSkipped
 pub lattice_core::bugs::Bug::TreeDepthLimitSkipped
 pub lattice_core::bugs::Bug::TreeNodeLimitSkipped
@@ -110,6 +111,7 @@ impl lattice_core::bugs::Bug
 pub const lattice_core::bugs::Bug::ADMISSION: [lattice_core::bugs::Bug; 2]
 pub const lattice_core::bugs::Bug::ALL: [lattice_core::bugs::Bug; 21]
 pub const lattice_core::bugs::Bug::AUTHOR: [lattice_core::bugs::Bug; 3]
+pub const lattice_core::bugs::Bug::BEARER: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::CATALOG_INDEX: [lattice_core::bugs::Bug; 2]
 pub const lattice_core::bugs::Bug::CRDT: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::CRDT_PEER: [lattice_core::bugs::Bug; 9]
