@@ -582,6 +582,7 @@ pub fn lattice_engines::mvcc::Table<K, V>::range_iter<R: core::ops::range::Range
 pub fn lattice_engines::mvcc::Table<K, V>::snapshot(&self) -> lattice_engines::mvcc::Snapshot
 pub fn lattice_engines::mvcc::Table<K, V>::vacuum(&mut self, u64) -> usize
 pub fn lattice_engines::mvcc::Table<K, V>::version_count(&self) -> usize
+pub fn lattice_engines::mvcc::Table<K, V>::with_commit_index() -> Self
 pub fn lattice_engines::mvcc::Table<K, V>::written_by(&self, lattice_engines::mvcc::Snapshot, &K) -> core::result::Result<core::option::Option<lattice_core::changeset::ChangeSetId>, lattice_engines::mvcc::MvccError>
 impl<K: core::clone::Clone + core::cmp::Ord, V: core::clone::Clone> core::clone::Clone for lattice_engines::mvcc::Table<K, V>
 pub fn lattice_engines::mvcc::Table<K, V>::clone(&self) -> Self
