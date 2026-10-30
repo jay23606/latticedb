@@ -156,6 +156,22 @@ fn unsupported_statements_are_named() {
         "ON CONFLICT",
     );
     unsupported("INSERT INTO t DEFAULT VALUES", "DEFAULT VALUES", "DEFAULT");
+    unsupported(
+        "INSERT INTO t VALUES (1, DEFAULT)",
+        "DEFAULT in VALUES",
+        "DEFAULT",
+    );
+    unsupported(
+        "INSERT INTO t (a) VALUES (DEFAULT), (2)",
+        "DEFAULT in VALUES",
+        "DEFAULT",
+    );
+    unsupported("UPDATE t SET a = DEFAULT", "SET ... = DEFAULT", "DEFAULT");
+    unsupported(
+        "UPDATE t SET a = 1, b = DEFAULT WHERE a = 1",
+        "SET ... = DEFAULT",
+        "DEFAULT",
+    );
     unsupported("UPDATE t SET a = 1 FROM u", "UPDATE ... FROM", "FROM u");
     unsupported("DELETE FROM t USING u", "DELETE ... USING", "USING");
     unsupported("COPY t FROM stdin", "COPY statement", "COPY");

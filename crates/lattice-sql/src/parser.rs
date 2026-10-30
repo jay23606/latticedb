@@ -888,13 +888,24 @@ impl Parser {
         }))
     }
 
+    /// An expression in a value position, where PostgreSQL also accepts the bare keyword `DEFAULT`.
+    /// There is no plan node for "this column's default" yet, so the keyword is named as unsupported
+    /// instead of failing as a syntax error.
+    fn value_expr(&mut self, what: &str) -> PResult<Expr> {
+        // `default` is reserved, so at the start of a value it can only be the keyword.
+        if self.is_kw("default") {
+            return Err(self.unsupported_here(what));
+        }
+        self.expr()
+    }
+
     fn value_rows(&mut self) -> PResult<Vec<Vec<Expr>>> {
         let mut rows: Vec<Vec<Expr>> = Vec::new();
         loop {
             let open = self.expect(&Tok::LParen, "`(`")?;
-            let mut row = vec![self.expr()?];
+            let mut row = vec![self.value_expr("DEFAULT in VALUES")?];
             while self.eat(&Tok::Comma) {
-                row.push(self.expr()?);
+                row.push(self.value_expr("DEFAULT in VALUES")?);
             }
             self.expect(&Tok::RParen, "`)` or `,`")?;
             if let Some(first) = rows.first()
@@ -921,7 +932,7 @@ impl Parser {
         loop {
             let column = self.ident()?;
             self.expect(&Tok::Eq, "`=`")?;
-            let value = self.expr()?;
+            let value = self.value_expr("SET ... = DEFAULT")?;
             assignments.push(Assignment { column, value });
             if !self.eat(&Tok::Comma) {
                 break;
