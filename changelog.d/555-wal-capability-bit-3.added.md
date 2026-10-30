@@ -1,1 +1,0 @@
-WAL required capability bit 3 (`SQL_DEFINITIONS`, value 8) is defined in the guarded segment header and known to `lattice-core`, with independent header fixtures for masks 8 and 9 and a planted bug for a dropped bit. Nothing writes the bit yet, and every earlier reader refuses a directory that carries it; RFC 0012 is still in its comment period.

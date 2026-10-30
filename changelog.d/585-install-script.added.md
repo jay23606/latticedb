@@ -1,1 +1,0 @@
-Added scripts/install.sh, a POSIX sh installer for the release archives (macOS arm64, Linux x86_64, Linux arm64) that checks SHA256SUMS and, when gh is present, the build provenance attestation, with offline tests and a CI workflow.

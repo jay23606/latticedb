@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-abi"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "subtle",
  "thiserror",
@@ -1563,7 +1563,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-core"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "blake3",
  "lattice-abi",
@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-engines"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "lattice-abi",
  "lattice-core",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-lsl"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "lattice-abi",
  "thiserror",
@@ -1593,7 +1593,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-seams"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "getrandom 0.4.3",
  "lattice-abi",
@@ -1603,7 +1603,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-sim"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "lattice-abi",
  "lattice-seams",
@@ -1628,7 +1628,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-sys"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "lexical-core"

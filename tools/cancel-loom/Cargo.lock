@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-abi"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "subtle",
  "thiserror",
@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-seams"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "getrandom",
  "lattice-abi",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-sys"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "lazy_static"

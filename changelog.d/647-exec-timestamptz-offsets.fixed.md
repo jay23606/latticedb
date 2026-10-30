@@ -1,1 +1,0 @@
-Timestamptz text now follows PostgreSQL for zone offsets and long fractions: out-of-range offsets give 22009, colon-less offsets of three or more digits read as hours and minutes the way PostgreSQL reads them (`+00530` is 05:30, `+05030` is refused), and fractions past six digits round half to even at the microsecond.

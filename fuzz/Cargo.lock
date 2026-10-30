@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-abi"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "subtle",
  "thiserror",
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-api"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "base64",
  "hmac",
@@ -190,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-core"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "blake3",
  "lattice-abi",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-engines"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "lattice-abi",
  "lattice-core",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-exec"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "lattice-abi",
  "lattice-core",
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-identity"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "lattice-abi",
  "lattice-core",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-lsl"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "lattice-abi",
  "thiserror",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-packs"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "lattice-abi",
  "lattice-core",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-proto"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "base64",
  "sha1",
@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-sdk"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "lattice-abi",
  "lattice-lsl",
@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-seams"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "getrandom",
  "lattice-abi",
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-service"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "lattice-abi",
  "lattice-core",
@@ -305,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "lattice-sim"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "lattice-abi",
  "lattice-seams",
@@ -313,11 +313,11 @@ dependencies = [
 
 [[package]]
 name = "lattice-sql"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "lattice-sys"
-version = "0.1.0-alpha.0"
+version = "0.1.0-alpha.1"
 
 [[package]]
 name = "libc"
