@@ -57,9 +57,13 @@ cursor, `Event::data` the `change-feed-v1` encoding. A cursor below the vacuum f
 key is skipped by continuing from its cursor, so a reader is never wedged. One read returns at most `max_events`
 events and is a series of steps, each one actor request: a step examines at most a scan budget of versions (default
 4,096, `FeedSource::with_scan_budget`) found through an in-memory commit index and builds events only for rows of the
-requested table that the policy allows. A step costs the budget and the page, never the table size or the history; a
-caught-up reader examines nothing; a commit queued during a read runs between its steps. Not done: a per-principal cap
-on feed work, a wall-clock bound and a per-table index (issue #543). No wake-on-commit and no transport exist yet.
+requested table that the policy allows. A step costs the budget and the page, never the table size or the history (step time is
+unmeasured); a caught-up reader examines nothing; a commit queued during a read runs between its steps. The commit index
+is kept in memory for the row table only and is rebuilt by replay when the store opens, an O(history) step. Known issue,
+accepted for the alpha: a subscriber of a quiet table with more than about 4.2 million other-table or hidden versions
+after its last event gets `Unavailable` on every poll and does not recover by polling (table-scoped index: issue #661).
+Not done: a per-principal cap on feed work and a wall-clock bound (issue #543). No wake-on-commit and no transport exist
+yet.
 
 Row commits made through `ExecHandler` carry an author id so change-feed events say who wrote. The id comes from the
 connection's `Principal` only: the fixed id 1 for local development, or the id `AuthorRegistry` assigns to the

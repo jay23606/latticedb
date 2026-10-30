@@ -131,10 +131,19 @@ pub struct Table<K: Ord, V> {
     applied: u64,
     /// Vacuum horizon: snapshots below it may have lost versions.
     floor: u64,
-    /// The commit index: for each change set applied above the floor, the keys it wrote in key
-    /// order, by increasing LSN. It lets a reader walk the commits after a position without
-    /// visiting every key, and costs one extra copy of each written key. It is rebuilt by replay
-    /// (every recovered change set goes through [`Table::apply`]) and pruned by [`Table::vacuum`].
+    /// Whether this table keeps the commit index. Only the row table does: the secondary index
+    /// tables also use `Table` and nothing reads their commits.
+    indexed: bool,
+    /// The commit index (only if `indexed`): for each change set applied above the floor, the keys
+    /// it wrote in key order, by increasing LSN. It lets a reader walk the commits after a
+    /// position without visiting every key. Memory: one clone of each key written by a retained
+    /// change set, plus a `Vec` header per change set, so it grows with retained history, not with
+    /// the table. It is rebuilt by replay: every recovered change set goes through
+    /// [`Table::apply`], so opening costs O(history) for it. Pruned by [`Table::vacuum`].
+    ///
+    /// Any future recovery path that restores rows without replaying every change set (a checkpoint
+    /// load, RFC 0002) MUST rebuild `commits` too, or `commits_from` returns nothing and the change
+    /// feed silently reports no events.
     commits: Vec<(u64, Vec<K>)>,
     /// Versions a [`CommitView`] has handed out, so a test can count the work a read did.
     #[cfg(test)]
@@ -147,6 +156,7 @@ impl<K: Ord, V> Default for Table<K, V> {
             rows: BTreeMap::new(),
             applied: 0,
             floor: 0,
+            indexed: false,
             commits: Vec::new(),
             #[cfg(test)]
             visited: Cell::new(0),
@@ -155,9 +165,18 @@ impl<K: Ord, V> Default for Table<K, V> {
 }
 
 impl<K: Ord + Clone, V: Clone> Table<K, V> {
-    /// An empty table.
+    /// An empty table without a commit index.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty table that also keeps the commit index [`Table::commits_from`] reads. It costs
+    /// memory and write-path work per commit, so only the table a feed is read from asks for it.
+    pub fn with_commit_index() -> Self {
+        Self {
+            indexed: true,
+            ..Self::default()
+        }
     }
 
     /// The last LSN applied.
@@ -191,9 +210,11 @@ impl<K: Ord + Clone, V: Clone> Table<K, V> {
                 applied: self.applied,
             });
         }
-        let mut keys = Vec::with_capacity(writes.len());
+        let mut keys = Vec::with_capacity(if self.indexed { writes.len() } else { 0 });
         for (key, value) in writes {
-            keys.push(key.clone());
+            if self.indexed {
+                keys.push(key.clone());
+            }
             let versions = self.rows.entry(key).or_default();
             if bugs::active(Bug::RowHistoryOverwritten) {
                 versions.clear();
@@ -206,7 +227,7 @@ impl<K: Ord + Clone, V: Clone> Table<K, V> {
         // A key written twice in the set is one write (last wins), so it is one index entry.
         keys.sort();
         keys.dedup();
-        if !keys.is_empty() && !bugs::active(Bug::FeedIndexCommitSkipped) {
+        if self.indexed && !keys.is_empty() && !bugs::active(Bug::FeedIndexCommitSkipped) {
             self.commits.push((lsn, keys));
         }
         self.applied = lsn;
@@ -240,7 +261,10 @@ impl<K: Ord + Clone, V: Clone> Table<K, V> {
         // Commits at or below the horizon may have lost versions, and a feed reader needs a cursor
         // above the floor, so their index entries are not reachable any more.
         let pruned = self.commits.partition_point(|(lsn, _)| *lsn <= horizon);
-        self.commits.drain(..pruned);
+        if pruned != 0 {
+            self.commits.drain(..pruned);
+            self.commits.shrink_to_fit();
+        }
         let mut removed = 0;
         self.rows.retain(|_, versions| {
             let end = versions.partition_point(|v| v.lsn <= horizon);
@@ -340,7 +364,7 @@ impl<K: Ord + Clone, V: Clone> Table<K, V> {
 
     /// The commits written at or after `from_lsn`, in LSN order, found through the commit index
     /// (a binary search, then one step per commit), so a reader that is caught up visits nothing
-    /// old. Only commits above the vacuum floor are indexed: a `from_lsn` at or below a non-zero
+    /// old. A table made with [`Table::new`] has no index and yields nothing. Only commits above the vacuum floor are indexed: a `from_lsn` at or below a non-zero
     /// floor starts at the first commit above it. Read-only; the change feed uses it.
     pub fn commits_from(&self, from_lsn: u64) -> impl Iterator<Item = CommitView<'_, K, V>> {
         let start = self.commits.partition_point(|(lsn, _)| *lsn < from_lsn);

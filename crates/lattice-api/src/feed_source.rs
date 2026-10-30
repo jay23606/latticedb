@@ -38,10 +38,24 @@
 //! * A read that is not full after a step and is told there may be more asks again from the step's
 //!   resume cursor as a new request, queued behind whatever commits arrived meanwhile, so a long
 //!   run of history the reader cannot see (other tables, rows its policy hides) is read in slices
-//!   that each give the executor back. It makes at most [`MAX_ROUNDS`] steps, so history of that many
-//!   scan budgets after the cursor with nothing readable in it is [`SourceError::Unavailable`] rather
-//!   than an empty page that would claim the reader is caught up; the scan is not per table, so a
-//!   reader of a quiet table behind a very busy one pays for the busy one's versions.
+//!   that each give the executor back. It makes at most [`MAX_ROUNDS`] steps.
+//! * **Known limit, accepted for the alpha (quiet-table wedge).** The scan is not per table. A client
+//!   cursor only advances on events, so a subscriber of a quiet table whose last event is at cursor
+//!   `C` meets every version of every other table (and every row its policy hides) after `C`. Once
+//!   more than `MAX_ROUNDS * scan budget` of them (1024 x 4096, about 4.2 million by default) have
+//!   accumulated, every poll walks that many, gets [`SourceError::Unavailable`] and never recovers
+//!   by polling: returning the resume cursor instead would tell the reader where hidden commits
+//!   are (the filtered-feed leak of issue #363). An empty page is not an option either, it would
+//!   claim the reader is caught up. Mitigation: reconnect through a snapshot or bootstrap path
+//!   (issue #525, not built) or a table-scoped index (issue #661, linked from #543). The point at which
+//!   `Unavailable` starts, and the latency of a poll, also reveal the volume of activity the reader
+//!   may not see (threat model G-07).
+//! * A step that fails inside the engine with `IndexInconsistent` (the commit index and the rows
+//!   disagree) or `MissingCommitTime` is `Unavailable` for every later poll too: nothing a cursor
+//!   can fix, and it means the store needs a reopen or repair.
+//! * If the vacuum floor passes the cursor between two steps of one read, the next step is
+//!   [`SourceError::TooOld`]; events already collected by that read are returned first, and the
+//!   next poll from the last of them reports `TooOld`.
 //! * A cancellation or a reader that gave up is seen before each step. A reader that waits longer
 //!   than the statement ceiling plus slack for one step gets [`SourceError::Unavailable`], and its
 //!   queued step is skipped if it has not started; a denied request still takes a queue slot.
@@ -66,7 +80,7 @@ use lattice_seams::{Clock, Io, Rng};
 const TABLE_PREFIX: &str = "table/";
 
 /// Versions one step may examine unless [`FeedSource::with_scan_budget`] says otherwise. Each costs a
-/// policy check and, for an event, a copy of its value, so a step stays far below a statement.
+/// policy check and, for an event, a copy of its value,. The time of a step has not been measured.
 pub const DEFAULT_SCAN_BUDGET: usize = 4096;
 
 /// Most steps one read makes. Each step either returns events, passes over at most a scan budget of

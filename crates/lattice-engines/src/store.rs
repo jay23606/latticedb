@@ -317,7 +317,7 @@ impl<I: Io, C: Clock, R: Rng> RowStore<I, C, R> {
             return Err(RowError::InvalidIndexes("duplicate index id".into()));
         }
         let legacy_indexes = !index_defs.is_empty();
-        let mut table: Table<RowKey, Vec<u8>> = Table::new();
+        let mut table: Table<RowKey, Vec<u8>> = Table::with_commit_index();
         let mut indexes = Indexes::new(index_defs);
         let mut catalog = Catalog::new();
         let mut commit_lsn = std::collections::BTreeMap::new();

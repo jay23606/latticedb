@@ -13,6 +13,7 @@
 )]
 
 use super::*;
+use crate::store::RowError;
 use lattice_core::Config;
 use lattice_sim::{FaultProfile, SeededRng, SimClock, SimIo};
 use lattice_testkit::scenario::{SharedClock, SharedIo};
@@ -618,4 +619,79 @@ fn the_commit_index_planted_bug_is_caught() {
         }
         Ok(())
     });
+}
+
+#[test]
+fn only_a_table_made_with_the_commit_index_keeps_one() {
+    use crate::mvcc::Table;
+    use lattice_core::ChangeSetId;
+    let writes = || vec![(2u32, Some(1u32)), (1, Some(2)), (2, Some(3))];
+    let id = ChangeSetId::from_parts(1, 1, 1);
+    let mut plain: Table<u32, u32> = Table::new();
+    plain.apply(1, id, writes()).unwrap();
+    assert_eq!(
+        plain.commits_from(0).count(),
+        0,
+        "secondary tables keep none"
+    );
+    let mut indexed: Table<u32, u32> = Table::with_commit_index();
+    indexed.apply(1, id, writes()).unwrap();
+    let commit = indexed.commits_from(0).next().unwrap();
+    // A key written twice in one change set is one entry, in key order, last write winning.
+    assert_eq!(commit.len(), 2);
+    assert_eq!(
+        commit.entry(0).map(|e| (*e.key, e.value.copied())),
+        Some((1, Some(2)))
+    );
+    assert_eq!(
+        commit.entry(1).map(|e| (*e.key, e.value.copied())),
+        Some((2, Some(3)))
+    );
+}
+
+#[test]
+fn a_vacuum_between_the_steps_of_one_read_makes_the_next_step_too_old() {
+    let (_d, clock, mut store) = fresh();
+    commit_all(&mut store, &clock, &big_history(12, 2));
+    let limits = FeedLimits {
+        max_events: 3,
+        max_scanned: 3,
+    };
+    let first = store
+        .read_feed_as(Cursor::ORIGIN, None, &AllowAll, limits)
+        .unwrap();
+    assert!(first.more);
+    // Vacuum past where the first step stopped: the resume cursor is now at or below the floor.
+    let applied = store.applied_lsn();
+    let floor = store.vacuum(applied - 2).horizon;
+    assert!(first.resume.lsn() <= floor);
+    assert_eq!(
+        store
+            .read_feed_as(first.resume, None, &AllowAll, limits)
+            .err(),
+        Some(FeedReadError::CursorTooOld { floor })
+    );
+    // A cursor above the floor is still readable.
+    let page = store
+        .read_feed_as(Cursor::new(floor + 1, 0).unwrap(), None, &AllowAll, limits)
+        .unwrap();
+    assert!(!page.more);
+}
+
+#[test]
+fn the_log_record_limit_keeps_every_value_over_the_feed_bound_out_today() {
+    use lattice_core::feed::MAX_VALUE_LEN;
+    // The record limit is not above the feed's value bound, so the largest value a commit can hold
+    // is smaller than the bound (the record adds framing) and no change set can carry a value the
+    // feed would refuse (issue #488 is therefore not reachable). If this limit grows, this test
+    // fails and the feed needs a bound at commit and a per-reader skip for values, as keys have.
+    const { assert!(lattice_core::record::MAX_PAYLOAD <= MAX_VALUE_LEN) };
+    let (_d, _c, mut store) = fresh();
+    let mut tx = store.begin();
+    tx.put((7, b"k".to_vec()), vec![0u8; MAX_VALUE_LEN]);
+    assert!(matches!(store.commit(tx), Err(RowError::Rejected(_))));
+    let mut tx = store.begin();
+    tx.put((7, b"k".to_vec()), vec![0u8; MAX_VALUE_LEN - 4096]);
+    assert!(store.commit(tx).is_ok());
+    assert_eq!(store.events_since(Cursor::ORIGIN).unwrap().count(), 1);
 }
