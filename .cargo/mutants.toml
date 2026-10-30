@@ -1,5 +1,10 @@
 # Mutants that cannot change behaviour. Each entry says why.
 exclude_re = [
+    # `record_access` keeps at most 16 scan records per statement and the subset has no joins, so a
+    # statement makes one scan; no SQL can produce a seventeenth record to tell `< 16` from `<= 16`.
+    # The same holds for the table id ceiling in `attach_table`: reaching it needs 2^26 tables.
+    "db\\.rs:\\d+:\\d+: replace < with <= in Database<I, C, R>::record_access",
+    "db\\.rs:\\d+:\\d+: replace > with (==|>=) in Database<I, C, R>::attach_table",
     # `ServerHandle::shutdown` only calls `stop_and_join`, and `Drop` calls the same function, so a body
     # of `Ok(())` still stops and joins the listener when the handle is dropped. Only the returned
     # error differs, and the acceptor never returns one in a way a test can provoke.

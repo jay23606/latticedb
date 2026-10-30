@@ -616,3 +616,7 @@ impl CatalogView for ExecCatalog<'_> {
         self.version
     }
 }
+
+#[cfg(test)]
+#[path = "schema_key_tests.rs"]
+mod key_tests;
