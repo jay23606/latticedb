@@ -413,6 +413,7 @@ impl core::marker::StructuralPartialEq for lattice_api::exec_host::PolicyFileErr
 pub struct lattice_api::exec_host::ExecHost
 impl lattice_api::exec_host::ExecHost
 pub fn lattice_api::exec_host::ExecHost::begin_shutdown(&self)
+pub fn lattice_api::exec_host::ExecHost::commit_notifier(&self) -> alloc::rcs::arc::Arc<lattice_api::notify::CommitNotifier>
 pub fn lattice_api::exec_host::ExecHost::feed_source(&self, usize) -> lattice_api::feed_source::FeedSource
 pub fn lattice_api::exec_host::ExecHost::handler(&self) -> lattice_api::exec_host::ExecProxy
 pub fn lattice_api::exec_host::ExecHost::is_alive(&self) -> bool
@@ -433,6 +434,7 @@ pub fn lattice_api::exec_host::ExecProxy::describe_cancellable(&mut self, &latti
 pub fn lattice_api::exec_host::ExecProxy::execute(&mut self, &lattice_api::principal::QueryContext<'_>, &str, &[core::option::Option<alloc::vec::Vec<u8>>]) -> core::result::Result<lattice_api::session::QueryOutput, lattice_api::session::QueryError>
 pub fn lattice_api::exec_host::ExecProxy::execute_cancellable(&mut self, &lattice_api::principal::QueryContext<'_>, &str, &[core::option::Option<alloc::vec::Vec<u8>>], &lattice_api::cancel::CancellationToken) -> core::result::Result<lattice_api::session::QueryOutput, lattice_api::session::QueryError>
 pub struct lattice_api::exec_host::HostLimits
+pub lattice_api::exec_host::HostLimits::commit_waiters: usize
 pub lattice_api::exec_host::HostLimits::max_timeout_ms: core::option::Option<u64>
 pub lattice_api::exec_host::HostLimits::memory_bytes: u64
 pub lattice_api::exec_host::HostLimits::queue_depth: usize
@@ -477,6 +479,29 @@ impl lattice_api::subscribe::EventSource for lattice_api::feed_source::FeedSourc
 pub fn lattice_api::feed_source::FeedSource::read_after(&self, &lattice_api::principal::Principal, &str, &[u8], usize) -> core::result::Result<alloc::vec::Vec<lattice_proto::sync::Event>, lattice_api::subscribe::SourceError>
 pub const lattice_api::feed_source::DEFAULT_SCAN_BUDGET: usize
 pub const lattice_api::feed_source::MAX_ROUNDS: usize
+pub mod lattice_api::notify
+pub enum lattice_api::notify::WaitError
+pub lattice_api::notify::WaitError::Closed
+pub lattice_api::notify::WaitError::Full
+pub lattice_api::notify::WaitError::TimedOut
+impl core::clone::Clone for lattice_api::notify::WaitError
+pub fn lattice_api::notify::WaitError::clone(&self) -> Self
+impl core::cmp::Eq for lattice_api::notify::WaitError
+impl core::cmp::PartialEq for lattice_api::notify::WaitError
+pub fn lattice_api::notify::WaitError::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_api::notify::WaitError
+pub fn lattice_api::notify::WaitError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for lattice_api::notify::WaitError
+impl core::marker::StructuralPartialEq for lattice_api::notify::WaitError
+pub struct lattice_api::notify::CommitNotifier
+impl lattice_api::notify::CommitNotifier
+pub fn lattice_api::notify::CommitNotifier::latest(&self) -> u64
+pub fn lattice_api::notify::CommitNotifier::new(usize) -> Self
+pub fn lattice_api::notify::CommitNotifier::sleepers(&self) -> usize
+pub fn lattice_api::notify::CommitNotifier::wait_after(&self, u64, core::time::Duration) -> core::result::Result<u64, lattice_api::notify::WaitError>
+impl core::default::Default for lattice_api::notify::CommitNotifier
+pub fn lattice_api::notify::CommitNotifier::default() -> Self
+pub const lattice_api::notify::DEFAULT_MAX_WAITERS: usize
 pub mod lattice_api::pgwire
 pub enum lattice_api::pgwire::Backend
 pub lattice_api::pgwire::Backend::AuthenticationCleartextPassword
