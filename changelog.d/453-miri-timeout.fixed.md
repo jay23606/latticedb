@@ -1,0 +1,1 @@
+The scheduled nightly Miri job now has a 300-minute limit: the 2026-10-30 run was cancelled at the old 120-minute limit while the engine library tests were still running under the interpreter. The job and its name are unchanged. Whether it finishes inside the new limit is not yet known.
