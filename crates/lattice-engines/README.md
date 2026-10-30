@@ -78,3 +78,11 @@ register or an observed-remove set per column, whole-row last-writer-wins for pl
 row delete that hides writes stamped at or before it. It has no byte encoding and is not called by the
 row store, the catalog or sync yet; the stored form of CRDT state is an open question in the RFC.
 Run its tests with `cargo test -p lattice-engines --lib merge`.
+
+## SQL definition codec (not wired)
+
+`sqldef` (work package 2 of RFC 0012, in pull request 414, proposed; format
+[`sql-definition-v1.md`](../../formats/sql-definition-v1.md)) is a pure codec: types, a canonical encoder, a strict
+bounded decoder and a structural validator for the definition of one SQL table, and the block of definition
+operations an LCIX version 3 envelope will carry. Nothing in the catalog, the row store or the executor calls it yet.
+Run its tests with `cargo test -p lattice-engines --lib sqldef` and `cargo test -p lattice-engines --test sqldef_golden`.

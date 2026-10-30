@@ -668,6 +668,158 @@ pub fn lattice_engines::rowops::encode(&[lattice_engines::rowops::RowWrite]) -> 
 pub fn lattice_engines::rowops::is_row_payload(&[u8]) -> bool
 pub type lattice_engines::rowops::RowKey = (u32, alloc::vec::Vec<u8>)
 pub type lattice_engines::rowops::RowWrite = (lattice_engines::rowops::RowKey, core::option::Option<alloc::vec::Vec<u8>>)
+pub mod lattice_engines::sqldef
+pub enum lattice_engines::sqldef::DefaultValue
+pub lattice_engines::sqldef::DefaultValue::Bool(bool)
+pub lattice_engines::sqldef::DefaultValue::Bytes(alloc::vec::Vec<u8>)
+pub lattice_engines::sqldef::DefaultValue::Date(i32)
+pub lattice_engines::sqldef::DefaultValue::Double(u64)
+pub lattice_engines::sqldef::DefaultValue::Int(i64)
+pub lattice_engines::sqldef::DefaultValue::Jsonb(alloc::string::String)
+pub lattice_engines::sqldef::DefaultValue::Numeric(alloc::string::String)
+pub lattice_engines::sqldef::DefaultValue::Text(alloc::string::String)
+pub lattice_engines::sqldef::DefaultValue::Timestamptz(i64)
+pub lattice_engines::sqldef::DefaultValue::Uuid([u8; 16])
+impl core::clone::Clone for lattice_engines::sqldef::DefaultValue
+pub fn lattice_engines::sqldef::DefaultValue::clone(&self) -> Self
+impl core::cmp::Eq for lattice_engines::sqldef::DefaultValue
+impl core::cmp::PartialEq for lattice_engines::sqldef::DefaultValue
+pub fn lattice_engines::sqldef::DefaultValue::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_engines::sqldef::DefaultValue
+pub fn lattice_engines::sqldef::DefaultValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for lattice_engines::sqldef::DefaultValue
+pub enum lattice_engines::sqldef::SqlDefError
+pub lattice_engines::sqldef::SqlDefError::BadBool
+pub lattice_engines::sqldef::SqlDefError::BadColumnCount
+pub lattice_engines::sqldef::SqlDefError::BadConstraintName
+pub lattice_engines::sqldef::SqlDefError::BadDefaultTag(u8)
+pub lattice_engines::sqldef::SqlDefError::BadFlags(u8)
+pub lattice_engines::sqldef::SqlDefError::BadKeyPosition
+pub lattice_engines::sqldef::SqlDefError::BadName
+pub lattice_engines::sqldef::SqlDefError::BadNumeric
+pub lattice_engines::sqldef::SqlDefError::BadOpTag(u8)
+pub lattice_engines::sqldef::SqlDefError::BadTableId(u32)
+pub lattice_engines::sqldef::SqlDefError::BadTypeTag(u8)
+pub lattice_engines::sqldef::SqlDefError::BadUtf8
+pub lattice_engines::sqldef::SqlDefError::BadVarcharLimit
+pub lattice_engines::sqldef::SqlDefError::DefaultMismatch
+pub lattice_engines::sqldef::SqlDefError::DefaultOutOfRange
+pub lattice_engines::sqldef::SqlDefError::DuplicateColumn
+pub lattice_engines::sqldef::SqlDefError::DuplicateConstraintName
+pub lattice_engines::sqldef::SqlDefError::DuplicateTableId(u32)
+pub lattice_engines::sqldef::SqlDefError::EmptyDefinitions
+pub lattice_engines::sqldef::SqlDefError::KeyNullable
+pub lattice_engines::sqldef::SqlDefError::KeyType
+pub lattice_engines::sqldef::SqlDefError::NotAscending
+pub lattice_engines::sqldef::SqlDefError::TooLarge
+pub lattice_engines::sqldef::SqlDefError::TooManyDefinitions
+pub lattice_engines::sqldef::SqlDefError::TooManyUniques
+pub lattice_engines::sqldef::SqlDefError::Trailing
+pub lattice_engines::sqldef::SqlDefError::Truncated
+pub lattice_engines::sqldef::SqlDefError::UnsupportedLayout(u8)
+pub lattice_engines::sqldef::SqlDefError::UnsupportedVersion(u8)
+impl core::clone::Clone for lattice_engines::sqldef::SqlDefError
+pub fn lattice_engines::sqldef::SqlDefError::clone(&self) -> Self
+impl core::cmp::Eq for lattice_engines::sqldef::SqlDefError
+impl core::cmp::PartialEq for lattice_engines::sqldef::SqlDefError
+pub fn lattice_engines::sqldef::SqlDefError::eq(&self, &Self) -> bool
+impl core::error::Error for lattice_engines::sqldef::SqlDefError
+impl core::fmt::Debug for lattice_engines::sqldef::SqlDefError
+pub fn lattice_engines::sqldef::SqlDefError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for lattice_engines::sqldef::SqlDefError
+pub fn lattice_engines::sqldef::SqlDefError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for lattice_engines::sqldef::SqlDefError
+pub enum lattice_engines::sqldef::SqlType
+pub lattice_engines::sqldef::SqlType::BigInt
+pub lattice_engines::sqldef::SqlType::Boolean
+pub lattice_engines::sqldef::SqlType::Bytea
+pub lattice_engines::sqldef::SqlType::Date
+pub lattice_engines::sqldef::SqlType::Double
+pub lattice_engines::sqldef::SqlType::Integer
+pub lattice_engines::sqldef::SqlType::Jsonb
+pub lattice_engines::sqldef::SqlType::Numeric
+pub lattice_engines::sqldef::SqlType::SmallInt
+pub lattice_engines::sqldef::SqlType::Text
+pub lattice_engines::sqldef::SqlType::Timestamptz
+pub lattice_engines::sqldef::SqlType::Uuid
+pub lattice_engines::sqldef::SqlType::Varchar
+impl lattice_engines::sqldef::SqlType
+pub const fn lattice_engines::sqldef::SqlType::can_be_key(self) -> bool
+pub const fn lattice_engines::sqldef::SqlType::from_tag(u8) -> core::option::Option<lattice_engines::sqldef::SqlType>
+pub const fn lattice_engines::sqldef::SqlType::tag(self) -> u8
+impl core::clone::Clone for lattice_engines::sqldef::SqlType
+pub fn lattice_engines::sqldef::SqlType::clone(&self) -> Self
+impl core::cmp::Eq for lattice_engines::sqldef::SqlType
+impl core::cmp::PartialEq for lattice_engines::sqldef::SqlType
+pub fn lattice_engines::sqldef::SqlType::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_engines::sqldef::SqlType
+pub fn lattice_engines::sqldef::SqlType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for lattice_engines::sqldef::SqlType
+impl core::marker::StructuralPartialEq for lattice_engines::sqldef::SqlType
+pub struct lattice_engines::sqldef::Column
+pub lattice_engines::sqldef::Column::default: core::option::Option<lattice_engines::sqldef::DefaultValue>
+pub lattice_engines::sqldef::Column::name: alloc::string::String
+pub lattice_engines::sqldef::Column::not_null: bool
+pub lattice_engines::sqldef::Column::ty: lattice_engines::sqldef::SqlType
+pub lattice_engines::sqldef::Column::varchar_limit: u32
+impl core::clone::Clone for lattice_engines::sqldef::Column
+pub fn lattice_engines::sqldef::Column::clone(&self) -> Self
+impl core::cmp::Eq for lattice_engines::sqldef::Column
+impl core::cmp::PartialEq for lattice_engines::sqldef::Column
+pub fn lattice_engines::sqldef::Column::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_engines::sqldef::Column
+pub fn lattice_engines::sqldef::Column::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for lattice_engines::sqldef::Column
+pub struct lattice_engines::sqldef::DefineTable
+pub lattice_engines::sqldef::DefineTable::definition: lattice_engines::sqldef::SqlTableDef
+pub lattice_engines::sqldef::DefineTable::table_id: u32
+impl core::clone::Clone for lattice_engines::sqldef::DefineTable
+pub fn lattice_engines::sqldef::DefineTable::clone(&self) -> Self
+impl core::cmp::Eq for lattice_engines::sqldef::DefineTable
+impl core::cmp::PartialEq for lattice_engines::sqldef::DefineTable
+pub fn lattice_engines::sqldef::DefineTable::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_engines::sqldef::DefineTable
+pub fn lattice_engines::sqldef::DefineTable::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for lattice_engines::sqldef::DefineTable
+pub struct lattice_engines::sqldef::KeyConstraint
+pub lattice_engines::sqldef::KeyConstraint::columns: alloc::vec::Vec<u16>
+pub lattice_engines::sqldef::KeyConstraint::name: alloc::string::String
+impl core::clone::Clone for lattice_engines::sqldef::KeyConstraint
+pub fn lattice_engines::sqldef::KeyConstraint::clone(&self) -> Self
+impl core::cmp::Eq for lattice_engines::sqldef::KeyConstraint
+impl core::cmp::PartialEq for lattice_engines::sqldef::KeyConstraint
+pub fn lattice_engines::sqldef::KeyConstraint::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_engines::sqldef::KeyConstraint
+pub fn lattice_engines::sqldef::KeyConstraint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for lattice_engines::sqldef::KeyConstraint
+pub struct lattice_engines::sqldef::SqlTableDef
+pub lattice_engines::sqldef::SqlTableDef::columns: alloc::vec::Vec<lattice_engines::sqldef::Column>
+pub lattice_engines::sqldef::SqlTableDef::primary_key: core::option::Option<lattice_engines::sqldef::KeyConstraint>
+pub lattice_engines::sqldef::SqlTableDef::uniques: alloc::vec::Vec<lattice_engines::sqldef::KeyConstraint>
+impl lattice_engines::sqldef::SqlTableDef
+pub fn lattice_engines::sqldef::SqlTableDef::decode(&[u8]) -> core::result::Result<lattice_engines::sqldef::SqlTableDef, lattice_engines::sqldef::SqlDefError>
+pub fn lattice_engines::sqldef::SqlTableDef::encode(&self) -> core::result::Result<alloc::vec::Vec<u8>, lattice_engines::sqldef::SqlDefError>
+pub fn lattice_engines::sqldef::SqlTableDef::validate(&self) -> core::result::Result<(), lattice_engines::sqldef::SqlDefError>
+impl core::clone::Clone for lattice_engines::sqldef::SqlTableDef
+pub fn lattice_engines::sqldef::SqlTableDef::clone(&self) -> Self
+impl core::cmp::Eq for lattice_engines::sqldef::SqlTableDef
+impl core::cmp::PartialEq for lattice_engines::sqldef::SqlTableDef
+pub fn lattice_engines::sqldef::SqlTableDef::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_engines::sqldef::SqlTableDef
+pub fn lattice_engines::sqldef::SqlTableDef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for lattice_engines::sqldef::SqlTableDef
+pub const lattice_engines::sqldef::CANONICAL_NAN: u64
+pub const lattice_engines::sqldef::LAYOUT_RULE: u8
+pub const lattice_engines::sqldef::MAX_BODY: usize
+pub const lattice_engines::sqldef::MAX_COLUMNS: usize
+pub const lattice_engines::sqldef::MAX_DEFINITIONS: usize
+pub const lattice_engines::sqldef::MAX_NAME: usize
+pub const lattice_engines::sqldef::MAX_TABLE_ID: u32
+pub const lattice_engines::sqldef::MAX_UNIQUES: usize
+pub const lattice_engines::sqldef::VERSION: u8
+pub fn lattice_engines::sqldef::decode_ops(&[u8]) -> core::result::Result<alloc::vec::Vec<lattice_engines::sqldef::DefineTable>, lattice_engines::sqldef::SqlDefError>
+pub fn lattice_engines::sqldef::decode_ops_prefix(&[u8]) -> core::result::Result<(alloc::vec::Vec<lattice_engines::sqldef::DefineTable>, usize), lattice_engines::sqldef::SqlDefError>
+pub fn lattice_engines::sqldef::encode_ops(&[lattice_engines::sqldef::DefineTable]) -> core::result::Result<alloc::vec::Vec<u8>, lattice_engines::sqldef::SqlDefError>
 pub mod lattice_engines::store
 pub enum lattice_engines::store::RowError
 pub lattice_engines::store::RowError::Conflict

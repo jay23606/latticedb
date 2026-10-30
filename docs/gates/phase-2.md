@@ -561,5 +561,25 @@ its own CRC32C; the existing fixtures are byte-identical. `Bug::SqlDefinitionsBi
 
 **Not done.** Nothing sets bit 3: no writer, engine or `RowStore` requests or advertises it, and no
 definition payload exists. The frozen old-reader hosted job (issue 559) is separate and not run here.
-The RFC 0012 comment period runs until 2026-11-06 and was not waived, so this change must not merge
-before then unless the owner waives the hold. No phase-gate claim.
+The owner waived the RFC 0012 seven-day comment hold in chat on 2026-10-30. No phase-gate claim.
+
+## SQL table definition codec (RFC 0012 work package 2, issue 556)
+
+`lattice-engines::sqldef` is the structural codec for the durable SQL table definition block: types, a canonical
+encoder, a strict bounded decoder and the structural validator for definition version 1 / layout rule 1, plus the
+definition-operation block (count, ascending unique table ids, at most 1,024 per envelope). The format is
+[`formats/sql-definition-v1.md`](../../formats/sql-definition-v1.md), status proposed: RFC 0012 Option A is accepted by
+the owner, who waived the seven-day comment hold in chat on 2026-10-30.
+
+Evidence: independent goldens (59 files from `formats/generate_sql_definition_golden.py`, Python `struct` only, one
+rejection per rule) checked against literal expected outcomes in `crates/lattice-engines/tests/sqldef_golden.rs`;
+property tests over generated valid definitions (round trip, canonical re-encode, every strict prefix refused,
+single-bit mutation either refused or re-encoding to the mutated bytes, arbitrary bytes never panic); planted bug
+`SqlDefColumnsSorted` (group `Bug::SQLDEF`) caught by the layout witness; the fuzz target `sqldef_decode` (seeds in
+`fuzz/seeds/sqldef_decode`, limits in `fuzz/settings.toml`) is in the nightly, weekly and 24-hour matrices.
+
+**Not done.** Nothing in the row store, the catalog or the executor calls the codec: LCIX version 3, WAL capability
+bit 3, the catalog rules, `RowStore` commit and replay, caps and the upgrade setting are later work packages, so no
+directory contains a definition and no reader needs to refuse one. The fuzz target was neither built nor run here; its
+runs, the 10,000-case and nightly property volumes, mutation testing of `sqldef.rs` and the independent review of this
+format are left to CI and to the review that follows. No Phase 2 exit criterion is claimed.

@@ -15,3 +15,18 @@ reason = "the nightly row-faults jobs run the same 25,000-history shards through
 path = "crates/lattice-engines/tests/row_faults.rs"
 name = "$test"
 reason = "macro-generated 2,500-seed slices of row_fault_profiles_at_gate_volume; nightly covers the same histories through the row_fault_runner example, these exist for a manual run of one slice"
+
+[[allow]]
+path = "crates/lattice-engines/tests/sqldef_golden.rs"
+name = "reject_varchar_limit_over_10485760"
+reason = "states the behaviour proposed in the RFC 0012 amendment (issue 642); the codec follows the amendment once it lands, then the ignore is removed and the test runs in the normal gate"
+
+[[allow]]
+path = "crates/lattice-engines/tests/sqldef_golden.rs"
+name = "reject_unique_equals_primary_key"
+reason = "states the behaviour proposed in the RFC 0012 amendment (issue 642); the codec follows the amendment once it lands, then the ignore is removed and the test runs in the normal gate"
+
+[[allow]]
+path = "crates/lattice-engines/tests/sqldef_golden.rs"
+name = "reject_duplicate_unique_sets"
+reason = "states the behaviour proposed in the RFC 0012 amendment (issue 642); the codec follows the amendment once it lands, then the ignore is removed and the test runs in the normal gate"

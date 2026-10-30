@@ -1,0 +1,4 @@
+format = "sql-definition"
+version = 1
+status = "proposed"
+description = "Independent Python framing, RFC 0012; definition body a decoder must refuse: pk-position-out-of-range"

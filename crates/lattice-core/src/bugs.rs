@@ -197,6 +197,9 @@ planted_bugs! {
     /// The executor host publishes the next LSN to the commit notifier before the statement that
     /// commits it has run, so a woken subscriber can find nothing to read (wake before durable).
     NotifyBeforeDurable,
+    /// The SQL definition decoder sorts columns by name, so the row layout (declaration order,
+    /// layout rule 1) and the key positions no longer match what was written.
+    SqlDefColumnsSorted,
 }
 
 impl Bug {
@@ -237,6 +240,9 @@ impl Bug {
 
     /// Key-limit defects, detected by the oversize key witnesses in `lattice-engines`.
     pub const KEY_LIMIT: [Bug; 1] = [Bug::RowOversizeKeyAccepted];
+
+    /// SQL definition codec defects, detected by the layout witness in `lattice-engines::sqldef`.
+    pub const SQLDEF: [Bug; 1] = [Bug::SqlDefColumnsSorted];
 
     /// Strict HLC snapshot defects, detected by the focused retention witness.
     pub const HLC_SNAPSHOT: [Bug; 1] = [Bug::HlcSnapshotClamped];
@@ -354,6 +360,7 @@ impl Bug {
         &Bug::CATALOG_INDEX,
         &Bug::HLC_SNAPSHOT,
         &Bug::KEY_LIMIT,
+        &Bug::SQLDEF,
         &Bug::FENCE_ORDER,
         &Bug::RECOVERY_ORDER,
         &Bug::NON_PREFIX,

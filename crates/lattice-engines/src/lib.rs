@@ -14,6 +14,8 @@ pub mod mvcc;
 #[cfg(feature = "row")]
 pub mod rowops;
 #[cfg(feature = "row")]
+pub mod sqldef;
+#[cfg(feature = "row")]
 pub mod store;
 #[cfg(feature = "row")]
 pub mod typed;
