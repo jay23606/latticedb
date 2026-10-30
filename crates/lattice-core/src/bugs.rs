@@ -188,6 +188,12 @@ planted_bugs! {
     /// The row store leaves a change set out of its commit index, so the feed misses its events
     /// (silent loss for every subscriber).
     FeedIndexCommitSkipped,
+    /// A waiter on the commit notifier does not look at the published LSN before it first sleeps,
+    /// so a commit that landed before it arrived is waited for in vain (lost wake).
+    NotifyWaitIgnoresPublished,
+    /// The executor host publishes the next LSN to the commit notifier before the statement that
+    /// commits it has run, so a woken subscriber can find nothing to read (wake before durable).
+    NotifyBeforeDurable,
 }
 
 impl Bug {
@@ -273,6 +279,8 @@ impl Bug {
         Bug::FeedScanBudgetIgnored,
         Bug::FeedIndexCommitSkipped,
     ];
+    /// Commit-notifier defects, detected by the notifier and host witnesses in `lattice-api`.
+    pub const NOTIFY: [Bug; 2] = [Bug::NotifyWaitIgnoresPublished, Bug::NotifyBeforeDurable];
 
     /// Guarded-WAL admission defects, exercised by independent context witnesses.
     pub const ADMISSION: [Bug; 2] = [Bug::RequiredGuardOmitted, Bug::GuardRewriteUnstaged];
@@ -332,6 +340,7 @@ impl Bug {
         &Bug::TABLE_GRANTS,
         &Bug::BEARER,
         &Bug::FEED_BOUND,
+        &Bug::NOTIFY,
         &Bug::EXEC_INDEX,
         &Bug::CRDT_PEER,
         &Bug::ADMISSION,

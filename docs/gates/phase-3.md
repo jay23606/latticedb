@@ -163,7 +163,7 @@ feed. The precondition still binds the Phase 4 policy language and any row-level
 `BadCursor` check against the newest applied LSN lets a principal who can read one table binary-search the global commit
 position, and gaps between cursor LSNs show activity on tables it cannot read (same class as issue #363, unchanged); a
 denied request still occupies an actor queue slot. The filtered-feed gap question (issue #363) is unchanged; column definitions are not recovered across a restart
-(#379); no transport supplies the principal and no wake-on-commit exists, so nothing here is live end to end.
+(#379); no transport supplies the principal, so nothing here is live end to end.
 Verification evidence, not an exit criterion: interim per-table grants (issue #522, part of #567, threat-model G-01).
 An account in the policy file can be `allow-all`, `deny-all` or `tables: name=bits, ...` with bits `r`, `w`, `d` per
 table and `*` for the rest; the most specific entry wins, nothing is merged, names match exactly, an unlisted account
@@ -181,6 +181,28 @@ the SQL matrix, and the prefix bug by the feed matrix. Not done: no row predicat
 `presence` bit (issue #626); the MCP backend (#526) has not been built so "alike for SQL, feed and MCP" is shown for SQL and
 the feed only; grants live in a file that the operator edits and restarts for, not in the database; a transaction block
 reads a table created after it began as empty; `w` without `r` can probe primary-key and `UNIQUE` values of the table through `23505` (PostgreSQL INSERT-only behaviour, pinned by a test); the BadCursor/LSN-gap side channel of the feed (#363) is unchanged.
+
+Verification evidence, not an exit criterion: commit notifier (issue #523, part of #518 and #567). `ExecHost::commit_notifier`
+returns `lattice-api::notify::CommitNotifier`; the actor publishes the newest applied LSN (the larger of the row store's
+and the catalog's) after every statement and once at start, so a restarted host publishes its recovered head. A waiter
+calls `wait_after(seen, timeout)`: the published LSN and the comparison share one mutex, so a commit before the waiter
+sleeps returns at once and one after it sleeps wakes it; the answer is the newest LSN, `TimedOut`, `Full` (cap
+`HostLimits::commit_waiters`, default 1024, counts sleepers only) or `Closed` (shutdown or any end of the database
+thread, via the actor's exit guard). State is one `u64`, a flag and a count; no per-waiter queue, and publishing is one
+lock and one `notify_all` that never waits for a waiter. The wake carries only an LSN. Tests (`cargo test -p
+lattice-api --lib notify` and `exec_host::tests`, run locally once, 285 tests in the crate passing): a model test of
+`wait_after` against (published, seen, closed), a 24-waiter 4-publisher stress test where any missed wake shows as a
+timeout, per-waiter thresholds, the sleeper cap, spurious wakes, close, and host tests for wake-after-durable
+(a statement held between dequeue and run announces nothing; the woken LSN is the newest event the feed source shows),
+the timeout fallback, a restart, eight stalled sleepers while 20 commits run, shutdown and database-thread death.
+Planted bugs: `Bug::NotifyWaitIgnoresPublished` (the first look at the published LSN is skipped, caught by the
+already-published and stress paths) and `Bug::NotifyBeforeDurable` (the host publishes the next LSN before the
+statement runs, caught by the held-statement test; the host test opens the database on the actor thread with the bug
+enabled, because the switch is per thread). Not done: nothing consumes it yet (the gateway is issue #524 and the MCP
+long poll #579); no loom model of the notifier (the check is a deterministic model plus a std stress test); the wake
+reveals commit activity to any holder regardless of grants (threat model G-07, issue #363) and a waiter that is
+woken for a commit it cannot read just gets an empty poll; `wait_after` with a `seen` past the database can outlast
+its timeout while commits keep arriving, because no clock is read.
 Verification evidence, not an exit criterion: `lattice-engines::feed_emit` (WP36, issue #238) emits the change feed
 from the row store's retained committed versions. One local run of `cargo test -p lattice-engines --lib feed_emit`
 (6 tests, default settings): the feed from every cursor of 12 seeded 14-commit histories equals an independently

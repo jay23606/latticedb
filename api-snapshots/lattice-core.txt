@@ -81,6 +81,8 @@ pub lattice_core::bugs::Bug::LsnReusedAfterRecovery
 pub lattice_core::bugs::Bug::ManagedIndexesNotRecovered
 pub lattice_core::bugs::Bug::NoDedupe
 pub lattice_core::bugs::Bug::NoParentDirSync
+pub lattice_core::bugs::Bug::NotifyBeforeDurable
+pub lattice_core::bugs::Bug::NotifyWaitIgnoresPublished
 pub lattice_core::bugs::Bug::RecoveryDropsLastRecord
 pub lattice_core::bugs::Bug::RequiredGuardOmitted
 pub lattice_core::bugs::Bug::RotateHeaderNotSynced
@@ -126,6 +128,7 @@ pub const lattice_core::bugs::Bug::GROUPS: &'static [&'static [lattice_core::bug
 pub const lattice_core::bugs::Bug::HLC_SNAPSHOT: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::KEY_LIMIT: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::NON_PREFIX: [lattice_core::bugs::Bug; 1]
+pub const lattice_core::bugs::Bug::NOTIFY: [lattice_core::bugs::Bug; 2]
 pub const lattice_core::bugs::Bug::POLICY: [lattice_core::bugs::Bug; 2]
 pub const lattice_core::bugs::Bug::PRINCIPAL: [lattice_core::bugs::Bug; 1]
 pub const lattice_core::bugs::Bug::RECOVERY_ORDER: [lattice_core::bugs::Bug; 1]

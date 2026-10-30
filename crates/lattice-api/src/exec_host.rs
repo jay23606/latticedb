@@ -44,6 +44,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use lattice_core::Config;
+use lattice_core::bugs::{self, Bug};
 use lattice_engines::authors::AuthorRegistry;
 use lattice_engines::grants::{GrantSpecError, TableGrants};
 use lattice_engines::limits::{AllowAll, DenyAll};
@@ -52,6 +53,7 @@ use lattice_seams::{Clock, Io, OsRng, Rng, StdIo, SystemClock};
 
 use crate::cancel::CancellationToken;
 use crate::exec_handler::ExecHandler;
+use crate::notify::{CommitNotifier, DEFAULT_MAX_WAITERS};
 use crate::pgwire::Column;
 use crate::principal::{Principal, PrincipalKind, QueryContext};
 use crate::session::{QueryError, QueryHandler, QueryOutput};
@@ -262,6 +264,9 @@ pub struct HostLimits {
     /// Milliseconds [`ExecHost::shutdown`] waits for the database thread to end before it gives up
     /// and reports it, leaving the thread behind.
     pub shutdown_grace_ms: u64,
+    /// Threads that may sleep on the commit notifier at once ([`ExecHost::commit_notifier`]). The
+    /// next waiter is refused with [`crate::notify::WaitError::Full`] and polls on a timer instead.
+    pub commit_waiters: usize,
 }
 
 impl Default for HostLimits {
@@ -273,6 +278,7 @@ impl Default for HostLimits {
             queue_depth: 256,
             wait_slack_ms: 5_000,
             shutdown_grace_ms: 10_000,
+            commit_waiters: DEFAULT_MAX_WAITERS,
         }
     }
 }
@@ -344,8 +350,10 @@ type Hold = (SyncSender<()>, Receiver<()>);
 pub struct Stall(#[allow(dead_code)] SyncSender<()>);
 
 /// State every connection and the actor share. Nothing in it can block a sender.
-#[derive(Default)]
 struct HostShared {
+    /// The newest committed LSN, published by the actor after every statement. Closed when the
+    /// actor ends or shutdown begins, so no waiter outlives the host.
+    notifier: Arc<CommitNotifier>,
     /// Set when shutdown begins: waits and sends give up, and the actor stops at its next request.
     stopping: AtomicBool,
     /// Requests in the channel. Signed because the actor can take a request before its sender has
@@ -363,6 +371,24 @@ struct HostShared {
     /// Set when the actor thread has ended, however it ended.
     exited: Mutex<bool>,
     exited_cv: Condvar,
+}
+
+impl HostShared {
+    fn new(commit_waiters: usize) -> Self {
+        HostShared {
+            notifier: Arc::new(CommitNotifier::new(commit_waiters)),
+            stopping: AtomicBool::new(false),
+            queued: AtomicIsize::new(0),
+            peak: AtomicIsize::new(0),
+            closed: Mutex::new(Vec::new()),
+            closed_pending: AtomicBool::new(false),
+            wake_queued: AtomicBool::new(false),
+            space: Mutex::new(()),
+            space_cv: Condvar::new(),
+            exited: Mutex::new(false),
+            exited_cv: Condvar::new(),
+        }
+    }
 }
 
 /// How long a wait may last, counted in the waits that ran out. The server code may not read a
@@ -516,6 +542,8 @@ struct AliveGuard(Arc<AtomicBool>, Arc<HostShared>);
 impl Drop for AliveGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
+        // Waiters on the notifier must not sleep for a database that is gone.
+        self.1.notifier.close();
         *locked(&self.1.exited) = true;
         self.1.exited_cv.notify_all();
     }
@@ -644,7 +672,7 @@ impl ExecHost {
         let (requests, inbox) = mpsc::sync_channel(limits.queue_depth.max(1));
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let alive = Arc::new(AtomicBool::new(true));
-        let shared = Arc::new(HostShared::default());
+        let shared = Arc::new(HostShared::new(limits.commit_waiters));
         let (thread_alive, thread_shared) = (alive.clone(), shared.clone());
         let thread = thread::Builder::new()
             .name("sql-actor".into())
@@ -677,6 +705,9 @@ impl ExecHost {
                     .filter(|n| db.schema().table(n).is_none())
                     .cloned()
                     .collect();
+                // A restarted database starts with its recovered head, so a waiter that has seen
+                // nothing is told at once that there is something to read.
+                thread_shared.notifier.publish(committed_lsn(&db));
                 if ready_tx.send(Ok(unattached)).is_err() {
                     return;
                 }
@@ -743,6 +774,12 @@ impl ExecHost {
         )
     }
 
+    /// The commit notifier: wait on it for "something committed past LSN `x`" instead of polling
+    /// the feed source on a timer. It carries only an LSN; see [`crate::notify`].
+    pub fn commit_notifier(&self) -> Arc<CommitNotifier> {
+        Arc::clone(&self.shared.notifier)
+    }
+
     /// False once the database thread has ended for any reason, including a panic. A supervisor
     /// should treat an unrequested end as a failed server.
     pub fn is_alive(&self) -> bool {
@@ -790,6 +827,7 @@ impl ExecHost {
     /// thread waiting on a stuck actor does not hold the shutdown up.
     pub fn begin_shutdown(&self) {
         self.shared.stopping.store(true, Ordering::Release);
+        self.shared.notifier.close();
     }
 
     /// Stops the actor and drops the database, which releases the directory lock. Handlers created
@@ -842,6 +880,19 @@ impl Drop for ExecHost {
     fn drop(&mut self) {
         let _ = self.shutdown();
     }
+}
+
+/// The newest commit of any kind the database has applied (row writes and catalog changes), which
+/// is what a subscriber can find by reading. Catalog commits move the catalog LSN, so both count.
+fn committed_lsn<I, C, R>(db: &Database<I, C, R>) -> u64
+where
+    I: Io + 'static,
+    C: Clock + Clone + 'static,
+    R: Rng + 'static,
+{
+    db.store()
+        .applied_lsn()
+        .max(db.store().catalog().applied_lsn())
 }
 
 fn serve<I, C, R>(
@@ -933,6 +984,10 @@ fn serve<I, C, R>(
                     }
                     Err(cancelled())
                 } else {
+                    if bugs::active(Bug::NotifyBeforeDurable) {
+                        // The planted defect announces the commit this statement is about to make.
+                        host.notifier.publish(committed_lsn(&db.borrow()) + 1);
+                    }
                     #[cfg(any(test, feature = "test-hooks"))]
                     if let Some((entered, release)) = hold {
                         let _ = entered.send(());
@@ -948,6 +1003,11 @@ fn serve<I, C, R>(
                         &token,
                     )
                 };
+                // Whatever the statement committed is durable by now (the kernel acknowledged it
+                // before the row store applied it), including a statement whose client already
+                // gave up. Publish before answering, so a commit is never announced late relative
+                // to its acknowledgement.
+                host.notifier.publish(committed_lsn(&db.borrow()));
                 let _ = reply.send(result);
             }
             Request::Describe {
@@ -2553,5 +2613,272 @@ reader	allow-all
             .expect("started on a symlinked registry");
         assert!(error.contains("symbolic link"), "{error}");
         let _ = std::fs::remove_dir_all(path);
+    }
+
+    // ---- commit notifier (issue 523) ----
+
+    use crate::notify::WaitError;
+    use crate::subscribe::EventSource;
+
+    /// A host whose database thread has the planted defect `bug` switched on (or none). The
+    /// defect switch is per thread, and the database is opened on the actor's own thread.
+    fn notifier_host(name: &str, bug: Option<Bug>) -> (ExecHost, PathBuf) {
+        let path = dir(name);
+        let data = path.clone();
+        let host = ExecHost::start(
+            move || {
+                if let Some(bug) = bug {
+                    bugs::enable(bug);
+                }
+                Database::open(StdIo::new(data), SystemClock, OsRng, &Config::default())
+            },
+            PolicyTable::new(Grant::AllowAll),
+            HostLimits::default(),
+        )
+        .unwrap();
+        (host, path)
+    }
+
+    fn spawn_thread<T: Send + 'static>(
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> thread::JoinHandle<T> {
+        thread::Builder::new().spawn(f).unwrap()
+    }
+
+    fn lsn_of(cursor: &[u8]) -> u64 {
+        u64::from_be_bytes(cursor[..8].try_into().unwrap())
+    }
+
+    /// The newest LSN the feed source can show for table `t`, read independently of the notifier.
+    fn newest_readable(host: &ExecHost) -> u64 {
+        let who = Principal::local_development();
+        let events = host
+            .feed_source(64)
+            .read_after(&who, "table/t", &[], 64)
+            .unwrap();
+        events.last().map_or(0, |e| lsn_of(&e.cursor))
+    }
+
+    /// Runs `INSERT INTO t VALUES (1)` on a thread and holds it between its dequeue and its run.
+    fn held_insert(host: &ExecHost) -> (thread::JoinHandle<()>, SyncSender<()>, Receiver<()>) {
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel::<()>(1);
+        let mut p = host.handler();
+        p.hold_next_for_test(entered_tx, release_rx);
+        let worker = spawn_thread(move || {
+            let principal = Principal::local_development();
+            let ctx = QueryContext::new(&principal);
+            p.execute(&ctx, "INSERT INTO t VALUES (1)", &[]).unwrap();
+        });
+        (worker, release_tx, entered_rx)
+    }
+
+    /// Creates table `t` and returns the LSN the notifier shows afterwards.
+    fn table_t(host: &ExecHost) -> u64 {
+        let principal = Principal::local_development();
+        let ctx = QueryContext::new(&principal);
+        host.handler()
+            .execute(&ctx, "CREATE TABLE t (id INT PRIMARY KEY)", &[])
+            .unwrap();
+        host.commit_notifier().latest()
+    }
+
+    fn wake_is_published_only_after_the_commit_is_durable(bug: Option<Bug>) {
+        let (host, path) = notifier_host("notify-durable", bug);
+        let notifier = host.commit_notifier();
+        let head = table_t(&host);
+        assert!(head > 0, "a committed statement must have been published");
+        let (worker, release, entered) = held_insert(&host);
+        entered.recv().unwrap();
+        // The statement is dequeued and not yet run: nothing new may be announced.
+        assert_eq!(
+            notifier.wait_after(head, Duration::ZERO),
+            Err(WaitError::TimedOut)
+        );
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        let woken = notifier.wait_after(head, Duration::from_secs(60)).unwrap();
+        assert!(woken > head);
+        // The LSN a waiter is woken with is readable through the feed source.
+        assert_eq!(newest_readable(&host), woken);
+        drop(host);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn wake_is_published_only_after_the_commit_is_durable_for_the_real_host() {
+        wake_is_published_only_after_the_commit_is_durable(None);
+    }
+
+    #[test]
+    #[should_panic(expected = "TimedOut")]
+    fn a_planted_wake_before_the_commit_is_caught() {
+        wake_is_published_only_after_the_commit_is_durable(Some(Bug::NotifyBeforeDurable));
+    }
+
+    #[test]
+    fn a_lost_wake_is_recovered_by_the_timeout() {
+        let (host, path) = notifier_host("notify-lost", None);
+        let notifier = host.commit_notifier();
+        let head = table_t(&host);
+        // A waiter that was never told: its "seen" is past anything published, as if the wake
+        // had been dropped. Its timeout ends the wait and a poll still finds the event.
+        let principal = Principal::local_development();
+        let ctx = QueryContext::new(&principal);
+        host.handler()
+            .execute(&ctx, "INSERT INTO t VALUES (7)", &[])
+            .unwrap();
+        assert_eq!(
+            notifier.wait_after(u64::MAX, Duration::from_millis(60)),
+            Err(WaitError::TimedOut)
+        );
+        assert!(newest_readable(&host) > head);
+        drop(host);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_restart_publishes_the_recovered_head() {
+        let path = dir("notify-restart");
+        let open = |path: &PathBuf| {
+            let data = path.clone();
+            ExecHost::start(
+                move || Database::open(StdIo::new(data), SystemClock, OsRng, &Config::default()),
+                PolicyTable::new(Grant::AllowAll),
+                HostLimits::default(),
+            )
+            .unwrap()
+        };
+        let host = open(&path);
+        let head = table_t(&host);
+        host.shutdown().unwrap();
+        drop(host);
+        let host = open(&path);
+        // A subscriber that has seen nothing is told at once; one that has seen the head is not.
+        assert_eq!(host.commit_notifier().latest(), head);
+        assert_eq!(
+            host.commit_notifier().wait_after(0, Duration::ZERO),
+            Ok(head)
+        );
+        assert_eq!(
+            host.commit_notifier().wait_after(head, Duration::ZERO),
+            Err(WaitError::TimedOut)
+        );
+        drop(host);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_stalled_subscriber_cannot_delay_a_commit() {
+        let (host, path) = notifier_host("notify-stalled", None);
+        let notifier = host.commit_notifier();
+        let head = table_t(&host);
+        // Eight subscribers sleep and never come back for their wake; commits still go through.
+        let sleepers: Vec<_> = (0..8)
+            .map(|_| {
+                let n = notifier.clone();
+                spawn_thread(move || n.wait_after(head, Duration::from_secs(60)))
+            })
+            .collect();
+        while notifier.sleepers() < 8 {
+            pause(1);
+        }
+        let principal = Principal::local_development();
+        let ctx = QueryContext::new(&principal);
+        let mut p = host.handler();
+        for i in 0..20 {
+            p.execute(&ctx, &format!("INSERT INTO t VALUES ({i})"), &[])
+                .unwrap();
+        }
+        for s in sleepers {
+            assert!(matches!(s.join().unwrap(), Ok(l) if l > head));
+        }
+        assert_eq!(newest_readable(&host), notifier.latest());
+        drop(p);
+        drop(host);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn shutdown_wakes_every_waiter_with_closed() {
+        let (host, path) = notifier_host("notify-shutdown", None);
+        let notifier = host.commit_notifier();
+        let head = table_t(&host);
+        let sleepers: Vec<_> = (0..4)
+            .map(|_| {
+                let n = notifier.clone();
+                spawn_thread(move || n.wait_after(head, Duration::from_secs(60)))
+            })
+            .collect();
+        while notifier.sleepers() < 4 {
+            pause(1);
+        }
+        host.begin_shutdown();
+        for s in sleepers {
+            assert_eq!(s.join().unwrap(), Err(WaitError::Closed));
+        }
+        assert_eq!(
+            notifier.wait_after(0, Duration::ZERO),
+            Err(WaitError::Closed)
+        );
+        drop(host);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn a_dead_database_thread_wakes_every_waiter_with_closed() {
+        let (host, path) = notifier_host("notify-crash", None);
+        let notifier = host.commit_notifier();
+        let head = table_t(&host);
+        let sleepers: Vec<_> = (0..4)
+            .map(|_| {
+                let n = notifier.clone();
+                spawn_thread(move || n.wait_after(head, Duration::from_secs(60)))
+            })
+            .collect();
+        while notifier.sleepers() < 4 {
+            pause(1);
+        }
+        host.crash_for_test();
+        for s in sleepers {
+            assert_eq!(s.join().unwrap(), Err(WaitError::Closed));
+        }
+        assert!(!host.is_alive());
+        let _ = host.shutdown();
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn the_sleeper_cap_comes_from_the_host_limits() {
+        let path = dir("notify-cap");
+        let host = ExecHost::start_dir(
+            path.clone(),
+            PolicyTable::new(Grant::AllowAll),
+            HostLimits {
+                commit_waiters: 3,
+                ..HostLimits::default()
+            },
+        )
+        .unwrap();
+        let notifier = host.commit_notifier();
+        let sleepers: Vec<_> = (0..3)
+            .map(|_| {
+                let n = notifier.clone();
+                spawn_thread(move || n.wait_after(0, Duration::from_secs(60)))
+            })
+            .collect();
+        while notifier.sleepers() < 3 {
+            pause(1);
+        }
+        assert_eq!(
+            notifier.wait_after(0, Duration::from_secs(60)),
+            Err(WaitError::Full)
+        );
+        host.begin_shutdown();
+        for s in sleepers {
+            assert_eq!(s.join().unwrap(), Err(WaitError::Closed));
+        }
+        drop(host);
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

@@ -62,8 +62,20 @@ unmeasured); a caught-up reader examines nothing; a commit queued during a read 
 is kept in memory for the row table only and is rebuilt by replay when the store opens, an O(history) step. Known issue,
 accepted for the alpha: a subscriber of a quiet table with more than about 4.2 million other-table or hidden versions
 after its last event gets `Unavailable` on every poll and does not recover by polling (table-scoped index: issue #661).
-Not done: a per-principal cap on feed work and a wall-clock bound (issue #543). No wake-on-commit and no transport exist
-yet.
+Not done: a per-principal cap on feed work and a wall-clock bound (issue #543). No transport exists yet.
+
+`notify::CommitNotifier` (`ExecHost::commit_notifier`) tells waiters "something committed up to LSN `x`" so a
+subscriber polls the feed source when woken instead of on a timer. The actor publishes the newest applied LSN (row or
+catalog commit) after every statement, once the statement has finished, and before it answers the client. A waiter
+calls `wait_after(seen, timeout)` and gets the newest LSN when it is past `seen` (at once if it already is), or
+`TimedOut` (poll anyway: the timeout is the fallback), `Full` (more than `HostLimits::commit_waiters` threads are
+asleep; poll on a timer) or `Closed` (shutdown, or the database thread ended, however it ended). The value and the
+compare share one lock, so a commit that lands before a waiter sleeps is never missed. Memory is one `u64`, a flag
+and a count, whatever the number of waiters; there is no per-waiter queue, and a commit takes one lock and one
+`notify_all`. The wake carries the LSN and nothing else, no row or scope, and it is not checked against any
+principal: it reveals that something committed (threat model G-07, issue #363), so hand it only to authenticated
+connections. The wait counts its timeout in waits that ran out, not with a clock, so a waiter whose `seen` is past
+the database can outlast its timeout while commits keep arriving.
 
 Row commits made through `ExecHandler` carry an author id so change-feed events say who wrote. The id comes from the
 connection's `Principal` only: the fixed id 1 for local development, or the id `AuthorRegistry` assigns to the
