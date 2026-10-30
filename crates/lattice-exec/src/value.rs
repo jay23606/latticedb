@@ -200,7 +200,7 @@ fn parse_date_part(s: &str) -> Option<i64> {
 /// of range), such as `2023-02-29` or `2024-01-01 25:00:00`.
 fn datetime_failure_code(s: &str) -> &'static str {
     let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
-    let t = s.trim();
+    let t = without_ad_era(s.trim());
     let (date, rest) = match t.find([' ', 'T']) {
         Some(at) => (
             t.get(..at).unwrap_or(""),
@@ -248,7 +248,29 @@ fn datetime_failure_code(s: &str) -> &'static str {
 pub(crate) fn parse_date(s: &str) -> Option<i32> {
     let t = s.trim();
     let date = t.split([' ', 'T']).next()?;
+    // PostgreSQL reads the time of day and ignores it, so what follows the date has to be a valid
+    // time or the text is refused. `BC` (a year before 1 AD, outside the date range) and stray text
+    // must not be read as the date in front of them.
+    if date.len() < t.len() {
+        parse_timestamp(without_ad_era(t))?;
+    }
     i32::try_from(parse_date_part(date)?).ok()
+}
+
+/// The text before a trailing `AD` era (the default era, in any case), or the text itself. The era
+/// is a word of its own, so it must follow whitespace: `10:00ad` is not a time followed by an era.
+fn without_ad_era(t: &str) -> &str {
+    let Some(at) = t.len().checked_sub(2) else {
+        return t;
+    };
+    match (t.get(..at), t.get(at..)) {
+        (Some(body), Some(era))
+            if era.eq_ignore_ascii_case("ad") && body.ends_with(char::is_whitespace) =>
+        {
+            body.trim_end()
+        }
+        _ => t,
+    }
 }
 
 /// Parses `YYYY-MM-DD[ T]HH:MM[:SS[.ffffff]][Z|+hh[:mm]|-hh[:mm]]`; a bare date is midnight UTC.
