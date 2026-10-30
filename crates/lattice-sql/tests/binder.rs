@@ -272,6 +272,37 @@ fn bind_errors_carry_the_postgres_sqlstate_and_the_lattice_code() {
             Some("LSQL-0003"),
         ),
         ("SELECT id FROM s.notes", "3F000", None),
+        // a bare constant that is not an integer position is not a sort key (PostgreSQL: 42601)
+        (
+            "SELECT id FROM notes ORDER BY 'x'",
+            "42601",
+            Some("LSQL-0001"),
+        ),
+        (
+            "SELECT id FROM notes ORDER BY 1.5",
+            "42601",
+            Some("LSQL-0001"),
+        ),
+        (
+            "SELECT id FROM notes ORDER BY 1e0",
+            "42601",
+            Some("LSQL-0001"),
+        ),
+        (
+            "SELECT id FROM notes ORDER BY NULL",
+            "42601",
+            Some("LSQL-0001"),
+        ),
+        (
+            "SELECT id FROM notes ORDER BY true",
+            "42601",
+            Some("LSQL-0001"),
+        ),
+        (
+            "SELECT id FROM notes ORDER BY 2147483648",
+            "42601",
+            Some("LSQL-0001"),
+        ),
         // datatype mismatch
         ("SELECT id FROM notes WHERE title = 1", "42804", None),
         ("SELECT id FROM notes WHERE id", "42804", None),
@@ -1073,4 +1104,22 @@ fn an_empty_alias_is_a_parse_error_so_no_source_is_ever_named_empty() {
     // The binder tells the FROM-less source apart by its empty qualifier; this keeps that sound.
     assert!(parse_statement(r#"SELECT 1 AS """#).is_err());
     assert!(parse_statement(r#"SELECT 1 FROM notes AS """#).is_err());
+}
+
+#[test]
+fn an_expression_over_constants_is_still_a_sort_key_but_a_bare_constant_is_not() {
+    // PostgreSQL accepts these: only a bare constant is read as a position, anything with an
+    // operator, a cast or parentheses is an expression (a constant one, which sorts nothing).
+    for key in ["+1", "(1)", "1 + 0", "1::int", "CAST(1 AS INT)", "01", "2"] {
+        plan_of(&format!("SELECT id, title FROM notes ORDER BY {key}"));
+    }
+    // Position 3 is outside a two column select list.
+    assert_eq!(
+        bind_err("SELECT id, title FROM notes ORDER BY 3").sqlstate(),
+        "42P10"
+    );
+    assert_eq!(
+        bind_err("SELECT id, title FROM notes ORDER BY 0").sqlstate(),
+        "42P10"
+    );
 }

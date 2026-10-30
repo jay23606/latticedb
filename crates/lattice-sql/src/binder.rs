@@ -1253,17 +1253,25 @@ impl Binder<'_> {
                     }
                 }
             }
-            ExprKind::Literal(Literal::Number(n)) => {
-                if let Ok(pos) = n.parse::<usize>() {
-                    return match pos.checked_sub(1).and_then(|i| outputs.get(i)) {
-                        Some(c) => Ok(c.expr.clone()),
-                        None => err(
-                            BindErrorKind::InvalidColumnReference,
-                            format!("ORDER BY position {pos} is not in select list"),
-                            e.span,
-                        ),
-                    };
-                }
+            ExprKind::Literal(Literal::Number(n)) if n.parse::<i32>().is_ok() => {
+                let pos = n.parse::<usize>().unwrap_or(0);
+                return match pos.checked_sub(1).and_then(|i| outputs.get(i)) {
+                    Some(c) => Ok(c.expr.clone()),
+                    None => err(
+                        BindErrorKind::InvalidColumnReference,
+                        format!("ORDER BY position {pos} is not in select list"),
+                        e.span,
+                    ),
+                };
+            }
+            // A bare constant that is not an `integer` is not a sort key at all (`ORDER BY 'x'`,
+            // `ORDER BY 1.5`, `ORDER BY NULL`); only a position may be a bare constant.
+            ExprKind::Literal(_) => {
+                return err(
+                    BindErrorKind::Syntax,
+                    "non-integer constant in ORDER BY",
+                    e.span,
+                );
             }
             _ => {}
         }
