@@ -167,6 +167,15 @@ planted_bugs! {
     /// A table grant is matched by name prefix instead of exactly, so a grant on `notes` also
     /// covers `notes_private` (authorization).
     GrantTableMatchByPrefix,
+    /// The executor takes the author of a commit from client-controlled text (the statement)
+    /// instead of the authenticated principal (forged provenance).
+    AuthorFromClient,
+    /// The account registry derives an author id from a hash truncated to a few bits, so two
+    /// accounts can share one id (provenance and CRDT node binding).
+    AuthorIdTruncatedHash,
+    /// Startup does not check the author registry against the author ids in the retained log, so a
+    /// missing or older registry restarts its counter at ids that history already carries.
+    AuthorRegistryLogCheckSkipped,
 }
 
 impl Bug {
@@ -279,6 +288,14 @@ impl Bug {
         Bug::CheckpointIgnoresInFlight,
     ];
 
+    /// Provenance defects (issue 520): the author recorded with a commit must be the authenticated
+    /// principal's injective id, detected by the author witnesses in `lattice-engines` and `lattice-api`.
+    pub const AUTHOR: [Bug; 3] = [
+        Bug::AuthorFromClient,
+        Bug::AuthorIdTruncatedHash,
+        Bug::AuthorRegistryLogCheckSkipped,
+    ];
+
     /// Every group, the single registry of planted bugs: each variant belongs to exactly one of
     /// these. `ROW` is a subset view of `STORAGE` (the seeded row simulation's contract) and is
     /// deliberately not listed. Add a new group const here.
@@ -300,6 +317,7 @@ impl Bug {
         &Bug::FENCE_ORDER,
         &Bug::RECOVERY_ORDER,
         &Bug::NON_PREFIX,
+        &Bug::AUTHOR,
     ];
 }
 
