@@ -26,6 +26,8 @@ mod account;
 
 mod watch;
 
+mod mcp_proxy;
+
 fn doctor<I: Io>(io: &I, wal: &str) -> (String, bool) {
     let report = match scrub(io, wal) {
         Ok(r) => r,
@@ -385,6 +387,7 @@ fn main() -> ExitCode {
             }
         }
         Some("watch") => watch::command(args.get(1..).unwrap_or_default()),
+        Some("mcp") => mcp_proxy::command(args.get(1..).unwrap_or_default()),
         Some("account") => account_command(args.get(1..).unwrap_or_default()),
         Some("lsl") => lsl_command(args.get(1..).unwrap_or_default()),
         _ => {
@@ -402,6 +405,7 @@ fn main() -> ExitCode {
             eprintln!(
                 "       lattice watch table/NAME --url ws://HOST:PORT --token-file FILE (--from CURSOR | --from-start)"
             );
+            eprintln!("       lattice mcp --url http://127.0.0.1:PORT/mcp --token-file FILE");
             ExitCode::from(2)
         }
     }

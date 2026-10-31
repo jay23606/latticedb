@@ -317,13 +317,21 @@ the CLI does not set it yet). A scope outside the workspace is `40302 scope deni
 so a client that sent the wrong one learns which to send, and nothing about its grants. A sub-scope such as
 `default/x` is the tool error `not_found`. The `Accept` header is not checked: every answer is JSON.
 
-Not here: stdio, Streamable HTTP streams (SSE, GET, sessions and resumption), and the per-principal limit
+Stdio proxy. `lattice mcp --url http://127.0.0.1:PORT/mcp --token-file FILE` (issue #775) lets a client that speaks
+MCP over stdio use this endpoint. It reads one JSON-RPC message per line from standard input, sends each as
+`POST /mcp` with the token in `Authorization`, and writes each reply as one line on standard output. A message
+over 1 MiB is refused with a JSON-RPC error and never sent. A reply is passed through unchanged, and a
+non-200 status becomes a JSON-RPC error. The proxy connects only to a loopback address over plain HTTP, so
+it has no TLS yet; the token comes from an owner-only file or from the first line of standard input, never
+from the command line.
+
+Not here: Streamable HTTP streams (SSE, GET, sessions and resumption), and the per-principal limit
 on long polls (issue #529). A `lattice_subscribe` call with `wait_ms` holds its connection thread for up to
 30 seconds; the connection counts against the gateway's connection limit, not a per-principal budget.
 
 ## Not implemented
 
-- Transports other than HTTP `POST /mcp`: stdio framing, and Streamable HTTP streams (SSE, GET, sessions).
+- Transports other than HTTP `POST /mcp` and the `lattice mcp` stdio proxy: Streamable HTTP streams (SSE, GET, sessions).
 - Authentication and authorization framework: the transport supplies the `Caller`; nothing here
   verifies identity or issues grants.
 - Resources, prompts, completion, logging, sampling, elicitation and roots.

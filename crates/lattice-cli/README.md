@@ -25,3 +25,10 @@ as 24 lowercase hex digits, the form `--from` takes) and the rule that an event 
 after its line is printed exist in this build. The network loop that connects and prints events is
 not wired yet, so a valid invocation stops with an error saying the transport is not built.
 `lattice watch --help` lists the flags.
+
+`lattice mcp --url http://127.0.0.1:PORT/mcp --token-file FILE` is a stdio proxy to the gateway's
+`POST /mcp` endpoint (issue #775). It reads one JSON-RPC message per line from standard input and writes
+each reply as one line on standard output; diagnostics go to standard error. The URL must be `http://` on
+a loopback address with a port and the path `/mcp` (the CLI has no TLS client yet). The token is read from
+an owner-only file, or from the first line of standard input with `-`, and a token on the command line is
+refused. A message over 1 MiB is refused with a JSON-RPC error. `lattice mcp --help` lists the flags.
