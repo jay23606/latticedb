@@ -7,8 +7,11 @@
 //! is set only for `latticed`'s own tests), and `latticed/tests/ws_sync.rs` already starts it this
 //! way. Every byte the clients see crosses a real TCP socket.
 
+pub mod json;
+pub mod mcp;
 pub mod schedule;
 
+pub use mcp::Mcp;
 pub use schedule::kill_points;
 
 use lattice_api::bearer::{CredentialStore, issue};
@@ -51,7 +54,7 @@ fn mint(store: &mut CredentialStore, account: &str) -> Result<String> {
 pub struct Tokens {
     /// Holds `*=rwd` in the policy file: every table.
     pub alice: String,
-    /// Holds `notes=r` in the policy file: read-only on `notes`.
+    /// Holds `notes=r,kv=r` in the policy file: read-only on `notes` and `kv`.
     pub bob: String,
 }
 
@@ -77,8 +80,9 @@ impl Fixture {
         let mut store = CredentialStore::empty();
         let alice = mint(&mut store, "alice")?;
         let bob = mint(&mut store, "bob")?;
-        let accounts = PolicyTable::parse_accounts("alice\ttables: *=rwd\nbob\ttables: notes=r\n")
-            .map_err(text)?;
+        let accounts =
+            PolicyTable::parse_accounts("alice\ttables: *=rwd\nbob\ttables: notes=r,kv=r\n")
+                .map_err(text)?;
         let gateway = GatewayConfig {
             address: SocketAddr::from(([127, 0, 0, 1], 0)),
             auth: GatewayAuth::Bearer(store),
@@ -126,6 +130,20 @@ impl Fixture {
             pg.run(&format!("INSERT INTO notes VALUES ({n}, 'v{n:04}')"))?;
         }
         Ok(())
+    }
+
+    /// Creates `kv` if it is missing: the key/value shape the MCP tools address (`key text PRIMARY
+    /// KEY`, `value text`, `version bigint NOT NULL`). Alice may write it and bob may read it.
+    pub fn create_kv(&self) -> Result<()> {
+        self.writer()?.run(
+            "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT, version BIGINT NOT NULL)",
+        )
+    }
+
+    /// A client for `POST /mcp` on this fixture's gateway, with `token` as the bearer credential.
+    /// `None` sends no credential.
+    pub fn mcp(&self, token: Option<&str>) -> Mcp {
+        Mcp::new(self.ws, token)
     }
 }
 
