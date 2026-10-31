@@ -67,6 +67,5 @@ Gateway TLS (issue #578) is implemented. `--tls-cert` and `--tls-key` serve the 
 the same certificate and key as the PostgreSQL listener, so clients must trust a name valid for both ports. A
 non-loopback `--gateway-listen` needs TLS and `--gateway-tokens`; otherwise latticed refuses to start. Plaintext
 is for loopback development only. Loopback is `127.0.0.0/8` and `::1` (as in the PostgreSQL listener); an IPv4-mapped address such as `[::ffff:127.0.0.1]` needs TLS and tokens. `POST /mcp` answers
-only to its bound address or to localhost on the bound port, so a DNS name or public address gets `403` until
-the configurable allowed-host list of #774 exists. `/sync` checks that `Host` is present and well formed, and
+only to its bound address, to localhost on the bound port, and to the names given with `--gateway-allowed-host` (#774, exact match, at most 16), so any other `Host` gets `403`. `/sync` checks that `Host` is present and well formed, and
 refuses any browser `Origin`. Idle deadlines and the rest of #578 are still open.

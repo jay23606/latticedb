@@ -68,7 +68,67 @@ fn version_and_help_print_and_exit_cleanly() {
             "{}",
             stdout(&o)
         );
+        assert!(stdout(&o).contains("--gateway-allowed-host NAME[:PORT]"));
     }
+}
+
+#[test]
+fn gateway_allowed_hosts_need_the_gateway_and_well_formed_names() {
+    refused(
+        &["--gateway-allowed-host", "gateway.example.test"],
+        "--gateway-allowed-host requires --gateway-listen",
+    );
+    refused(
+        &gateway_args(&["--gateway-allowed-host", "a b"]),
+        "--gateway-allowed-host \"a b\" is not a valid host: it has a space or a control character",
+    );
+    refused(
+        &gateway_args(&["--gateway-allowed-host", "*.example.test"]),
+        "--gateway-allowed-host \"*.example.test\" is not a valid host: a label has a character other than a letter, digit or hyphen (no wildcards)",
+    );
+    refused(
+        &gateway_args(&["--gateway-allowed-host", "10.0.0.0/8"]),
+        "--gateway-allowed-host \"10.0.0.0/8\" is not a valid host: it has a path, query or fragment; give the host name and an optional port only",
+    );
+    refused(
+        &gateway_args(&["--gateway-allowed-host", "example.test:0"]),
+        "--gateway-allowed-host \"example.test:0\" is not a valid host: the port is not in 1..=65535",
+    );
+    // The bind is 127.0.0.1:0, so the bound port in the defaults and in the entry is 0.
+    refused(
+        &gateway_args(&[
+            "--gateway-allowed-host",
+            "example.test",
+            "--gateway-allowed-host",
+            "EXAMPLE.test",
+        ]),
+        "--gateway-allowed-host example.test:0 is listed twice",
+    );
+    let seventeen: Vec<String> = (0..17).map(|i| format!("h{i}.test")).collect();
+    let mut extra: Vec<&str> = Vec::new();
+    for host in &seventeen {
+        extra.push("--gateway-allowed-host");
+        extra.push(host);
+    }
+    refused(
+        &gateway_args(&extra),
+        "at most 16 --gateway-allowed-host values are accepted, got 17",
+    );
+}
+
+/// The arguments of a gateway that would otherwise start, with `extra` appended. The data directory is
+/// never opened: these tests stop at the argument checks.
+fn gateway_args<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
+        "--data-dir",
+        "/nonexistent-latticed-allowed-hosts",
+        "--development-policy",
+        "deny-all",
+        "--gateway-listen",
+        "127.0.0.1:0",
+    ];
+    args.extend_from_slice(extra);
+    args
 }
 
 #[test]

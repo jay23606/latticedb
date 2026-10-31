@@ -247,10 +247,21 @@ tokens; use a TLS-terminating proxy only if it keeps that protection.
 
 A request is one MCP JSON-RPC message in the body. Its headers must be:
 
-- `Host`: this listener's address (`127.0.0.1:PORT`) or `localhost:PORT`, exactly once. Anything else is `403`. On a
-  non-loopback bind (`0.0.0.0:PORT`, `[::]:PORT`) a DNS name or public address therefore gets `403` as well: the
-  endpoint answers only to the bound address or localhost. A configurable allowed-host list is future work, tracked in
-  #774. The `Host` check is the DNS-rebinding defence and is not widened to make that work.
+- `Host`: exactly once, and equal (ASCII case-insensitive) to one allowed host. The allowed hosts are this listener's
+  address (`127.0.0.1:PORT`), `localhost:PORT`, and each name given with `--gateway-allowed-host NAME[:PORT]`. Anything
+  else is `403`, and the port is part of the match: a `Host` without a port is refused, as the defaults already are.
+  The defaults are never removed.
+
+  `--gateway-allowed-host` (issue #774) is repeatable, at most 16, and needs `--gateway-listen`. A name is an ASCII DNS
+  name or an IP literal (an IPv6 literal in brackets). It matches exactly: no wildcards, no IP ranges, no userinfo, no
+  path, no whitespace. An entry without a port means the bound port: with `--gateway-listen 0.0.0.0:7070` behind the
+  name `agents.example.test`, `--gateway-allowed-host agents.example.test` matches `Host: agents.example.test:7070`.
+  The bind still needs TLS and tokens. List only names you control that resolve to this gateway. A name on a
+  plaintext loopback bind with no tokens is the classic DNS-rebinding setup, protected only by the `Origin` refusal, so
+  use TLS and tokens whenever a name beyond `localhost` is configured. A malformed value, a repeated name, or a name
+  that is already a default stops the start. The `Host` check is the DNS-rebinding defence: a name not listed, and any name
+  that only resolves to loopback, still gets `403`. The `/sync` WebSocket handling of `Host` is unchanged, and the list
+  does not apply to it.
 - `Authorization: Bearer <token>`: the same verification, failure count and rate limit as the WebSocket
   upgrade. A missing, malformed, unknown or revoked token gets the same `401` bytes. Too many failures from
   one address get `429`.

@@ -19,7 +19,7 @@ use lattice_api::bearer::{CredentialStore, TokenId, issue, verify_bearer};
 use lattice_api::exec_host::{ExecHost, Grant, HostLimits, PolicyTable};
 use lattice_api::principal::Principal;
 use lattice_seams::OsRng;
-use latticed::ws::{GatewayAuth, GatewayConfig};
+use latticed::ws::{AllowedHost, GatewayAuth, GatewayConfig};
 use latticed::{ServerConfig, SqlConfig, SqlServer, load_credential_store, write_credential_store};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -879,4 +879,123 @@ fn a_workspace_that_is_not_an_mcp_scope_stops_the_start() {
     );
     assert!(started.is_err());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- configured Host names (--gateway-allowed-host, issue #774) ------------------------------------
+
+/// A server whose `POST /mcp` also answers to `names`, as `--gateway-allowed-host` values.
+fn start_with_hosts(name: &str, names: &[&str]) -> Fixture {
+    let hosts: Vec<AllowedHost> = names
+        .iter()
+        .map(|text| AllowedHost::parse(text).unwrap())
+        .collect();
+    start(name, move |g| g.allowed_hosts = hosts)
+}
+
+/// `POST /mcp` as alice with the given `Host` value.
+fn call_with_host(f: &Fixture, host: &str) -> Resp {
+    let alice = f.token("alice");
+    let body = list(1);
+    let mut h = headers(f.port, Some(&alice), body.len());
+    h[0] = format!("Host: {host}");
+    exchange(f.port, &raw("POST", "/mcp", &h, body.as_bytes()))
+}
+
+#[test]
+fn a_configured_host_is_answered_with_its_port_in_any_case_and_the_defaults_stay() {
+    let f = start_with_hosts(
+        "allowed-accept",
+        &["Gateway.Example.test", "proxy.example.test:9443"],
+    );
+    let port = f.port;
+    // The bound port is the default port of an entry without one, matched in any case.
+    assert_eq!(
+        call_with_host(&f, &format!("gateway.example.test:{port}")).status,
+        200
+    );
+    assert_eq!(
+        call_with_host(&f, &format!("GATEWAY.Example.TEST:{port}")).status,
+        200
+    );
+    // An entry with its own port answers to that port.
+    assert_eq!(call_with_host(&f, "proxy.example.test:9443").status, 200);
+    // The defaults are unchanged.
+    assert_eq!(call_with_host(&f, &format!("127.0.0.1:{port}")).status, 200);
+    assert_eq!(call_with_host(&f, &format!("localhost:{port}")).status, 200);
+    // Another port, a name that was not configured, and a configured name without its port are refused.
+    assert_eq!(
+        call_with_host(&f, &format!("proxy.example.test:{port}")).status,
+        403
+    );
+    assert_eq!(
+        call_with_host(&f, &format!("gateway.example.test:{}", port + 1)).status,
+        403
+    );
+    assert_eq!(
+        call_with_host(&f, &format!("other.example.test:{port}")).status,
+        403
+    );
+    assert_eq!(call_with_host(&f, "gateway.example.test").status, 403);
+    // A name that only resolves to loopback is still a rebinding attempt, configured or not.
+    assert_eq!(
+        call_with_host(&f, &format!("rebind.example:{port}")).status,
+        403
+    );
+}
+
+#[test]
+fn a_host_with_userinfo_a_path_or_whitespace_is_refused_even_for_a_configured_name() {
+    let f = start_with_hosts("allowed-junk", &["gateway.example.test"]);
+    let port = f.port;
+    for host in [
+        format!("gateway.example.test@evil.example:{port}"),
+        format!("evil.example@gateway.example.test:{port}"),
+        format!("gateway.example.test :{port}"),
+        format!("gateway example.test:{port}"),
+        format!("gateway.example.test:{port}/mcp"),
+        format!("gateway.example.test:{port}?x=1"),
+    ] {
+        assert_eq!(call_with_host(&f, &host).status, 403, "Host: {host}");
+    }
+    // A control character in the value is malformed before the Host check runs.
+    let r = call_with_host(&f, &format!("gateway.example.test:{port}\u{1}"));
+    assert_eq!(r.status, 400, "{}", r.head);
+    // The configured name itself, unchanged, is served.
+    assert_eq!(
+        call_with_host(&f, &format!("gateway.example.test:{port}")).status,
+        200
+    );
+}
+
+#[test]
+fn a_host_is_compared_as_written_so_a_trailing_dot_or_a_leading_zero_port_is_refused() {
+    let f = start_with_hosts("allowed-as-written", &["gateway.example.test"]);
+    let port = f.port;
+    // The name is compared as the client wrote it: a fully qualified form with a trailing dot, and a port
+    // written with a leading zero, are different strings and are refused.
+    assert_eq!(
+        call_with_host(&f, &format!("gateway.example.test.:{port}")).status,
+        403
+    );
+    assert_eq!(
+        call_with_host(&f, &format!("gateway.example.test:0{port}")).status,
+        403
+    );
+    assert_eq!(
+        call_with_host(&f, &format!("gateway.example.test:{port}")).status,
+        200
+    );
+}
+
+#[test]
+fn the_default_hosts_still_work_without_any_configured_name() {
+    let f = start("allowed-none", |_| {});
+    let port = f.port;
+    assert_eq!(call_with_host(&f, &format!("127.0.0.1:{port}")).status, 200);
+    assert_eq!(call_with_host(&f, &format!("localhost:{port}")).status, 200);
+    assert_eq!(
+        call_with_host(&f, "gateway.example.test").status,
+        403,
+        "an unconfigured name is refused"
+    );
 }

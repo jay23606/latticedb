@@ -6,8 +6,9 @@
 //! refusal names anything the request sent:
 //!
 //! 1. The target is `/mcp`. A query string is refused (400), so a token never travels in a URL.
-//! 2. `Host` is exactly one value and it is this listener's address or `localhost` on the bound port
-//!    (403). A page on another name that resolves to loopback is refused (DNS rebinding).
+//! 2. `Host` is exactly one value and it is one of the allowed hosts (403): this listener's address and
+//!    `localhost` on the bound port, plus the names given with `--gateway-allowed-host`. A page on another
+//!    name that resolves to loopback is refused (DNS rebinding).
 //! 3. No `Origin` header is accepted, `null` included (403). A browser sends one on every cross-origin
 //!    request, so no web page can call the endpoint. No CORS header is ever sent.
 //! 4. `POST` only (405, `Allow: POST`).
@@ -41,7 +42,7 @@ use crate::transport::Transport;
 use lattice_core::bugs::{self, Bug};
 use lattice_sdk::mcp::{Caller, Json, Server, parse_json};
 use std::io::Read;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -176,14 +177,184 @@ fn single<'a>(values: &[&'a str]) -> Option<&'a str> {
     }
 }
 
-/// The `Host` values this listener answers to: its own address and `localhost`, on its bound port.
-pub(super) fn allowed_hosts(bound: SocketAddr) -> [String; 2] {
+/// The most `--gateway-allowed-host` names a gateway accepts, beyond its defaults.
+pub const MAX_ALLOWED_HOSTS: usize = 16;
+
+/// The longest `--gateway-allowed-host` value, in bytes.
+const MAX_ALLOWED_HOST_BYTES: usize = 255;
+
+/// The longest host name, in bytes, as DNS allows it.
+const MAX_NAME_BYTES: usize = 253;
+
+/// One extra `Host` the endpoint answers to, from `--gateway-allowed-host NAME[:PORT]`. The name is an
+/// ASCII DNS name or an IP literal (an IPv6 literal in brackets). It matches exactly and without
+/// wildcards, case-insensitively. An entry without a port means the bound port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowedHost {
+    /// Lower-cased. An IPv6 literal keeps its brackets, as a `Host` header does.
+    name: String,
+    /// The port, or `None` for the bound port.
+    port: Option<u16>,
+}
+
+impl AllowedHost {
+    /// Parses one `NAME[:PORT]` value. The error names the value and the rule it breaks.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        parse_host(text)
+            .map_err(|why| format!("--gateway-allowed-host {text:?} is not a valid host: {why}"))
+    }
+}
+
+/// The rules of one `NAME[:PORT]` value. Every class of refusal has its own reason.
+fn parse_host(text: &str) -> Result<AllowedHost, &'static str> {
+    if text.is_empty() {
+        return Err("it is empty");
+    }
+    if text.len() > MAX_ALLOWED_HOST_BYTES {
+        return Err("it is longer than 255 bytes");
+    }
+    if !text.is_ascii() {
+        return Err("it has a non-ASCII character");
+    }
+    if text.bytes().any(|b| b <= b' ' || b == 0x7f) {
+        return Err("it has a space or a control character");
+    }
+    if text.contains('@') {
+        return Err("it has userinfo (an '@'); give the host name and an optional port only");
+    }
+    if text.contains(['/', '?', '#']) {
+        return Err(
+            "it has a path, query or fragment; give the host name and an optional port only",
+        );
+    }
+    let (name, port) = match text.strip_prefix('[') {
+        Some(rest) => {
+            let (literal, after) = rest
+                .split_once(']')
+                .ok_or("an IPv6 literal needs a closing ']'")?;
+            if literal.parse::<Ipv6Addr>().is_err() {
+                return Err("only an IPv6 literal may be bracketed");
+            }
+            let port = match after {
+                "" => None,
+                _ => Some(
+                    after
+                        .strip_prefix(':')
+                        .ok_or("only ':PORT' may follow a bracketed IPv6 literal")?,
+                ),
+            };
+            (format!("[{literal}]"), port)
+        }
+        None => {
+            if text.matches(':').count() > 1 {
+                return Err("an IPv6 literal must be in brackets, such as [::1]:PORT");
+            }
+            let (name, port) = match text.split_once(':') {
+                Some((name, port)) => (name, Some(port)),
+                None => (text, None),
+            };
+            check_name(name)?;
+            (name.to_owned(), port)
+        }
+    };
+    let port = port.map(parse_port).transpose()?;
+    Ok(AllowedHost {
+        name: name.to_ascii_lowercase(),
+        port,
+    })
+}
+
+/// A host name without brackets or port: an IPv4 literal, or an ASCII DNS name whose labels are
+/// letters, digits and inner hyphens.
+fn check_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("it has no host name");
+    }
+    if name.parse::<Ipv4Addr>().is_ok() {
+        return Ok(());
+    }
+    if name.len() > MAX_NAME_BYTES {
+        return Err("the host name is longer than 253 bytes");
+    }
+    for label in name.split('.') {
+        if label.is_empty() {
+            return Err("it has an empty label (a doubled or a trailing dot)");
+        }
+        if label.len() > 63 {
+            return Err("a label is longer than 63 bytes");
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err("a label starts or ends with a hyphen");
+        }
+        if !label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err(
+                "a label has a character other than a letter, digit or hyphen (no wildcards)",
+            );
+        }
+    }
+    if name
+        .split('.')
+        .all(|label| label.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err("it looks like an IPv4 address but is not one");
+    }
+    Ok(())
+}
+
+/// A port: decimal digits, `1..=65535`.
+fn parse_port(digits: &str) -> Result<u16, &'static str> {
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("the port is not decimal digits");
+    }
+    match digits.parse::<u16>() {
+        Ok(port) if port != 0 => Ok(port),
+        _ => Err("the port is not in 1..=65535"),
+    }
+}
+
+/// The `Host` values a listener on `bound` answers to, as `name:port`. The defaults come first: its own
+/// address and `localhost`, on the bound port. Then each configured name, with the bound port where it
+/// has none. Refuses more than [`MAX_ALLOWED_HOSTS`] names, and a name that repeats a default or another
+/// name, so that no entry is silently redundant. Entries add to the defaults and never remove them.
+pub(super) fn allowed_hosts(
+    bound: SocketAddr,
+    extra: &[AllowedHost],
+) -> Result<Vec<String>, String> {
+    if extra.len() > MAX_ALLOWED_HOSTS {
+        return Err(format!(
+            "at most {MAX_ALLOWED_HOSTS} --gateway-allowed-host values are accepted, got {}",
+            extra.len()
+        ));
+    }
     let port = bound.port();
     let ip = match bound.ip() {
         IpAddr::V4(v4) => v4.to_string(),
         IpAddr::V6(v6) => format!("[{v6}]"),
     };
-    [format!("{ip}:{port}"), format!("localhost:{port}")]
+    let defaults = [format!("{ip}:{port}"), format!("localhost:{port}")];
+    let mut allowed: Vec<String> = defaults.to_vec();
+    for host in extra {
+        let resolved = format!("{}:{}", host.name, host.port.unwrap_or(port));
+        if defaults.contains(&resolved) {
+            return Err(format!(
+                "--gateway-allowed-host {resolved} is already allowed by default"
+            ));
+        }
+        if allowed.contains(&resolved) {
+            return Err(format!("--gateway-allowed-host {resolved} is listed twice"));
+        }
+        allowed.push(resolved);
+    }
+    Ok(allowed)
+}
+
+/// Checks the `--gateway-allowed-host` values of a configuration against its listener address with the
+/// rules the gateway applies when it starts: the count, and no name repeated.
+pub fn check_allowed_hosts(address: SocketAddr, hosts: &[AllowedHost]) -> Result<(), String> {
+    allowed_hosts(address, hosts).map(|_| ())
 }
 
 /// Whether a request's `Host` is one this listener answers to (ASCII case-insensitive).
@@ -292,8 +463,7 @@ pub(super) fn answer(
         );
     }
 
-    let allowed = allowed_hosts(shared.bound);
-    if !host_allowed(single(&head.values("host")), &allowed) {
+    if !host_allowed(single(&head.values("host")), &shared.allowed) {
         return refuse(
             socket,
             cfg,
@@ -609,8 +779,12 @@ mod tests {
         "127.0.0.1:5433".parse().unwrap()
     }
 
-    fn allowed() -> [String; 2] {
-        allowed_hosts(bound())
+    fn allowed() -> Vec<String> {
+        allowed_hosts(bound(), &[]).unwrap()
+    }
+
+    fn host_n(i: usize) -> AllowedHost {
+        AllowedHost::parse(&format!("h{i}.test")).unwrap()
     }
 
     #[test]
@@ -624,6 +798,139 @@ mod tests {
         assert!(!host_allowed(Some("rebind.example:5433"), &allowed));
         assert!(!host_allowed(Some("[::1]:5433"), &allowed));
         assert!(!host_allowed(None, &allowed));
+    }
+
+    #[test]
+    fn configured_names_add_to_the_defaults_and_match_exactly() {
+        let extra = [
+            AllowedHost::parse("Gateway.Example.test").unwrap(),
+            AllowedHost::parse("proxy.example.test:9443").unwrap(),
+            AllowedHost::parse("[2001:DB8::1]:5433").unwrap(),
+        ];
+        let allowed = allowed_hosts(bound(), &extra).unwrap();
+        assert!(host_allowed(Some("gateway.example.test:5433"), &allowed));
+        assert!(host_allowed(Some("GATEWAY.EXAMPLE.TEST:5433"), &allowed));
+        assert!(host_allowed(Some("proxy.example.test:9443"), &allowed));
+        assert!(host_allowed(Some("[2001:db8::1]:5433"), &allowed));
+        // The defaults are still there.
+        assert!(host_allowed(Some("127.0.0.1:5433"), &allowed));
+        assert!(host_allowed(Some("localhost:5433"), &allowed));
+        // A name without its port is not the bound port, and a port that is not the bound one is refused
+        // for an entry that has none.
+        assert!(!host_allowed(Some("gateway.example.test"), &allowed));
+        assert!(!host_allowed(Some("gateway.example.test:5434"), &allowed));
+        assert!(!host_allowed(Some("proxy.example.test:5433"), &allowed));
+        assert!(!host_allowed(Some("other.example.test:5433"), &allowed));
+        assert!(!host_allowed(
+            Some("evil.gateway.example.test:5433"),
+            &allowed
+        ));
+    }
+
+    #[test]
+    fn a_valid_value_parses_to_its_name_and_port() {
+        assert_eq!(
+            AllowedHost::parse("Example.TEST").unwrap(),
+            AllowedHost {
+                name: "example.test".to_owned(),
+                port: None
+            }
+        );
+        assert_eq!(
+            AllowedHost::parse("h.test:8443").unwrap(),
+            AllowedHost {
+                name: "h.test".to_owned(),
+                port: Some(8443)
+            }
+        );
+        assert_eq!(
+            AllowedHost::parse("10.0.0.5").unwrap().name,
+            "10.0.0.5".to_owned()
+        );
+        assert_eq!(
+            AllowedHost::parse("[2001:DB8::1]:7070").unwrap(),
+            AllowedHost {
+                name: "[2001:db8::1]".to_owned(),
+                port: Some(7070)
+            }
+        );
+        assert_eq!(AllowedHost::parse("[::1]").unwrap().port, None);
+    }
+
+    #[test]
+    fn every_malformed_class_is_refused_with_its_reason() {
+        let mut cases: Vec<(String, &str)> = [
+            ("", "is empty"),
+            ("exa mple.com", "space or a control"),
+            ("exa\tmple.com", "space or a control"),
+            ("ex\u{7}ample.com", "space or a control"),
+            ("exämple.com", "non-ASCII"),
+            ("user@example.com", "userinfo"),
+            ("example.com/path", "path, query or fragment"),
+            ("10.0.0.0/8", "path, query or fragment"),
+            ("example.com?x=1", "path, query or fragment"),
+            ("example.com#frag", "path, query or fragment"),
+            ("*.example.com", "other than a letter, digit or hyphen"),
+            ("exa_mple.com", "other than a letter, digit or hyphen"),
+            ("example..com", "empty label"),
+            ("example.com.", "empty label"),
+            ("-example.com", "starts or ends with a hyphen"),
+            ("example-.com", "starts or ends with a hyphen"),
+            ("10.0.0.256", "looks like an IPv4 address"),
+            ("[example.com]", "only an IPv6 literal may be bracketed"),
+            ("[::1", "closing ']'"),
+            ("[::1]x", "only ':PORT' may follow"),
+            ("::1", "must be in brackets"),
+            ("a.test:1:2", "must be in brackets"),
+            ("example.com:0", "1..=65535"),
+            ("example.com:65536", "1..=65535"),
+            ("example.com:http", "decimal digits"),
+            ("example.com:", "decimal digits"),
+            ("example.com:+80", "decimal digits"),
+            (":5433", "no host name"),
+        ]
+        .iter()
+        .map(|(text, why)| ((*text).to_owned(), *why))
+        .collect();
+        cases.push((format!("{}.com", "a".repeat(64)), "longer than 63 bytes"));
+        cases.push(("a".repeat(256), "longer than 255 bytes"));
+        for (text, why) in &cases {
+            let err = AllowedHost::parse(text).unwrap_err();
+            assert!(err.contains(why), "{text:?} gave {err}, not {why}");
+        }
+        // Four labels of 63 bytes make 255 bytes, over the DNS name limit of 253.
+        let label = "a".repeat(63);
+        let long_name = [label.as_str(); 4].join(".");
+        let err = AllowedHost::parse(&long_name).unwrap_err();
+        assert!(err.contains("longer than 253 bytes"), "{err}");
+    }
+
+    #[test]
+    fn the_list_is_bounded_and_no_name_repeats() {
+        let sixteen: Vec<AllowedHost> = (0..16).map(host_n).collect();
+        assert_eq!(allowed_hosts(bound(), &sixteen).unwrap().len(), 2 + 16);
+        let seventeen: Vec<AllowedHost> = (0..17).map(host_n).collect();
+        let err = allowed_hosts(bound(), &seventeen).unwrap_err();
+        assert!(err.contains("got 17"), "{err}");
+        // The same name twice, in another case, with and without the bound port, is one host.
+        let twice = [
+            AllowedHost::parse("a.test").unwrap(),
+            AllowedHost::parse("A.test:5433").unwrap(),
+        ];
+        let err = allowed_hosts(bound(), &twice).unwrap_err();
+        assert!(err.contains("listed twice"), "{err}");
+        // A configured name that is already a default adds nothing, so it is refused.
+        for default in ["LOCALHOST", "localhost:5433", "127.0.0.1", "127.0.0.1:5433"] {
+            let entry = [AllowedHost::parse(default).unwrap()];
+            let err = allowed_hosts(bound(), &entry).unwrap_err();
+            assert!(
+                err.contains("already allowed by default"),
+                "{default}: {err}"
+            );
+        }
+        // The same name on another port is another host.
+        let other_port = [AllowedHost::parse("localhost:5434").unwrap()];
+        assert!(allowed_hosts(bound(), &other_port).is_ok());
     }
 
     #[test]

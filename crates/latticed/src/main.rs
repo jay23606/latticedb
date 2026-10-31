@@ -10,7 +10,9 @@
 use lattice_api::auth::{Accounts, DecoySecret, MAX_CREDENTIAL_BYTES};
 use lattice_api::exec_host::{Grant, HostLimits, MAX_POLICY_BYTES, PolicyFileError, PolicyTable};
 use latticed::stop::{self, DEFAULT_STOP_TIMEOUT, ForcedBy, StopCause, StopOutcome};
-use latticed::ws::{GatewayAuth, GatewayConfig, check_gateway_exposure};
+use latticed::ws::{
+    AllowedHost, GatewayAuth, GatewayConfig, check_allowed_hosts, check_gateway_exposure,
+};
 use latticed::{
     Authentication, ServerConfig, ServerHandle, SqlConfig, SqlServer, TlsConfig,
     require_private_file,
@@ -42,6 +44,7 @@ fn run() -> Result<Exit, String> {
     let mut gateway = GatewayConfig::default();
     let mut gateway_listen = false;
     let mut gateway_tokens: Option<String> = None;
+    let mut gateway_allowed_hosts: Vec<String> = Vec::new();
     let mut stdin_control = true;
     let mut allow_format_upgrade = false;
     let mut stop_timeout = DEFAULT_STOP_TIMEOUT;
@@ -53,7 +56,7 @@ fn run() -> Result<Exit, String> {
         }
         if option == "--help" || option == "-h" {
             println!(
-                "latticed [--listen IP:PORT] [--max-connections N] [--read-timeout-ms N] [--write-timeout-ms N] [--idle-timeout-ms N] [--response-timeout-ms N]\nLoopback development trust by default. Without --data-dir only SELECT 1 is answered. SQL: --data-dir DIR serves SQL from a durable data directory (statement ceiling --statement-timeout-max-ms N, default 30000; budget --statement-memory-bytes N, default 67108864; staged writes of one transaction --transaction-bytes N, default 268435456). Row policy is explicit: with development-trust pass --development-policy allow-all|deny-all; with scram-tls pass --account-policies FILE (one 'account<TAB>allow-all|deny-all' per line; unlisted accounts are denied). Committed rows, tables and their column definitions survive a restart. A data directory written before table definitions existed refuses its first CREATE TABLE until --allow-format-upgrade on (older builds cannot open the directory afterwards and there is no downgrade: take a verified backup first); a new directory needs nothing. SCRAM requires --auth scram-tls --tls-cert FILE --tls-key FILE --scram-verifiers FILE --scram-decoy-secret FILE. Sync gateway (WebSocket, protocol lattice.sync.v1, path /sync, and POST /mcp on the same port; requires --data-dir): --gateway-listen IP:PORT enables it; --gateway-tokens FILE makes it require 'Authorization: Bearer' tokens from a credential file (mode 0600), re-read within 5 seconds of a change and on SIGHUP (a file that does not load keeps the tokens in use; after 10 minutes of failed loads no token works; SCRAM verifiers and policies are read at start only), otherwise it serves the loopback development principal and only with development-trust; --tls-cert FILE and --tls-key FILE (the same files and key rules as scram-tls) serve the gateway over TLS. A non-loopback --gateway-listen needs both TLS files and --gateway-tokens, or it refuses to start; plaintext is for loopback development only (only 127.0.0.0/8 and ::1 are loopback; an IPv4-mapped address such as [::ffff:127.0.0.1] needs TLS and tokens). The gateway and the PostgreSQL listener share one certificate, so clients must trust a certificate whose name is valid for both ports. With development-trust the TLS files are accepted only with --gateway-listen, and then apply to the gateway alone (the PostgreSQL listener stays loopback trust in plaintext). POST /mcp answers only to the bound address or to localhost on the bound port; a DNS name or public address gets 403 until a configurable allowed-host list exists (#774). /sync checks only that Host is present and well formed, and refuses any browser Origin. --gateway-max-connections N (default 32) and --gateway-handshake-timeout-ms N (default 5000) bound it, and the handshake timeout covers the TLS handshake. Optional --startup-timeout-ms N bounds startup/TLS/authentication. SIGTERM and SIGINT stop it cleanly; a second signal, or --stop-timeout-ms N (default 30000) elapsing, abandons a stop that does not finish. Stdin control is --stdin-control on|off (default on): with on, the line 'shutdown' on stdin stops the server and so does end-of-file, so run it with stdin held open; under a supervisor or container pass --stdin-control off, which never reads stdin. Exit status: 0 clean stop, 1 failure, 2 forced stop. Without --idle-timeout-ms the read timeout also disconnects idle sessions. The TLS key and decoy secret files must not be accessible to group or others (mode 0600)."
+                "latticed [--listen IP:PORT] [--max-connections N] [--read-timeout-ms N] [--write-timeout-ms N] [--idle-timeout-ms N] [--response-timeout-ms N]\nLoopback development trust by default. Without --data-dir only SELECT 1 is answered. SQL: --data-dir DIR serves SQL from a durable data directory (statement ceiling --statement-timeout-max-ms N, default 30000; budget --statement-memory-bytes N, default 67108864; staged writes of one transaction --transaction-bytes N, default 268435456). Row policy is explicit: with development-trust pass --development-policy allow-all|deny-all; with scram-tls pass --account-policies FILE (one 'account<TAB>allow-all|deny-all' per line; unlisted accounts are denied). Committed rows, tables and their column definitions survive a restart. A data directory written before table definitions existed refuses its first CREATE TABLE until --allow-format-upgrade on (older builds cannot open the directory afterwards and there is no downgrade: take a verified backup first); a new directory needs nothing. SCRAM requires --auth scram-tls --tls-cert FILE --tls-key FILE --scram-verifiers FILE --scram-decoy-secret FILE. Sync gateway (WebSocket, protocol lattice.sync.v1, path /sync, and POST /mcp on the same port; requires --data-dir): --gateway-listen IP:PORT enables it; --gateway-tokens FILE makes it require 'Authorization: Bearer' tokens from a credential file (mode 0600), re-read within 5 seconds of a change and on SIGHUP (a file that does not load keeps the tokens in use; after 10 minutes of failed loads no token works; SCRAM verifiers and policies are read at start only), otherwise it serves the loopback development principal and only with development-trust; --tls-cert FILE and --tls-key FILE (the same files and key rules as scram-tls) serve the gateway over TLS. A non-loopback --gateway-listen needs both TLS files and --gateway-tokens, or it refuses to start; plaintext is for loopback development only (only 127.0.0.0/8 and ::1 are loopback; an IPv4-mapped address such as [::ffff:127.0.0.1] needs TLS and tokens). The gateway and the PostgreSQL listener share one certificate, so clients must trust a certificate whose name is valid for both ports. With development-trust the TLS files are accepted only with --gateway-listen, and then apply to the gateway alone (the PostgreSQL listener stays loopback trust in plaintext). POST /mcp answers to the bound address and to localhost on the bound port, and to each --gateway-allowed-host NAME[:PORT] given (repeatable, at most 16, needs --gateway-listen; the name is an ASCII DNS name or an IP literal, IPv6 in brackets, matched exactly and case-insensitively with no wildcards; an omitted port is the bound port; a malformed value stops the start); any other Host gets 403. /sync checks only that Host is present and well formed, and refuses any browser Origin. --gateway-max-connections N (default 32) and --gateway-handshake-timeout-ms N (default 5000) bound it, and the handshake timeout covers the TLS handshake. Optional --startup-timeout-ms N bounds startup/TLS/authentication. SIGTERM and SIGINT stop it cleanly; a second signal, or --stop-timeout-ms N (default 30000) elapsing, abandons a stop that does not finish. Stdin control is --stdin-control on|off (default on): with on, the line 'shutdown' on stdin stops the server and so does end-of-file, so run it with stdin held open; under a supervisor or container pass --stdin-control off, which never reads stdin. Exit status: 0 clean stop, 1 failure, 2 forced stop. Without --idle-timeout-ms the read timeout also disconnects idle sessions. The TLS key and decoy secret files must not be accessible to group or others (mode 0600)."
             );
             return Ok(Exit::Clean);
         }
@@ -97,6 +100,7 @@ fn run() -> Result<Exit, String> {
                 gateway_listen = true;
             }
             "--gateway-tokens" => gateway_tokens = Some(value),
+            "--gateway-allowed-host" => gateway_allowed_hosts.push(value),
             "--gateway-max-connections" => {
                 gateway.max_connections = value
                     .parse()
@@ -188,6 +192,13 @@ fn run() -> Result<Exit, String> {
     if gateway_tokens.is_some() && !gateway_listen {
         return Err("--gateway-tokens requires --gateway-listen".into());
     }
+    if !gateway_allowed_hosts.is_empty() && !gateway_listen {
+        return Err("--gateway-allowed-host requires --gateway-listen".into());
+    }
+    for value in &gateway_allowed_hosts {
+        gateway.allowed_hosts.push(AllowedHost::parse(value)?);
+    }
+    check_allowed_hosts(gateway.address, &gateway.allowed_hosts)?;
     if gateway_listen {
         gateway.auth = match gateway_tokens.as_deref() {
             // The gateway loads the file at start (a failure stops the start) and then watches it.

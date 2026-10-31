@@ -429,14 +429,15 @@ server names the gateway address.
 | `--gateway-listen IP:PORT` | off | Enables the gateway. Needs `--data-dir`. Plaintext only on a loopback address. A non-loopback address needs `--tls-cert`, `--tls-key` and `--gateway-tokens`, or latticed refuses to start (#578). |
 | `--tls-cert FILE`, `--tls-key FILE` | none | With `--gateway-listen`, serve the gateway port over TLS. These are the same files and key rules (mode 0600, bounded reads) as the PostgreSQL listener in `scram-tls`, and one certificate serves both. With `--auth development-trust` they are accepted only together with `--gateway-listen` and apply to the gateway alone; the PostgreSQL listener stays loopback trust in plaintext. In `scram-tls` the gateway always uses them. The handshake runs under `--gateway-handshake-timeout-ms` and holds a handshake place, so a stalled handshake is cut and frees its place. Plaintext clients get no HTTP reply on that port. |
 | `--gateway-tokens FILE` | none | Require `Authorization: Bearer lat_...` from this credential file (mode 0600), re-read within 5 seconds of a change and on SIGHUP (SIGHUP is caught only when this flag is set). A file that does not load keeps the tokens in use. SCRAM verifiers and policies are not re-read. The connection is the token's account and its table grants (`--account-policies`, which this flag also allows with `--auth development-trust`). Without it the gateway serves the loopback development principal and only with `--auth development-trust`. |
+| `--gateway-allowed-host NAME[:PORT]` | none | Adds a `Host` that `POST /mcp` answers to, besides this address and `localhost` on the bound port (which stay allowed). Repeatable, at most 16, needs `--gateway-listen`. Exact and case-insensitive: an ASCII DNS name or an IP literal (IPv6 in brackets), no wildcards, no IP ranges, no userinfo or path. Without a port it means the bound port. List only names you control that resolve to this gateway; with a name beyond `localhost`, use TLS and tokens, since a plaintext loopback bind is protected only by the `Origin` refusal against DNS rebinding. A malformed, repeated or default-equal value stops the start (#774). |
 | `--gateway-max-connections N` | 32 | Connections at once, including upgrades in progress (at most 8 of those). The next one gets `503`. |
 | `--gateway-handshake-timeout-ms N` | 5000 | One absolute budget from accept to the `101` response. |
 
 Host and Origin. `/sync` checks that `Host` is present and well formed, but not its value, and refuses any browser
-`Origin` with `403` (the default policy). `POST /mcp` answers only to the bound address or to `localhost` on the bound
-port: a `Host` naming a DNS name, or a public address on a non-loopback bind, gets `403`, and any `Origin` gets `403`.
-A configurable allowed-host list is future work, tracked in #774; the `Host` check is the DNS-rebinding defence and is
-not widened for it.
+`Origin` with `403` (the default policy); `--gateway-allowed-host` does not change that. `POST /mcp` answers to the bound
+address and to `localhost` on the bound port, and to each `--gateway-allowed-host` name (#774); any other `Host` gets
+`403`, and any `Origin` gets `403`. A `Host` must match exactly, including its port. The `Host` check is the
+DNS-rebinding defence, and a name is allowed only when it is listed.
 
 The token goes in the `Authorization` header only: a request target with a query string gets `400`, two
 `Authorization` headers get `401`, and a missing, malformed, unknown, revoked or expired token all get the same

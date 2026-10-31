@@ -70,6 +70,8 @@
 
 mod mcp_http;
 
+pub use mcp_http::{AllowedHost, MAX_ALLOWED_HOSTS, check_allowed_hosts};
+
 use crate::mcp_backend::McpBackend;
 use crate::tokens::{CredentialWatch, Reload};
 use crate::transport::{TlsConfig, Transport};
@@ -227,6 +229,9 @@ pub struct GatewayConfig {
     /// The workspace the MCP endpoint serves: the `scope` every tool call names. A valid MCP scope
     /// path (at most 128 bytes of `[A-Za-z0-9_-]` segments joined by `/`).
     pub mcp_workspace: String,
+    /// Extra `Host` names `POST /mcp` answers to, beyond the bound address and `localhost` on the bound
+    /// port (`--gateway-allowed-host`). At most [`MAX_ALLOWED_HOSTS`]; none by default.
+    pub allowed_hosts: Vec<AllowedHost>,
 }
 
 impl Default for GatewayConfig {
@@ -253,6 +258,7 @@ impl Default for GatewayConfig {
             max_frames_per_pump: 2,
             ws_ping_interval: Duration::from_secs(30),
             mcp_workspace: "default".to_owned(),
+            allowed_hosts: Vec::new(),
         }
     }
 }
@@ -265,6 +271,8 @@ impl GatewayConfig {
         // command line, so the library and the binary refuse the same settings.
         let tokens = !matches!(self.auth, GatewayAuth::LocalDevelopment);
         check_gateway_exposure(self.address, self.tls.is_some(), tokens)
+            .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
+        check_allowed_hosts(self.address, &self.allowed_hosts)
             .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
         if self.max_connections == 0 || self.max_connections > 1024 {
             return bad("gateway connections must be 1..=1024");
@@ -583,8 +591,8 @@ struct Shared {
     epoch: Instant,
     stopping: AtomicBool,
     wake: Arc<dyn Wake>,
-    /// The address the listener actually bound (its port is the one `Host` must name).
-    bound: SocketAddr,
+    /// The `Host` values `POST /mcp` answers to, resolved against the bound port.
+    allowed: Vec<String>,
     /// The MCP tool backends, when the endpoint is served.
     mcp: Option<Arc<dyn McpBackends>>,
 }
@@ -695,6 +703,8 @@ impl GatewayHandle {
         let listener = TcpListener::bind(config.address)?;
         listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
+        let allowed = mcp_http::allowed_hosts(address, &config.allowed_hosts)
+            .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
         let shared = Arc::new(Shared {
             counters: Counters::new(config.max_connections, config.max_handshakes),
             gate: AuthGate::new(config.failure_limit, config.failure_window),
@@ -705,7 +715,7 @@ impl GatewayHandle {
             epoch: Instant::now(),
             stopping: AtomicBool::new(false),
             wake,
-            bound: address,
+            allowed,
             mcp,
             cfg: config,
         });
@@ -1698,5 +1708,45 @@ mod tests {
         for (i, bad) in cases.iter().enumerate() {
             assert!(bad.validate().is_err(), "case {i} must be refused");
         }
+    }
+
+    #[test]
+    fn allowed_hosts_are_checked_at_start_and_do_not_widen_the_bind_rules() {
+        let host = |text: &str| AllowedHost::parse(text).unwrap();
+        let loopback = |hosts: Vec<AllowedHost>| GatewayConfig {
+            address: SocketAddr::from(([127, 0, 0, 1], 0)),
+            allowed_hosts: hosts,
+            ..GatewayConfig::default()
+        };
+        assert!(
+            loopback(vec![host("gateway.example.test")])
+                .validate()
+                .is_ok()
+        );
+        let twice = loopback(vec![host("a.test"), host("A.TEST")]);
+        assert!(
+            twice
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("listed twice")
+        );
+        let many: Vec<AllowedHost> = (0..MAX_ALLOWED_HOSTS + 1)
+            .map(|i| host(&format!("h{i}.test")))
+            .collect();
+        assert!(
+            loopback(many)
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("got 17")
+        );
+        // A name does not lift the rule that a non-loopback bind needs TLS and tokens.
+        let remote = GatewayConfig {
+            address: SocketAddr::from(([0, 0, 0, 0], 0)),
+            allowed_hosts: vec![host("gateway.example.test")],
+            ..GatewayConfig::default()
+        };
+        assert!(remote.validate().unwrap_err().to_string().contains("TLS"));
     }
 }
