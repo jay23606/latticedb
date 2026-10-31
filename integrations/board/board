@@ -22,6 +22,9 @@ TMP_ERR=$(mktemp "${TMPDIR:-/tmp}/board.XXXXXX") || exit 1
 trap 'rm -f "$TMP_ERR"' EXIT HUP INT TERM
 LC_MESSAGES=C
 export LC_MESSAGES
+# The longest text a title, body, note, decision or closing text may have, in bytes. Bytes, not
+# characters: the shell cannot count characters the same way in every locale.
+MAX_TEXT_BYTES=4096
 
 usage() {
   cat <<'USAGE'
@@ -30,14 +33,17 @@ usage: board <command> [arguments]
   init                          create or update the tables (safe to run again)
   add TITLE [--priority N] [--parent ID] [--body TEXT]
                                 create an open task and print its id
-  list [open|claimed|done]      list tasks, highest priority first
-  show ID                       one task with its events and decisions
+  list [open|claimed|done] [--owner NAME] [--all]
+                                list tasks, highest priority first; done tasks are shown only
+                                when a state is given or with --all
+  show ID                      one task with its events and decisions
   claim ID                      take an open task; exit 0 if won (or already yours), 2 if not
   note ID TEXT                  append a progress note
   done ID [TEXT]                mark a task done, with an optional closing note (once)
   decide ID TEXT                record a decision on a task
-  since [EVENT_ID]              print events after EVENT_ID (default 0), oldest first
-  head                          print the newest event id (0 when there is none)
+  since [EVENT_ID] [--task ID]  print events after EVENT_ID (default 0), oldest first
+  watch ID [--after EVENT_ID]   print one task's events after EVENT_ID (default 0), oldest first
+  head                         print the newest event id (0 when there is none)
 
 add, claim, note, done and decide need BOARD_AUTHOR set to this agent's unique name.
 USAGE
@@ -130,6 +136,9 @@ need_line() {
   esac
   if [ "$(printf '%s' "$2" | LC_ALL=C tr -d '\001-\037\177')" != "$2" ]; then
     die "$1 must not contain control characters"
+  fi
+  if [ "$(printf '%s' "$2" | wc -c | tr -d ' ')" -gt "$MAX_TEXT_BYTES" ]; then
+    die "$1 is longer than $MAX_TEXT_BYTES bytes (see integrations/board/CONVENTIONS.md, limits)"
   fi
   if [ "$3" = 1 ] && [ -z "$2" ]; then
     die "$1 must not be empty"
@@ -227,8 +236,8 @@ cmd_add() {
   task=$(new_id)
   if [ -n "$parent" ]; then
     sql=$(bump_sql; cat <<'SQL'
-INSERT INTO tasks (id, title, state, owner, priority, parent_id, created_by, body, created_at, updated_at)
-  SELECT :'task', :'title', 'open', NULL, :priority, :'parent', :'author', :'body', :ts, :ts FROM tasks WHERE id = :'parent';
+INSERT INTO tasks (id, title, state, owner, priority, parent_id, created_by, body, created_at, updated_at, created_seq)
+  SELECT :'task', :'title', 'open', NULL, :priority, :'parent', :'author', :'body', :ts, :ts, :seq FROM tasks WHERE id = :'parent';
 INSERT INTO events (id, task_id, author, kind, body, created_at)
   SELECT :seq, :'task', :'author', 'add', :'title', :ts FROM tasks WHERE id = :'task';
 SELECT id FROM events WHERE id = :seq;
@@ -237,8 +246,8 @@ SQL
 )
   else
     sql=$(bump_sql; cat <<'SQL'
-INSERT INTO tasks (id, title, state, owner, priority, parent_id, created_by, body, created_at, updated_at)
-  VALUES (:'task', :'title', 'open', NULL, :priority, NULL, :'author', :'body', :ts, :ts);
+INSERT INTO tasks (id, title, state, owner, priority, parent_id, created_by, body, created_at, updated_at, created_seq)
+  VALUES (:'task', :'title', 'open', NULL, :priority, NULL, :'author', :'body', :ts, :ts, :seq);
 INSERT INTO events (id, task_id, author, kind, body, created_at)
   VALUES (:seq, :'task', :'author', 'add', :'title', :ts);
 SELECT id FROM events WHERE id = :seq;
@@ -255,15 +264,41 @@ SQL
 }
 
 cmd_list() {
-  [ $# -le 1 ] || die "list takes at most one state"
-  state=${1:-}
-  case $state in
-    '' | open | claimed | done) ;;
-    *) die "state must be open, claimed or done" ;;
-  esac
+  state=
+  owner=
+  showdone=0
+  seen_state=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      open | claimed | done)
+        [ "$seen_state" = 0 ] || die "list takes at most one state"
+        state=$1
+        seen_state=1
+        shift
+        ;;
+      --owner)
+        [ $# -ge 2 ] || die "--owner needs a name"
+        case $2 in
+          '' | *[!A-Za-z0-9._-]*) die "--owner may use only letters, digits, '.', '_' and '-'" ;;
+        esac
+        [ ${#2} -le 64 ] || die "--owner is longer than 64 characters"
+        owner=$2
+        shift 2
+        ;;
+      --all)
+        showdone=1
+        shift
+        ;;
+      *) die "list takes a state (open, claimed or done), --owner NAME and --all" ;;
+    esac
+  done
+  # Done tasks are hidden unless a state is named or --all is given. Equal priorities list
+  # oldest first: created_seq is the event id of the add event.
   psql_run table "SELECT id, state, priority, owner, title FROM tasks
-WHERE (state = :'state' OR :'state' = '') ORDER BY priority DESC, created_at, id;" \
-    -v state="$state" || fail_db
+WHERE (state = :'state' OR :'state' = '') AND (owner = :'owner' OR :'owner' = '')
+  AND (state <> 'done' OR :'state' <> '' OR :'showdone' = '1')
+ORDER BY priority DESC, created_seq;" \
+    -v state="$state" -v owner="$owner" -v showdone="$showdone" || fail_db
   printf '%s\n' "$OUT"
 }
 
@@ -385,11 +420,61 @@ SQL
 }
 
 cmd_since() {
-  [ $# -le 1 ] || die "since takes at most one event id"
-  last=${1:-0}
-  need_int event_id "$last"
-  psql_run tuples "SELECT id, task_id, author, kind, body FROM events WHERE id > :last ORDER BY id;" \
-    -v last="$last" || fail_db
+  last=0
+  task=
+  seen_last=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --task)
+        [ $# -ge 2 ] || die "--task needs a task id"
+        need_id "$2"
+        task=$2
+        shift 2
+        ;;
+      *)
+        [ "$seen_last" = 0 ] || die "since takes at most one event id"
+        need_int event_id "$1"
+        last=$1
+        seen_last=1
+        shift
+        ;;
+    esac
+  done
+  psql_run tuples "SELECT id, task_id, author, kind, body FROM events
+WHERE id > :last AND (task_id = :'task' OR :'task' = '') ORDER BY id;" \
+    -v last="$last" -v task="$task" || fail_db
+  if [ -n "$OUT" ]; then
+    printf '%s\n' "$OUT"
+  fi
+}
+
+# watch ID [--after EVENT_ID]: the events of one task after EVENT_ID, oldest first, in the same
+# format as since. Read only: it runs only SELECT statements and writes nothing. It prints and exits; to follow a
+# task, run it again with the last event id you handled.
+cmd_watch() {
+  [ $# -ge 1 ] || die "watch takes a task id"
+  need_id "$1"
+  watch_task=$1
+  shift
+  after=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --after)
+        [ $# -ge 2 ] || die "--after needs an event id"
+        need_int event_id "$2"
+        after=$2
+        shift 2
+        ;;
+      *) die "unknown option for watch: $1" ;;
+    esac
+  done
+  psql_run tuples "SELECT id FROM tasks WHERE id = :'task';" -v task="$watch_task" || fail_db
+  if [ -z "$OUT" ]; then
+    die "no such task: $watch_task"
+  fi
+  psql_run tuples "SELECT id, task_id, author, kind, body FROM events
+WHERE task_id = :'task' AND id > :after ORDER BY id;" -v task="$watch_task" -v after="$after" \
+    || fail_db
   if [ -n "$OUT" ]; then
     printf '%s\n' "$OUT"
   fi
@@ -441,6 +526,7 @@ case $cmd in
   done) cmd_done "$@" ;;
   decide) cmd_decide "$@" ;;
   since) cmd_since "$@" ;;
+  watch) cmd_watch "$@" ;;
   head) cmd_head "$@" ;;
   help | -h | --help) usage ;;
   *) usage >&2; exit 1 ;;

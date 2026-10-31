@@ -361,6 +361,91 @@ check "the new event carries the sub-agent author" \
 EMPTY=$("$BOARD" since "$("$BOARD" head)")
 expect_eq "since returns nothing when there is nothing new" "" "$EMPTY"
 
+# --- watch: one task's events after a cursor, read only ------------------------------------
+W_A=$("$BOARD" add "Watch target A") || FAILS=$((FAILS + 1))
+W_B=$("$BOARD" add "Watch target B") || FAILS=$((FAILS + 1))
+BOARD_AUTHOR=watcher "$BOARD" note "$W_A" "a first" >/dev/null || FAILS=$((FAILS + 1))
+BOARD_AUTHOR=watcher "$BOARD" note "$W_B" "b first" >/dev/null || FAILS=$((FAILS + 1))
+BOARD_AUTHOR=watcher "$BOARD" note "$W_A" "a second" >/dev/null || FAILS=$((FAILS + 1))
+WATCH_ALL=$("$BOARD" watch "$W_A")
+expect_eq "watch prints one task's events from the start, oldest first" "add note note" \
+  "$(printf '%s\n' "$WATCH_ALL" | cut -f4 | paste -sd' ' -)"
+check "watch rows have the since format and belong to this task" \
+  test "$(printf '%s\n' "$WATCH_ALL" | awk -F"$TAB" -v t="$W_A" 'NF != 5 || $2 != t' | wc -l | tr -d ' ')" = 0
+expect_eq "watch leaves out the other task's notes" "0" \
+  "$(printf '%s\n' "$WATCH_ALL" | grep -c 'b first')"
+FIRST_W=$(printf '%s\n' "$WATCH_ALL" | head -n 1 | cut -f1)
+expect_eq "watch --after the first event prints only the notes after it" "note note" \
+  "$("$BOARD" watch "$W_A" --after "$FIRST_W" | cut -f4 | paste -sd' ' -)"
+expect_eq "watch --after the newest event prints nothing" "" \
+  "$("$BOARD" watch "$W_A" --after "$("$BOARD" head)")"
+EVENTS_BEFORE=$("$BOARD" since 0 | wc -l | tr -d ' ')
+expect_rc "watch needs no BOARD_AUTHOR" 0 env -u BOARD_AUTHOR "$BOARD" watch "$W_A"
+check "watch writes no event" test "$("$BOARD" since 0 | wc -l | tr -d ' ')" = "$EVENTS_BEFORE"
+expect_rc "watch of a missing task fails" 1 "$BOARD" watch t0000000000
+expect_rc "watch with a bad --after fails" 1 "$BOARD" watch "$W_A" --after x
+expect_rc "watch with no task id fails" 1 "$BOARD" watch
+
+# --- since --task, list --owner, list hides done tasks ---------------------------------------
+expect_eq "since --task keeps only that task's events" "3" \
+  "$("$BOARD" since 0 --task "$W_A" | wc -l | tr -d ' ')"
+check "since --task lists no other task" \
+  test "$("$BOARD" since 0 --task "$W_A" | awk -F"$TAB" -v t="$W_A" '$2 != t' | wc -l | tr -d ' ')" = 0
+expect_eq "since --task takes the event id too, in either order" "2" \
+  "$("$BOARD" since --task "$W_A" "$FIRST_W" | wc -l | tr -d ' ')"
+expect_rc "since --task with a bad id fails" 1 "$BOARD" since --task 'bad id'
+expect_rc "since --task with no id fails" 1 "$BOARD" since --task
+
+BOARD_AUTHOR=lister1 "$BOARD" claim "$W_B" >/dev/null || FAILS=$((FAILS + 1))
+expect_eq "list --owner shows only that owner's tasks" "$W_B" \
+  "$("$BOARD" list --owner lister1 | tail -n +2 | cut -f1)"
+expect_rc "list --owner with a bad name fails" 1 "$BOARD" list --owner 'bad name'
+expect_rc "list --owner with no name fails" 1 "$BOARD" list --owner
+expect_rc "list rejects an unknown option" 1 "$BOARD" list --bogus
+check "list hides done tasks by default" \
+  test "$("$BOARD" list | cut -f1 | grep -c "^$T_CHILD\$")" = 0
+check "list --all shows done tasks" \
+  test "$("$BOARD" list --all | cut -f1 | grep -c "^$T_CHILD\$")" = 1
+check "list done still shows done tasks" \
+  test "$("$BOARD" list "done" | cut -f1 | grep -c "^$T_CHILD\$")" = 1
+
+ORD_IDS=
+k=1
+while [ "$k" -le 8 ]; do
+  oid=$("$BOARD" add "Order $k" --priority 7) || FAILS=$((FAILS + 1))
+  ORD_IDS="$ORD_IDS$oid$NL"
+  k=$((k + 1))
+done
+expect_eq "equal priorities list oldest first" "$(printf '%s' "$ORD_IDS")" \
+  "$("$BOARD" list open | awk -F"$TAB" '$3 == 7 { print $1 }')"
+
+# --- the note and title limit: 4096 bytes ----------------------------------------------------
+LONG=$(awk 'BEGIN { for (i = 0; i < 4097; i++) printf "x" }')
+expect_rc "a note over 4096 bytes is refused" 1 "$BOARD" note "$W_A" "$LONG"
+"$BOARD" note "$W_A" "$LONG" >/dev/null 2>"$WORK/long.err"
+check "the refusal names the 4096 byte limit" grep -q "4096 bytes" "$WORK/long.err"
+expect_eq "the refused note wrote no event" "3" "$("$BOARD" watch "$W_A" | wc -l | tr -d ' ')"
+EXACT=$(awk 'BEGIN { for (i = 0; i < 4096; i++) printf "y" }')
+expect_rc "a note of exactly 4096 bytes is accepted" 0 "$BOARD" note "$W_A" "$EXACT"
+ACCENT=$(awk 'BEGIN { for (i = 0; i < 2049; i++) printf "é" }')
+expect_rc "a note of 4098 bytes of accented text is refused (the limit counts bytes)" 1 \
+  "$BOARD" note "$W_A" "$ACCENT"
+expect_rc "a title over 4096 bytes is refused" 1 "$BOARD" add "$LONG"
+
+# --- head prints one event id; help lists watch ----------------------------------------------
+HEAD_OUT=$("$BOARD" head)
+head_is_one_event_id() {
+  case $HEAD_OUT in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  [ "$(printf '%s\n' "$HEAD_OUT" | wc -l | tr -d ' ')" = 1 ]
+}
+check "head prints one event id and no feed cursor" head_is_one_event_id
+help_lists_watch() {
+  "$BOARD" help | grep -q '^  watch ID'
+}
+check "help lists watch" help_lists_watch
+
 # --- passwords stay out of argv ------------------------------------------------------------
 # A spy stands in for psql (BOARD_PSQL). It records its arguments and PGPASSWORD, then runs psql.
 SPY="$WORK/psql-spy"

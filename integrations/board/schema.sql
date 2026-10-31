@@ -12,8 +12,9 @@ CREATE TABLE IF NOT EXISTS counters (
 
 -- One row per unit of work. state is open, claimed or done. owner stays NULL until a
 -- claim wins. claim_seq holds the event id of the winning claim, and done_seq the event id of
--- the transaction that marked the task done. parent_id is a plain text column: the subset has
--- no foreign keys, so the helper checks the parent exists.
+-- the transaction that marked the task done. created_seq is the event id of the add event; it
+-- orders tasks by creation, since created_at is in seconds and cannot break ties. parent_id is a
+-- plain text column: the subset has no foreign keys, so the helper checks the parent exists.
 CREATE TABLE IF NOT EXISTS tasks (
     id text PRIMARY KEY,
     title text NOT NULL,
@@ -26,7 +27,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at bigint NOT NULL,
     updated_at bigint NOT NULL,
     claim_seq bigint NOT NULL DEFAULT 0,
-    done_seq bigint NOT NULL DEFAULT 0
+    done_seq bigint NOT NULL DEFAULT 0,
+    created_seq bigint NOT NULL DEFAULT 0
 );
 
 -- Append-only progress log. Ids come from counters ('events'): they are unique and rise in
