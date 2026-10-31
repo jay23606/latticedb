@@ -815,4 +815,62 @@ pub const lattice_sdk::outbox::MAX_CLIENT_ID_BYTES: usize
 pub const lattice_sdk::outbox::MAX_FENCED_TURNS: usize
 pub const lattice_sdk::outbox::MAX_ITEMS_LIMIT: usize
 pub const lattice_sdk::outbox::MAX_STORED_BYTES: usize
+pub mod lattice_sdk::reconnect
+pub enum lattice_sdk::reconnect::Decision
+pub lattice_sdk::reconnect::Decision::Continue
+pub lattice_sdk::reconnect::Decision::RetryAfter(u64)
+pub lattice_sdk::reconnect::Decision::Stop(lattice_sdk::reconnect::StopReason)
+impl core::clone::Clone for lattice_sdk::reconnect::Decision
+pub fn lattice_sdk::reconnect::Decision::clone(&self) -> Self
+impl core::cmp::Eq for lattice_sdk::reconnect::Decision
+impl core::cmp::PartialEq for lattice_sdk::reconnect::Decision
+pub fn lattice_sdk::reconnect::Decision::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_sdk::reconnect::Decision
+pub fn lattice_sdk::reconnect::Decision::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for lattice_sdk::reconnect::Decision
+impl core::marker::StructuralPartialEq for lattice_sdk::reconnect::Decision
+pub enum lattice_sdk::reconnect::Input
+pub lattice_sdk::reconnect::Input::Closed(lattice_sdk::client::CloseReason)
+pub lattice_sdk::reconnect::Input::Connected
+pub lattice_sdk::reconnect::Input::EventDelivered
+pub lattice_sdk::reconnect::Input::Failed(lattice_sdk::client::ClientError)
+pub lattice_sdk::reconnect::Input::FrameReceived
+pub lattice_sdk::reconnect::Input::TransportClosed
+pub lattice_sdk::reconnect::Input::Unauthorized
+impl core::clone::Clone for lattice_sdk::reconnect::Input
+pub fn lattice_sdk::reconnect::Input::clone(&self) -> Self
+impl core::cmp::Eq for lattice_sdk::reconnect::Input
+impl core::cmp::PartialEq for lattice_sdk::reconnect::Input
+pub fn lattice_sdk::reconnect::Input::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_sdk::reconnect::Input
+pub fn lattice_sdk::reconnect::Input::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for lattice_sdk::reconnect::Input
+pub enum lattice_sdk::reconnect::StopReason
+pub lattice_sdk::reconnect::StopReason::ByApplication
+pub lattice_sdk::reconnect::StopReason::CallRefused
+pub lattice_sdk::reconnect::StopReason::GaveUp
+pub lattice_sdk::reconnect::StopReason::Incompatible
+pub lattice_sdk::reconnect::StopReason::Permanent(lattice_proto::sync::ErrorCode)
+pub lattice_sdk::reconnect::StopReason::Unauthorized
+impl core::clone::Clone for lattice_sdk::reconnect::StopReason
+pub fn lattice_sdk::reconnect::StopReason::clone(&self) -> Self
+impl core::cmp::Eq for lattice_sdk::reconnect::StopReason
+impl core::cmp::PartialEq for lattice_sdk::reconnect::StopReason
+pub fn lattice_sdk::reconnect::StopReason::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_sdk::reconnect::StopReason
+pub fn lattice_sdk::reconnect::StopReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for lattice_sdk::reconnect::StopReason
+impl core::marker::StructuralPartialEq for lattice_sdk::reconnect::StopReason
+pub struct lattice_sdk::reconnect::Supervisor
+impl lattice_sdk::reconnect::Supervisor
+pub fn lattice_sdk::reconnect::Supervisor::new(lattice_sdk::backoff::Backoff, core::option::Option<u32>) -> Self
+pub fn lattice_sdk::reconnect::Supervisor::on_input(&mut self, lattice_sdk::reconnect::Input, u64) -> lattice_sdk::reconnect::Decision
+impl core::clone::Clone for lattice_sdk::reconnect::Supervisor
+pub fn lattice_sdk::reconnect::Supervisor::clone(&self) -> Self
+impl core::cmp::Eq for lattice_sdk::reconnect::Supervisor
+impl core::cmp::PartialEq for lattice_sdk::reconnect::Supervisor
+pub fn lattice_sdk::reconnect::Supervisor::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_sdk::reconnect::Supervisor
+pub fn lattice_sdk::reconnect::Supervisor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for lattice_sdk::reconnect::Supervisor
 pub const lattice_sdk::LAYER: u8
