@@ -5,12 +5,18 @@
 #
 #   tests/dev/dev-stack.sh
 #
-# Steps: up with no accounts (no server yet); add alice (read, write and ddl on notes) and bob (read on
-# notes); alice creates the table and inserts two rows; bob reads them and is refused a write; a wrong
-# password is refused; status names the accounts and shows no password; down, then up on the same
-# volumes; the rows are read back; reset without a yes is refused; reset --yes removes every container,
-# volume and file the test made. Also: invalid account names, a duplicate name, and a state dir that is
-# home or one of its parents are refused; a failed rename leaves no temp file holding a password.
+# Steps, in the order the script runs them:
+#   1.  up with no accounts (no server yet); the state dir and key files have owner-only modes.
+#   1b. invalid account names and a state dir that is home or one of its parents are refused.
+#   2.  add alice (read, write and ddl on notes) and bob (read on notes); a duplicate name is refused.
+#   2b. the published port is bound to 127.0.0.1 only.
+#   3.  alice creates the table and inserts two rows; bob reads them and is refused a write.
+#   4.  a wrong password is refused.
+#   5.  status names the accounts and shows no password.
+#   6.  down, then up on the same volumes; the rows are read back.
+#   7.  reset without a yes is refused.
+#   7b. a failed rename leaves no temp file holding a password.
+#   8.  reset --yes removes every container, volume and file the test made.
 #
 # Needs docker with compose v2, openssl and psql. Passwords are never printed by this script: it reads
 # them from the account env files and checks the counts of their appearances in the command output.
@@ -170,6 +176,17 @@ expect_ok add-bob "$dev" account add bob --read notes
 bob_pw=$(password_of "$LATTICE_DEV_HOME/accounts/bob.env")
 [ "$(grep -cF -- "$bob_pw" "$work/add-bob.out")" = 1 ] || fail "bob's password is not printed exactly once"
 ok "second_account_added"
+
+# --- 2b. the published port is bound to loopback only (host_ip in compose.yaml). docker port lists every
+# host binding: 127.0.0.1 alone passes, and 0.0.0.0 or [::] from a missing host_ip fails.
+latticed_id=$(docker ps -q --filter "label=com.docker.compose.project=$LATTICE_DEV_PROJECT" --filter label=com.docker.compose.service=latticed)
+[ -n "$latticed_id" ] || fail "latticed is not running, so its published port cannot be checked"
+published=$(docker port "$latticed_id" 5432) || fail "docker port could not list the published port"
+[ -n "$published" ] || fail "latticed publishes no port"
+while IFS= read -r binding; do
+  [ "$binding" = "127.0.0.1:$port" ] || fail "published port is bound to '$binding', wanted 127.0.0.1:$port only"
+done <<<"$published"
+ok "published_port_is_bound_to_loopback_only"
 
 # --- 3. alice creates the table as an account with ddl and writes rows; bob reads them
 expect_ok alice-ddl "$dev" psql alice -X -q -v ON_ERROR_STOP=1 -c "$notes_ddl" -c "$notes_rows"

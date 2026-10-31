@@ -42,10 +42,18 @@ services:
       - data:/var/lib/lattice
       - config:/etc/lattice:ro
       - tls:/etc/lattice-tls:ro
+    # latticed needs no Linux capability: its port is above 1024 and it runs as uid 10001.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     stop_grace_period: 15s
+    # Sends a PostgreSQL SSLRequest and expects the single byte S, so the server offers TLS. It stops
+    # there: no TLS handshake starts, so the server logs nothing every interval. Compose interpolates
+    # the string, hence $$reply. Only bash is needed, and the image has it.
     healthcheck:
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/5432"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/5432 && printf '\\x00\\x00\\x00\\x08\\x04\\xd2\\x16\\x2f' >&3 && IFS= read -r -n 1 -t 3 reply <&3 && [ \"$$reply\" = S ]"]
       interval: 5s
       timeout: 3s
       retries: 12

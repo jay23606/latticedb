@@ -173,8 +173,8 @@ dev/lattice-dev.sh reset       # asks first, then deletes the rows, the volumes 
   `LATTICE_DEV_IMAGE` runs another image, for example one built from the same binaries.
 - `dev/lattice-dev.sh logs` shows the server log. The script needs Docker with Compose v2, `openssl`
   and `psql` (`brew install libpq` on macOS).
-- `tests/dev/dev-stack.sh` runs the whole flow in its own project and state dir, then removes them. Run
-  by hand on macOS arm64 with Docker Desktop; CI does not run it.
+- `tests/dev/dev-stack.sh` runs the whole flow in its own project and state dir, then removes them. CI runs it
+  in the `dev-stack` workflow (`.github/workflows/dev-stack.yml`) on changes under `dev/`, `tests/dev/` and `docker/`; it is not a required check yet.
 
 The sync gateway (`--gateway-listen`) is not in the stack. The image refuses a non-loopback gateway
 address until TLS exists on the gateway ([#578](https://github.com/moncifem/latticedb/issues/578)), so

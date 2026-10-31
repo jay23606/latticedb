@@ -1,0 +1,1 @@
+The dev stack's `latticed` container now drops every Linux capability and sets `no-new-privileges`. Its healthcheck sends a PostgreSQL SSLRequest and expects the TLS answer, instead of only opening a TCP connection. `tests/dev/dev-stack.sh` checks that the published port is bound to `127.0.0.1` only. A read-only root filesystem and `account remove` are not part of this change.
