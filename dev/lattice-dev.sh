@@ -5,16 +5,19 @@
 #
 #   dev/lattice-dev.sh up
 #   dev/lattice-dev.sh account add NAME [--read T1,T2] [--write T1,T2] [--ddl T1,T2]
+#   dev/lattice-dev.sh account remove NAME
 #   dev/lattice-dev.sh psql NAME [psql arguments]
 #   dev/lattice-dev.sh status | logs [docker compose logs options] | down
 #   dev/lattice-dev.sh reset [--yes]
 #
 # Environment, all optional:
-#   LATTICE_DEV_HOME     owner-only state dir: CA, server key and certificate, account env files.
-#                        Default $HOME/.lattice-dev. Never inside the repository.
-#   LATTICE_DEV_PROJECT  compose project name and volume prefix. Default lattice-dev.
-#   LATTICE_DEV_PORT     host port on 127.0.0.1. Default 5432.
-#   LATTICE_DEV_IMAGE    image to run. Default the published 0.1.0-alpha.1 image, pinned by digest.
+#   LATTICE_DEV_HOME      owner-only state dir: CA, server key and certificate, account env files.
+#                         Default $HOME/.lattice-dev. Never inside the repository.
+#   LATTICE_DEV_PROJECT   compose project name and volume prefix. Default lattice-dev.
+#   LATTICE_DEV_PORT      host port on 127.0.0.1. Default 5432.
+#   LATTICE_DEV_IMAGE     image to run. Default the published 0.1.0-alpha.1 image, pinned by digest.
+#   LATTICE_DEV_DRAIN_SECS  seconds an account add or remove waits for open connections to latticed to
+#                         close before it restarts the server. Default 15, the compose stop grace.
 #
 # Secrets: a generated password is printed once, by `account add`, and written only to that account's
 # env file (mode 0600). Passwords never go on a command line: the server reads the account files and
@@ -35,7 +38,16 @@ COMPOSE_FILE=$DEV_DIR/compose.yaml
 HOME_DIR=${LATTICE_DEV_HOME:-$HOME/.lattice-dev}
 PROJECT=${LATTICE_DEV_PROJECT:-lattice-dev}
 PORT=${LATTICE_DEV_PORT:-5432}
+DRAIN_SECS=${LATTICE_DEV_DRAIN_SECS:-15}
 partial_file=""
+LOCK_DIR=""
+
+# Removes what this run created and still owns: a temp file that holds a password, and the lock.
+on_exit() {
+  if [ -n "$partial_file" ]; then rm -f -- "$partial_file"; fi
+  release_lock
+}
+trap on_exit EXIT
 
 # Prints the physical path of LATTICE_DEV_HOME: symlinks and . or .. are resolved, so that the checks
 # below compare what the paths really are. A directory that does not exist yet is resolved through
@@ -74,6 +86,9 @@ check_settings() {
   [[ $PROJECT =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "LATTICE_DEV_PROJECT must be lowercase letters, digits, - or _"
   if ! [[ $PORT =~ ^[0-9]{1,5}$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
     die "LATTICE_DEV_PORT must be a port number"
+  fi
+  if ! [[ $DRAIN_SECS =~ ^[0-9]{1,3}$ ]] || [ "$DRAIN_SECS" -gt 600 ]; then
+    die "LATTICE_DEV_DRAIN_SECS must be a number of seconds from 0 to 600"
   fi
   export LATTICE_DEV_HOME=$HOME_DIR LATTICE_DEV_PROJECT=$PROJECT LATTICE_DEV_PORT=$PORT
   if [ -n "${LATTICE_DEV_IMAGE:-}" ]; then export LATTICE_DEV_IMAGE; fi
@@ -146,6 +161,71 @@ is_running() {
   [ -n "$(compose ps --status running -q latticed 2>/dev/null)" ]
 }
 
+# One dev-stack command at a time. The lock is a directory in the state dir, so it works on macOS and
+# Linux alike, and it holds the pid of its owner. Commands that restart or delete the server's files
+# take it: account add and remove, up, and reset. A lock whose pid is gone is stale and is taken over.
+# A live holder is waited for up to 180 seconds, longer than its worst legitimate hold.
+take_lock() {
+  [ -d "$HOME_DIR" ] || return 0
+  local tries=0 holder=""
+  until mkdir -m 0700 "$HOME_DIR/.lock" 2>/dev/null; do
+    holder=$(cat "$HOME_DIR/.lock/pid" 2>/dev/null || true)
+    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+      # Rename first: if another run already moved it, the rename fails and the loop tries again.
+      mv "$HOME_DIR/.lock" "$HOME_DIR/.lock.stale.$$" 2>/dev/null || true
+      rm -rf -- "$HOME_DIR/.lock.stale.$$"
+      continue
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -le 180 ] || die "another lattice-dev command (pid ${holder:-unknown}) still holds $HOME_DIR/.lock after 180 seconds"
+    sleep 1
+  done
+  printf '%s\n' "$$" > "$HOME_DIR/.lock/pid"
+  LOCK_DIR=$HOME_DIR/.lock
+}
+
+release_lock() {
+  if [ -n "$LOCK_DIR" ]; then
+    rm -f -- "$LOCK_DIR/pid"
+    rmdir -- "$LOCK_DIR" 2>/dev/null || true
+    LOCK_DIR=""
+  fi
+}
+
+# Prints how many TCP connections latticed holds to its port 5432, read from /proc inside the container
+# (the image has bash but no other tool). Local port 5432 is 1538 in hex; state 01 is ESTABLISHED.
+open_connections() {
+  local n
+  # shellcheck disable=SC2016 # the $ expansions are for the container's bash, not this shell
+  n=$(compose exec -T latticed bash -c '
+    n=0
+    { read -r _
+      while read -r _ laddr _ st _; do
+        if [ "${laddr##*:}" = 1538 ] && [ "$st" = 01 ]; then n=$((n + 1)); fi
+      done
+    } < /proc/net/tcp
+    echo "$n"') || die "cannot count the connections latticed holds"
+  [[ $n =~ ^[0-9]+$ ]] || die "cannot count the connections latticed holds"
+  printf '%s\n' "$n"
+}
+
+# A restart cuts every connection, and an open transaction with it. Before any change to the server's
+# files, wait up to DRAIN_SECS for the connections to close. If they stay open, refuse: nothing has
+# been written yet, so the caller retries once the sessions are closed.
+wait_for_drain() {
+  is_running || return 0
+  local waited=0 n
+  while :; do
+    n=$(open_connections)
+    [ "$n" = 0 ] && return 0
+    if [ "$waited" -ge "$DRAIN_SECS" ]; then
+      die "latticed holds $n open connection(s) to its port 5432: close them, or raise LATTICE_DEV_DRAIN_SECS, then retry. Nothing was changed."
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
 # Starts latticed, or restarts it when it runs with files that changed, and waits until it is healthy.
 start_latticed() {
   if [ "$1" = restart ] && is_running; then
@@ -163,6 +243,7 @@ check_name() {
 
 cmd_up() {
   ensure_state_dir
+  take_lock
   ensure_certificates
   install_tls
   if ! config_has scram-decoy-secret; then
@@ -185,8 +266,10 @@ cmd_account_add() {
   shift
   ensure_state_dir
   [ -f "$HOME_DIR/tls/server-cert.pem" ] || die "run lattice-dev.sh up first"
+  take_lock
   local envfile=$HOME_DIR/accounts/$name.env
   [ ! -e "$envfile" ] || die "account $name already exists (its env file is $envfile)"
+  wait_for_drain
 
   # The tool prints the generated password once on stdout. Only that line is kept; the rest of its
   # output is not shown. Stderr passes through: the tool never puts a password there.
@@ -197,19 +280,51 @@ cmd_account_add() {
   [ -n "$pw" ] || die "lattice account add printed no password"
 
   umask 077
-  # The temp file holds the password until it is renamed. Any exit before the rename removes it.
+  # The temp file holds the password until it is renamed, so the env file appears whole or not at all.
+  # on_exit removes the temp file if anything fails before the rename.
   partial_file=$(mktemp "$HOME_DIR/accounts/.$name.XXXXXX")
-  trap 'if [ -n "$partial_file" ]; then rm -f -- "$partial_file"; fi' EXIT
   printf 'PGHOST=%q\nPGPORT=%q\nPGDATABASE=%q\nPGUSER=%q\nPGPASSWORD=%q\nPGSSLMODE=%q\nPGSSLROOTCERT=%q\n' \
     127.0.0.1 "$PORT" lattice "$name" "$pw" verify-full "$HOME_DIR/ca.pem" > "$partial_file"
   mv -- "$partial_file" "$envfile"
   partial_file=""
-  trap - EXIT
 
   # latticed reads the verifier file at start only, so a running server restarts to see the account.
   start_latticed restart
   echo "account $name added on the server; its libpq settings are in $envfile"
   echo "password (shown once, saved in that file): $pw"
+}
+
+# Removes the login, the grants and the bearer tokens of NAME, then its env file. latticed reads the
+# verifier file at start only, so it restarts to drop the login. Removing the last account deletes the
+# verifier file, which latticed cannot start without, so the server is stopped instead.
+cmd_account_remove() {
+  local name=${1:-}
+  check_name "$name"
+  [ $# -eq 1 ] || die "usage: lattice-dev.sh account remove NAME"
+  ensure_state_dir
+  take_lock
+  wait_for_drain
+
+  local out
+  out=$(compose run --rm --no-deps -T lattice-cli account remove /etc/lattice "$name") \
+    || die "lattice account remove failed (no account $name, or the credential files are missing)"
+  rm -f -- "$HOME_DIR/accounts/$name.env"
+  printf '%s\n' "$out"
+  # Only a running server is restarted or stopped: a stack that is down stays down, and reads the
+  # change when it next starts.
+  if config_has scram-verifiers; then
+    if is_running; then
+      start_latticed restart
+      echo "latticed restarted without $name"
+    else
+      echo "latticed is not running; it reads the change when it starts"
+    fi
+  else
+    if is_running; then
+      compose stop latticed >/dev/null || die "could not stop latticed"
+    fi
+    echo "no accounts left: latticed is stopped (the next account add starts it)"
+  fi
 }
 
 cmd_psql() {
@@ -260,6 +375,7 @@ EOF
     read -r answer || true
     [ "$answer" = yes ] || die "not reset"
   fi
+  take_lock
   compose down --volumes --remove-orphans
   # A volume that compose did not own (created by hand) keeps its project label only if compose made it.
   docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" | while IFS= read -r v; do
@@ -267,6 +383,7 @@ EOF
   done
   rm -f "$HOME_DIR/ca-key.pem" "$HOME_DIR/ca.pem" "$HOME_DIR/ca.srl"
   rm -rf "$HOME_DIR/tls" "$HOME_DIR/accounts"
+  release_lock
   rmdir "$HOME_DIR" 2>/dev/null || true
   echo "reset project $PROJECT"
 }
@@ -289,9 +406,13 @@ main() {
     reset) cmd_reset "$@" ;;
     logs) cmd_logs "$@" ;;
     account)
-      [ "${1:-}" = add ] || die "usage: lattice-dev.sh account add NAME [--read T] [--write T] [--ddl T]"
-      shift
-      cmd_account_add "$@"
+      local sub=${1:-}
+      shift || true
+      case "$sub" in
+        add) cmd_account_add "$@" ;;
+        remove) cmd_account_remove "$@" ;;
+        *) die "usage: lattice-dev.sh account add NAME [--read T] [--write T] [--ddl T] | account remove NAME" ;;
+      esac
       ;;
     psql) cmd_psql "$@" ;;
     *) die "unknown subcommand '$cmd' (see lattice-dev.sh --help)" ;;

@@ -162,12 +162,17 @@ dev/lattice-dev.sh reset       # asks first, then deletes the rows, the volumes 
 - `account add` prints the generated password once and writes it to that env file only. Passwords and
   tokens never go on a command line. An account name is 1 to 63 letters, digits, `_` or `-`, and starts
   with a letter or a digit. A name that is already taken is refused.
-- latticed reads the account files at start, so every `account add` restarts a running server. The
-  restart disconnects every client connected at that moment, and the server is unavailable until it is
-  healthy again (a few seconds). Add all the accounts you need before a long session.
-- If an account's env file is lost, its password cannot be shown again, and the name stays taken. There
-  is no `account remove` command yet, so the only way back is `reset`, which deletes every account and
-  every row. Keep the env files: they are the only copy of the passwords.
+- latticed reads the account files at start, so every `account add` and `account remove` restarts a
+  running server. Before it changes anything, the script waits up to `LATTICE_DEV_DRAIN_SECS` (default 15,
+  the compose stop grace) for the connections to latticed to close. If they stay open it refuses, and
+  nothing changes: close those sessions and retry. A connection opened in the few seconds of the restart
+  itself can still be cut. The server is unavailable until it is healthy again (a few seconds). Adds and
+  removes, `up` and `reset` take a lock on the state dir, so only one runs at a time.
+- `account remove NAME` revokes the account's login and grants and its bearer tokens, then deletes its
+  env file. Removing the last account stops latticed, because it cannot start without accounts; the next
+  `account add` starts it. A lost env file is therefore not a dead end: remove the name, then add it
+  again for a new password.
+- Keep the env files: they are the only copy of the passwords, and a password is shown only once.
 - The rows live in the volumes `<project>_data`, `<project>_config` and `<project>_tls`. The project is
   `lattice-dev` by default; `LATTICE_DEV_PROJECT` and `LATTICE_DEV_PORT` run a second stack beside it.
   `LATTICE_DEV_IMAGE` runs another image, for example one built from the same binaries.

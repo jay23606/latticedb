@@ -14,9 +14,14 @@
 #   4.  a wrong password is refused.
 #   5.  status names the accounts and shows no password.
 #   6.  down, then up on the same volumes; the rows are read back.
+#   6a. remove alice: her token is revoked, her env file goes, an old copy of it no longer logs in,
+#       bob still reads, and the name can be added again.
+#   6b. add while the server runs: refused while alice's session is open (nothing changes); after the
+#       session writes a row and ends, the add restarts latticed, the row survives and carol logs in.
+#   6c. remove the last accounts; removing the last one stops latticed.
 #   7.  reset without a yes is refused.
 #   7b. a failed rename leaves no temp file holding a password.
-#   8.  reset --yes removes every container, volume and file the test made.
+#   8.  reset, answered yes at the prompt, removes every container, volume and file the test made.
 #
 # Needs docker with compose v2, openssl and psql. Passwords are never printed by this script: it reads
 # them from the account env files and checks the counts of their appearances in the command output.
@@ -47,6 +52,7 @@ esac
 
 cleanup() {
   status=$?
+  kill "${watchdog:-}" 2>/dev/null || true
   "$dev" reset --yes >/dev/null 2>&1 || true
   # Anything reset could not remove: containers and volumes that carry this project's label.
   docker ps -aq --filter "label=com.docker.compose.project=$LATTICE_DEV_PROJECT" | while IFS= read -r c; do
@@ -59,6 +65,11 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+# Whole-run watchdog: a hang anywhere fails the run after 20 minutes instead of the job timeout.
+# TERM runs the EXIT trap, so cleanup still removes the project and the state dir.
+trap 'exit 124' TERM
+(sleep 1200 && kill -TERM $$) >/dev/null 2>&1 &
+watchdog=$!
 
 fail() {
   echo "FAILED  $*" >&2
@@ -101,6 +112,13 @@ password_of() {
   )
 }
 
+# Runs a lattice-cli command in the tools container of this test's project. The dev script has no
+# subcommand for tokens, so the test calls the tool directly. Its output can hold a token: callers
+# check it with grep and never print it.
+tool() {
+  docker compose --profile tools -p "$LATTICE_DEV_PROJECT" -f "$root/dev/compose.yaml" run --rm --no-deps -T lattice-cli "$@"
+}
+
 # Containers and volumes that carry this project's label.
 project_containers() {
   docker ps -aq --filter "label=com.docker.compose.project=$LATTICE_DEV_PROJECT"
@@ -110,6 +128,7 @@ project_volumes() {
 }
 
 expected_rows=$'1|write the spec|f\n2|check the restart|t'
+expected_rows_3=$'1|write the spec|f\n2|check the restart|t\n3|written by a held session|f'
 notes_ddl="CREATE TABLE notes (id INT PRIMARY KEY, title TEXT NOT NULL, done BOOLEAN)"
 notes_rows="INSERT INTO notes VALUES (1, 'write the spec', false), (2, 'check the restart', true)"
 
@@ -224,6 +243,96 @@ expect_ok bob-reread "$dev" psql bob -X -q -t -A -c "SELECT id, title, done FROM
 [ "$(cat "$work/bob-reread.out")" = "$expected_rows" ] || fail "rows after the restart were '$(cat "$work/bob-reread.out")'"
 ok "rows_read_back_after_down_and_up_on_the_same_volumes"
 
+# --- 6a. remove alice. Her login, grants and token go, and so does her env file. A copy of that file
+# stands for one that was lost or copied: its password must stop working. bob is not affected, and
+# the name can be added again.
+cp "$LATTICE_DEV_HOME/accounts/alice.env" "$LATTICE_DEV_HOME/accounts/alice-stale.env"
+expect_ok alice-token tool account token create /etc/lattice alice
+grep -q '^token .* created for alice$' "$work/alice-token.out" || fail "alice has no token to revoke"
+expect_ok remove-alice "$dev" account remove alice
+grep -qx 'account alice removed; 1 bearer tokens revoked' "$work/remove-alice.out" \
+  || fail "remove did not report alice's one token as revoked"
+[ ! -e "$LATTICE_DEV_HOME/accounts/alice.env" ] || fail "alice.env remains after remove"
+ok "remove_deletes_the_env_file_and_revokes_the_token"
+
+expect_ok alice-tokens-after tool account token list /etc/lattice alice
+grep -q 'revoked' "$work/alice-tokens-after.out" || fail "alice's token is not listed as revoked"
+if grep -q 'active' "$work/alice-tokens-after.out"; then fail "alice still has an active token"; fi
+ok "removed_accounts_token_is_revoked"
+
+expect_refused removed-login "$dev" psql alice-stale -X -c "SELECT 1"
+grep -q 'FATAL' "$work/removed-login.err" || fail "the removed account's old password was not refused"
+rm -f -- "$LATTICE_DEV_HOME/accounts/alice-stale.env"
+ok "removed_account_cannot_log_in_with_its_old_password"
+
+expect_ok bob-after-remove "$dev" psql bob -X -q -t -A -c "SELECT id, title, done FROM notes ORDER BY id"
+[ "$(cat "$work/bob-after-remove.out")" = "$expected_rows" ] || fail "bob's read changed after alice was removed"
+ok "other_accounts_still_read_after_a_remove"
+
+expect_ok readd-alice "$dev" account add alice --read notes --write notes
+expect_ok alice-after-readd "$dev" psql alice -X -q -t -A -c "SELECT id FROM notes ORDER BY id"
+[ "$(cat "$work/alice-after-readd.out")" = $'1\n2' ] || fail "re-added alice cannot read the two rows"
+ok "removed_name_can_be_added_again"
+
+# --- 6b. add while the server runs. alice's session stays open and writes a row through it. A second
+# add is refused while that session is open, and changes nothing. When the session ends, the add
+# restarts latticed: the acknowledged row survives and the new account can log in.
+hold=$work/hold.fifo
+mkfifo "$hold"
+exec 7<>"$hold"
+# 7>&- keeps the write end out of the child: an inherited copy would keep the fifo open and psql would
+# never see end of input.
+"$dev" psql alice -X -q <"$hold" 7>&- >"$work/held.out" 2>"$work/held.err" &
+held_pid=$!
+printf "INSERT INTO notes VALUES (3, 'written by a held session', false);\n" >&7
+# The session connects in the background, so wait until its write is visible from another connection:
+# only then is the session known to be open.
+seen=0
+for _ in $(seq 1 60); do
+  if out=$("$dev" psql bob -X -q -t -A -c "SELECT id FROM notes ORDER BY id" 2>/dev/null) && [ "$out" = $'1\n2\n3' ]; then
+    seen=1
+    break
+  fi
+  sleep 1
+done
+[ "$seen" = 1 ] || fail "the held session's write never became visible"
+expect_refused add-carol-while-busy env LATTICE_DEV_DRAIN_SECS=3 "$dev" account add carol --read notes
+grep -q 'open connection' "$work/add-carol-while-busy.err" || fail "the busy add was refused for another reason"
+[ ! -e "$LATTICE_DEV_HOME/accounts/carol.env" ] || fail "a refused add wrote carol.env"
+expect_ok list-after-busy tool account list /etc/lattice
+if grep -q '^carol' "$work/list-after-busy.out"; then fail "a refused add changed the server's accounts"; fi
+ok "add_is_refused_while_a_session_is_open_and_changes_nothing"
+
+exec 7>&-
+# Bounded: a session that does not end after its input closes fails the test instead of hanging the job.
+for _ in $(seq 1 60); do
+  kill -0 "$held_pid" 2>/dev/null || break
+  sleep 1
+done
+if kill -0 "$held_pid" 2>/dev/null; then
+  kill "$held_pid" 2>/dev/null || true
+  fail "the held session did not end after its input closed"
+fi
+if ! wait "$held_pid"; then
+  cat "$work/held.err" >&2
+  fail "the held session did not finish its write"
+fi
+expect_ok add-carol "$dev" account add carol --read notes
+expect_ok carol-read "$dev" psql carol -X -q -t -A -c "SELECT id FROM notes ORDER BY id"
+[ "$(cat "$work/carol-read.out")" = $'1\n2\n3' ] || fail "carol cannot read the three rows"
+expect_ok bob-after-held "$dev" psql bob -X -q -t -A -c "SELECT id, title, done FROM notes ORDER BY id"
+[ "$(cat "$work/bob-after-held.out")" = "$expected_rows_3" ] || fail "the acknowledged write did not survive the add's restart"
+ok "add_waits_for_the_session_then_restarts_and_the_acknowledged_write_survives"
+
+# --- 6c. remove the last accounts. Each remove restarts latticed; removing the last one stops it,
+# because latticed cannot start without a verifier file.
+for who in carol bob alice; do
+  expect_ok "remove-$who" "$dev" account remove "$who"
+done
+[ -z "$(docker ps -q --filter "label=com.docker.compose.project=$LATTICE_DEV_PROJECT" --filter label=com.docker.compose.service=latticed)" ] \
+  || fail "latticed still runs with no account"
+ok "removing_the_last_account_stops_latticed"
+
 # --- 7. reset asks first; a no leaves everything in place
 printf 'no\n' >"$work/answer-no"
 expect_refused reset-declined "$dev" reset <"$work/answer-no"
@@ -242,8 +351,9 @@ done
 [ ! -e "$LATTICE_DEV_HOME/accounts/carol.env" ] || fail "carol.env exists after a failed rename"
 ok "failed_rename_removes_the_temp_file_with_the_password"
 
-# --- 8. reset --yes removes what the test created
-expect_ok reset "$dev" reset --yes
+# --- 8. reset, answered yes at the prompt, removes what the test created (cleanup uses --yes)
+printf 'yes\n' >"$work/answer-yes"
+expect_ok reset "$dev" reset <"$work/answer-yes"
 [ -z "$(project_containers)" ] || fail "containers remain after reset"
 [ -z "$(project_volumes)" ] || fail "volumes remain after reset"
 [ ! -e "$LATTICE_DEV_HOME" ] || [ -z "$(ls -A "$LATTICE_DEV_HOME")" ] || fail "state dir still holds files"
