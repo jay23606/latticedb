@@ -112,7 +112,7 @@ jobs:
           persist-credentials: false
       - uses: taiki-e/install-action@645d1ab48b3cb8591684a8b730b2ccf4cb3f9568 # v2.87.33
         with:
-          tool: typos
+          tool: typos@1.51.1
       - run: typos
   commits:
     name: commit-messages

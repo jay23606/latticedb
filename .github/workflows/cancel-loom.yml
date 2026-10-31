@@ -27,7 +27,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with: { shared-key: cancel-loom }
       - uses: taiki-e/install-action@645d1ab48b3cb8591684a8b730b2ccf4cb3f9568 # v2.87.33
-        with: { tool: cargo-deny }
+        with: { tool: cargo-deny@0.20.2 }
       - name: Audit isolated test-tool dependencies
         run: cargo deny --locked --manifest-path tools/cancel-loom/Cargo.toml --config tools/cancel-loom/deny.toml check
       - name: Verify four models are selected, then enumerate their interleavings

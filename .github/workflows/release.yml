@@ -38,7 +38,7 @@ jobs:
       # No Rust cache in this workflow: the release gate and its rehearsal start from an empty cache,
       # so a poisoned cache cannot influence what gets published (zizmor cache-poisoning).
       - uses: taiki-e/install-action@645d1ab48b3cb8591684a8b730b2ccf4cb3f9568 # v2.87.33
-        with: { tool: cargo-deny }
+        with: { tool: cargo-deny@0.20.2 }
       - name: the release commit passes the full gate
         run: cargo xtask ci
         env: { CI: "true" }
