@@ -784,7 +784,7 @@ impl Tool {
             Tool::Read => "Read one row or a page of rows from a table in a scope you may read.",
             Tool::Write => "Write one row to a table in a scope you may write.",
             Tool::Subscribe => {
-                "Subscribe to changes of a table in a scope you may read. The optional after is the next_cursor of a previous reply (24 lowercase hex digits); omit it to start from the origin."
+                "Subscribe to changes of a table in a scope you may read. The optional after is the next_cursor of a previous reply (24 lowercase hex digits); omit it to start from the origin. The cursor is the change feed cursor, not a board event id."
             }
         }
     }
@@ -1625,7 +1625,7 @@ mod tests {
         let (out, _) = run(&c, r#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#);
         let expected = concat!(
             r#"{"jsonrpc":"2.0","id":4,"result":{"resultType":"complete","tools":[{"name":"lattice_subscribe","#,
-            r#""description":"Subscribe to changes of a table in a scope you may read. The optional after is the next_cursor of a previous reply (24 lowercase hex digits); omit it to start from the origin.","inputSchema":{"type":"object","#,
+            r#""description":"Subscribe to changes of a table in a scope you may read. The optional after is the next_cursor of a previous reply (24 lowercase hex digits); omit it to start from the origin. The cursor is the change feed cursor, not a board event id.","inputSchema":{"type":"object","#,
             r#""properties":{"scope":{"type":"string","minLength":1,"maxLength":128,"description":"The served workspace scope, normally `default`. Another scope is refused with 40302 that names it; a sub-scope of it is the tool error not_found."},"#,
             r#""table":{"type":"string","minLength":1,"maxLength":64,"description":"Table name: ASCII letters, digits and underscore."},"#,
             r#""after":{"type":"string","minLength":24,"maxLength":24,"description":"Optional. The next_cursor of a previous reply: 24 lowercase hex digits. Omit it to start from the origin."},"#,
@@ -2699,6 +2699,164 @@ mod tests {
         let big = ToolOutput::tool_error("x".repeat(MAX_OUTPUT_BYTES + 1));
         assert_eq!((big.text(), big.is_error()), (OUTPUT_OMITTED, true));
         assert!(!ToolOutput::or_notice("{}".to_owned()).is_error());
+    }
+
+    // ---- the poll-with-cursor floor (#535) ------------------------------------------------
+    //
+    // A scripted feed stands in for the host's backend. Its history is shared with the test, so
+    // commits can land between polls. It serves the contract `docs/mcp-v0.md` states: events
+    // strictly after the cursor, in cursor order, at most `page` per reply, and `next_cursor`
+    // is the last event returned or the cursor given when none was.
+
+    struct Feed {
+        history: std::rc::Rc<std::cell::RefCell<Vec<FeedCursor>>>,
+        page: usize,
+    }
+
+    impl ToolBackend for Feed {
+        fn call(&mut self, _caller: &Caller, call: &ToolCall) -> Result<ToolOutput, BackendError> {
+            let ToolCall::Subscribe { after, .. } = call else {
+                return Err(BackendError::Unavailable);
+            };
+            let history = self.history.borrow();
+            let mut newer = history.iter().filter(|c| **c > *after).copied();
+            let sent: Vec<FeedCursor> = newer.by_ref().take(self.page).collect();
+            let truncated = newer.next().is_some();
+            let next = sent.last().copied().unwrap_or(*after);
+            let events: Vec<String> = sent
+                .iter()
+                .map(|c| format!("{{\"cursor\":\"{}\",\"op\":\"upsert\"}}", cursor_to_hex(c)))
+                .collect();
+            let text = format!(
+                "{{\"tool\":\"lattice_subscribe\",\"notice\":\"scripted\",\"truncated\":{truncated},\
+                 \"next_cursor\":\"{}\",\"untrusted\":{{\"events\":[{}]}}}}",
+                cursor_to_hex(&next),
+                events.join(",")
+            );
+            ToolOutput::new(text).map_err(|_| BackendError::Unavailable)
+        }
+    }
+
+    /// The feed cursor of commit `lsn`, change `index`: big-endian, so byte order is cursor order.
+    fn cur(lsn: u64, index: u32) -> FeedCursor {
+        let mut bytes = lsn.to_be_bytes().to_vec();
+        bytes.extend(index.to_be_bytes());
+        bytes.try_into().expect("12 bytes")
+    }
+
+    /// One `lattice_subscribe` call after `after`: the cursors of the events returned, the
+    /// `next_cursor` and `truncated`, read from the reply as a client would.
+    fn poll(
+        s: &mut Server<Feed>,
+        c: &Caller,
+        after: &FeedCursor,
+    ) -> (Vec<FeedCursor>, FeedCursor, bool) {
+        let args = format!(
+            r#"{{"scope":"default","table":"t","after":"{}"}}"#,
+            cursor_to_hex(after)
+        );
+        let out = s
+            .handle(c, call_msg("lattice_subscribe", &args).as_bytes())
+            .expect("a response");
+        let v = parse_json(out.as_bytes()).expect("json");
+        let text = match v.get("result").and_then(|r| r.get("content")) {
+            Some(Json::Arr(items)) => match items.first().and_then(|i| i.get("text")) {
+                Some(Json::Str(t)) => t.clone(),
+                _ => panic!("content text"),
+            },
+            _ => panic!("content"),
+        };
+        let reply = parse_json(text.as_bytes()).expect("reply json");
+        let cursor_of = |j: Option<&Json>| match j {
+            Some(Json::Str(h)) => cursor_from_hex(h).expect("24 lowercase hex digits"),
+            _ => panic!("cursor"),
+        };
+        let next = cursor_of(reply.get("next_cursor"));
+        let truncated = matches!(reply.get("truncated"), Some(Json::Bool(true)));
+        let Some(Json::Arr(events)) = reply.get("untrusted").and_then(|u| u.get("events")) else {
+            panic!("events");
+        };
+        let got = events.iter().map(|e| cursor_of(e.get("cursor"))).collect();
+        (got, next, truncated)
+    }
+
+    fn feed(
+        history: &std::rc::Rc<std::cell::RefCell<Vec<FeedCursor>>>,
+        page: usize,
+    ) -> Server<Feed> {
+        Server::sessionless(Feed {
+            history: history.clone(),
+            page,
+        })
+    }
+
+    #[test]
+    fn a_client_that_never_reads_notifications_loses_nothing_when_it_polls_with_its_last_cursor() {
+        let history = std::rc::Rc::new(std::cell::RefCell::new(vec![cur(10, 0), cur(10, 1)]));
+        let mut s = feed(&history, 64);
+        let c = caller(&[(Tool::Subscribe, "default")]);
+        let origin = [0u8; CURSOR_LEN];
+
+        // The client keeps only the cursor of its last reply and reads nothing else.
+        let mut seen = Vec::new();
+        let (events, last, _) = poll(&mut s, &c, &origin);
+        seen.extend(events);
+        history.borrow_mut().extend([cur(11, 0), cur(11, 1)]);
+
+        let (events, last, _) = poll(&mut s, &c, &last);
+        seen.extend(events);
+        // Caught up: nothing new, and the cursor it was given comes back unchanged.
+        let (events, last_again, truncated) = poll(&mut s, &c, &last);
+        assert!(events.is_empty() && !truncated);
+        assert_eq!(last_again, last);
+
+        // Commits that land while the client is busy are still delivered, once, in order.
+        history.borrow_mut().push(cur(12, 0));
+        let (events, _, _) = poll(&mut s, &c, &last);
+        seen.extend(events);
+
+        assert_eq!(seen, *history.borrow());
+    }
+
+    #[test]
+    fn reading_on_from_next_cursor_never_skips_or_repeats() {
+        // Ten events over three commits, so one commit's changes straddle a page boundary.
+        let history: Vec<FeedCursor> = (0u32..10)
+            .map(|i| cur(5 + u64::from(i / 3), i % 3))
+            .collect();
+        let shared = std::rc::Rc::new(std::cell::RefCell::new(history.clone()));
+        let mut s = feed(&shared, 3);
+        let c = caller(&[(Tool::Subscribe, "default")]);
+
+        let mut after = [0u8; CURSOR_LEN];
+        let mut got = Vec::new();
+        let mut polls = 0;
+        loop {
+            let (events, next, truncated) = poll(&mut s, &c, &after);
+            polls += 1;
+            assert!(polls <= 10, "the feed never caught up");
+            if events.is_empty() {
+                assert!(!truncated);
+                assert_eq!(
+                    next, after,
+                    "a caught-up reply echoes the cursor it was given"
+                );
+                break;
+            }
+            assert!(events.len() <= 3, "a page is bounded");
+            assert_eq!(truncated, got.len() + events.len() < history.len());
+            got.extend(events);
+            after = next;
+        }
+        assert_eq!(got, history);
+        // Three full pages, one short page, then the caught-up reply.
+        assert_eq!(polls, 5);
+
+        // A cursor ahead of the newest commit is answered like a caught-up one, not refused.
+        let ahead = cur(99, 0);
+        let (events, next, truncated) = poll(&mut s, &c, &ahead);
+        assert!(events.is_empty() && !truncated);
+        assert_eq!(next, ahead);
     }
 }
 
