@@ -1,6 +1,24 @@
 # zizmor configuration. Triage record for the findings that are deliberately kept; everything else
 # is fixed. Policy and how to run it locally: docs/policies/workflow-security.md.
 rules:
+  anonymous-definition:
+    # Informational, auditor persona only. Job ids are the names of the required checks (`gate`,
+    # `secret-scan`, `typos`, `commit-messages`, `msrv`). A `name:` on the other jobs would rename
+    # check contexts that branch protection and the project board refer to.
+    disable: true
+  concurrency-limits:
+    ignore:
+      # Manual or scheduled evidence runs. A workflow-level group would make an overlapping run wait
+      # or cancel it, and these runs are started on purpose (a 5-shard fuzz campaign, a paired
+      # benchmark, a mutation plan, a long proof). Each is started by hand or on a schedule only.
+      - bench-baseline.yml
+      - foundation-comparison.yml
+      - fuzz-24h.yml
+      - io-probe.yml
+      - kani.yml
+      - mutation-crate.yml
+      - sql-planner-spike.yml
+      - weekly.yml
   dangerous-triggers:
     ignore:
       # main-guard needs workflow_run: it reacts to a failed push run of `pr` on main. It runs no code
@@ -12,4 +30,10 @@ rules:
     # Style rule for the `$/` syntax GitHub added in July 2026 (runner 2.336.0 or newer). The `./`
     # form is still valid, and actionlint support for `$/` is not verified, so the four local
     # references stay as they are until it is.
+    disable: true
+  superfluous-actions:
+    # Informational, auditor persona only. The toolchain and tool installers (`dtolnay/rust-toolchain`
+    # with `toolchain: 1.99.1`, `taiki-e/install-action` with pinned tool versions) are SHA-pinned and
+    # select the exact versions the gate uses. Replacing them with rustup and cargo scripts would
+    # reimplement that selection in every job without a gain in review.
     disable: true

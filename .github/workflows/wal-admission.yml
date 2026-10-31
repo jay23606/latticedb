@@ -18,6 +18,10 @@ on:
       - '.github/workflows/wal-admission.yml'
 permissions:
   contents: read
+# Pull requests cancel their superseded runs; a manual dispatch always gets a unique group and never waits.
+concurrency:
+  group: wal-admission-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   guarded-wal:
     runs-on: ubuntu-latest

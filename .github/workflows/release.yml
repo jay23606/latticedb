@@ -45,10 +45,10 @@ jobs:
   package:
     needs: verify
     permissions:
-      contents: write
-      packages: write
-      id-token: write
-      attestations: write
+      contents: write # create the GitHub release and its assets (tags only)
+      packages: write # push the versioned image to ghcr.io (tags only)
+      id-token: write # OIDC token for the build provenance attestation
+      attestations: write # attest the release archives
     uses: ./.github/workflows/package.yml
     with:
       version: ${{ needs.verify.outputs.version }}

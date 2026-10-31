@@ -64,5 +64,11 @@ the online-only `ref-version-mismatch` audit), 0 after.
 | self-repository | 4 | Disabled, reason in `.github/zizmor.yml`: `$/` is a July 2026 GitHub syntax needing runner 2.336.0 or newer; `./` still works and support in actionlint is not verified. |
 
 Auditor persona (not enforced): `labeler.yml` had `pull-requests: write` at workflow level, fixed by
-moving it to the job. Open items are tracked in issue #327: the unpinned `postgres:17` service image
-in `nightly.yml`, and low-severity template-expansion, missing concurrency and permission-comment notes.
+moving it to the job. Issue #327 triage: matrix and input values moved out of `run:` into `env:` in
+`pr.yml` and `nightly-build.yml`; each permission zizmor flagged in the workflows that triage owns has
+a comment saying why it is needed; `labeler.yml`, `cancel-loom.yml` and `wal-admission.yml` have a
+concurrency group. The manual and scheduled evidence workflows keep no group, because a group would
+make an overlapping run wait or cancel it; they are listed with that reason in `.github/zizmor.yml`.
+The informational `anonymous-definition` and `superfluous-actions` audits are disabled there, with
+reasons. Still open in `nightly.yml` and `package.yml`, which this triage does not touch: template
+expansion and permission comments in both, and a concurrency note in `nightly.yml`.

@@ -26,10 +26,8 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-      # Upload to the code scanning tab.
-      security-events: write
-      # Publish the result to the public Scorecard API (needed for the badge).
-      id-token: write
+      security-events: write # upload the SARIF results to the code scanning tab
+      id-token: write # publish the result to the public Scorecard API (needed for the badge)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

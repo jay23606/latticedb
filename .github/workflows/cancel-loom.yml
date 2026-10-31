@@ -12,6 +12,10 @@ on:
       - '.github/workflows/cancel-loom.yml'
 permissions:
   contents: read
+# Pull requests cancel their superseded runs. Other callers (nightly.yml) get a unique group, so they never wait or cancel.
+concurrency:
+  group: cancel-loom-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   cancel-loom:
     runs-on: ubuntu-latest

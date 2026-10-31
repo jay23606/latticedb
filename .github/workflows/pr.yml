@@ -40,8 +40,10 @@ jobs:
       - name: engine without row features
         if: matrix.os == 'ubuntu-latest'
         run: cargo clippy -p lattice-engines --no-default-features --all-targets -- -D warnings
-      - run: ${{ matrix.command }}
+      # The matrix command goes through env: so no expression is expanded into the script text.
+      - run: bash -c "$GATE_COMMAND"
         env:
+          GATE_COMMAND: ${{ matrix.command }}
           PROPTEST_CASES: ${{ matrix.cases }}
       - name: scorecard evidence semantics and real ledger ingestion
         if: matrix.os == 'ubuntu-latest'

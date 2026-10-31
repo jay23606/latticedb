@@ -48,9 +48,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      actions: read
-      pull-requests: read
-      issues: read
+      actions: read # read the completed run that is evaluated, its jobs and artifacts
+      pull-requests: read # read the pull requests of that run
+      issues: read # read the tracking issues it refers to
     steps:
       # Immutable controller revision; no failing-run artifacts, shell text or PR code is executed.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,10 +75,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
-      actions: read
-      pull-requests: write
-      issues: write
+      contents: write # --apply pushes a candidate commit to a branch (git push --force-with-lease)
+      actions: read # re-read the run it revalidates before each mutation
+      pull-requests: write # label the pull requests the guard acts on
+      issues: write # open or comment on the tracking issue
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

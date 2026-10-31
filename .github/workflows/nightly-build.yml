@@ -20,11 +20,13 @@ jobs:
       - id: c
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
         run: |
-          last=$(gh release view nightly --repo "${{ github.repository }}" --json targetCommitish --jq .targetCommitish 2>/dev/null || true)
-          head=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
+          last=$(gh release view nightly --repo "$REPO" --json targetCommitish --jq .targetCommitish 2>/dev/null || true)
+          head=$(gh api "repos/$REPO/commits/main" --jq .sha)
           echo "sha=$head" >> "$GITHUB_OUTPUT"
-          if [ "$last" = "$head" ] && [ "${{ github.event_name }}" = schedule ]; then
+          if [ "$last" = "$head" ] && [ "$EVENT" = schedule ]; then
             echo "build=false" >> "$GITHUB_OUTPUT"
           else
             echo "build=true" >> "$GITHUB_OUTPUT"
@@ -46,10 +48,10 @@ jobs:
   package:
     needs: [changed, gate]
     permissions:
-      contents: write
-      packages: write
-      id-token: write
-      attestations: write
+      contents: write # replace the nightly pre-release and its assets
+      packages: write # push the :nightly image to ghcr.io
+      id-token: write # OIDC token for the build provenance attestation
+      attestations: write # attest the nightly archives
     uses: ./.github/workflows/package.yml
     with:
       version: nightly
