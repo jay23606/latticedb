@@ -42,10 +42,11 @@ pub const MAX_STATEMENTS: usize = 1024;
 /// The most portals one session may hold. Drivers keep a handful open; the old limit of 1,024 let
 /// one connection pin a thousand copies of a large result.
 pub const MAX_PORTALS: usize = 128;
-/// The most bytes one session may keep in portals: the statement text and bound parameters of
-/// every open portal plus the rows a suspended portal still has to send. A client that fills it
-/// gets `53200` and the session stays usable after `Close`. It matches the default statement
-/// memory budget, so one maximal result still fits but a hundred of them do not.
+/// The most bytes one session may keep in its prepared statements and portals: the text, parameter
+/// types and result columns of every statement, the text, bound parameters and columns of every
+/// open portal, plus the rows a suspended portal still has to send. A client that fills it gets
+/// `53200` and the session stays usable after `Close`. It matches the default statement memory
+/// budget, so one maximal result still fits but a hundred of them do not.
 pub const MAX_PORTAL_BYTES: usize = 64 * 1024 * 1024;
 
 /// One row; `None` is SQL NULL.
@@ -159,6 +160,8 @@ struct Statement {
     sql: String,
     param_types: Vec<i32>,
     columns: Vec<Column>,
+    /// Bytes of the session's budget this statement holds. Returned when it is replaced or closed.
+    charged: usize,
 }
 
 enum PortalState {
@@ -181,6 +184,8 @@ struct Portal {
 }
 
 const CELL_SLOT: usize = std::mem::size_of::<Option<Vec<u8>>>();
+/// Fixed cost of one statement or portal: its map entry and record, before any text or rows.
+const ENTRY_OVERHEAD: usize = 64;
 
 /// What a row costs in memory: the outer vector, one slot per cell and the cell bytes.
 fn row_bytes(row: &Row) -> usize {
@@ -193,8 +198,24 @@ fn row_bytes(row: &Row) -> usize {
         .saturating_add(data)
 }
 
-/// What a portal costs before it holds any rows: its statement text and bound parameters.
-fn portal_base_bytes(sql: &str, params: &[Option<Vec<u8>>]) -> usize {
+/// What a list of result columns costs: each column record plus its name.
+fn columns_bytes(columns: &[Column]) -> usize {
+    columns.iter().fold(0usize, |n, c| {
+        n.saturating_add(std::mem::size_of::<Column>())
+            .saturating_add(c.name.len())
+    })
+}
+
+/// What a prepared statement costs: its text, declared parameter types and result columns.
+fn statement_bytes(sql: &str, param_types: &[i32], columns: &[Column]) -> usize {
+    sql.len()
+        .saturating_add(param_types.len().saturating_mul(std::mem::size_of::<i32>()))
+        .saturating_add(columns_bytes(columns))
+        .saturating_add(ENTRY_OVERHEAD)
+}
+
+/// What a portal costs before it holds any rows: its statement text, bound parameters and columns.
+fn portal_base_bytes(sql: &str, params: &[Option<Vec<u8>>], columns: &[Column]) -> usize {
     let data = params
         .iter()
         .flatten()
@@ -202,13 +223,14 @@ fn portal_base_bytes(sql: &str, params: &[Option<Vec<u8>>]) -> usize {
     sql.len()
         .saturating_add(params.len().saturating_mul(CELL_SLOT))
         .saturating_add(data)
-        .saturating_add(64)
+        .saturating_add(columns_bytes(columns))
+        .saturating_add(ENTRY_OVERHEAD)
 }
 
-fn over_portal_budget() -> QueryError {
+fn over_byte_budget() -> QueryError {
     QueryError::new(
         "53200",
-        "too much memory held by open portals; close portals or fetch their rows",
+        "too much memory held by open statements and portals; close them or fetch their rows",
     )
 }
 
@@ -229,10 +251,13 @@ pub struct Session<H> {
     /// After an error in the extended flow: ignore everything up to the next `Sync`.
     discarding: bool,
     statements: BTreeMap<String, Statement>,
+    /// Sum of `Statement::charged` over `statements`.
+    statement_bytes: usize,
     portals: BTreeMap<String, Portal>,
     /// Sum of `Portal::charged` over `portals`.
     portal_bytes: usize,
-    portal_budget: usize,
+    /// The most bytes `statement_bytes + portal_bytes` may reach before new work is refused.
+    byte_budget: usize,
 }
 
 impl<H: QueryHandler> Session<H> {
@@ -268,17 +293,40 @@ impl<H: QueryHandler> Session<H> {
             tx: TxStatus::Idle,
             discarding: false,
             statements: BTreeMap::new(),
+            statement_bytes: 0,
             portals: BTreeMap::new(),
             portal_bytes: 0,
-            portal_budget: MAX_PORTAL_BYTES,
+            byte_budget: MAX_PORTAL_BYTES,
         }
     }
 
-    /// Replaces the per-session portal byte budget ([`MAX_PORTAL_BYTES`] by default).
+    /// Replaces the per-session byte budget for statements and portals ([`MAX_PORTAL_BYTES`] by
+    /// default).
     #[must_use]
     pub fn with_portal_budget(mut self, bytes: usize) -> Self {
-        self.portal_budget = bytes;
+        self.byte_budget = bytes;
         self
+    }
+
+    /// Bytes the session holds against its budget: prepared statements and portals.
+    fn held_bytes(&self) -> usize {
+        self.statement_bytes.saturating_add(self.portal_bytes)
+    }
+
+    /// Stores a statement. The statement it replaces, if any, gives its bytes back to the budget.
+    fn store_statement(&mut self, name: String, statement: Statement) {
+        let charged = statement.charged;
+        if let Some(old) = self.statements.insert(name, statement) {
+            self.statement_bytes = self.statement_bytes.saturating_sub(old.charged);
+        }
+        self.statement_bytes = self.statement_bytes.saturating_add(charged);
+    }
+
+    /// Drops a statement and returns what it held to the budget.
+    fn remove_statement(&mut self, name: &str) {
+        if let Some(statement) = self.statements.remove(name) {
+            self.statement_bytes = self.statement_bytes.saturating_sub(statement.charged);
+        }
     }
 
     /// Drops a portal and returns what it held to the budget.
@@ -697,12 +745,21 @@ impl<H: QueryHandler> Session<H> {
                         cancellation,
                     )?
                 };
-                self.statements.insert(
+                let charged = statement_bytes(&query, &param_types, &columns);
+                // Parsing over the unnamed statement replaces it, so its bytes do not count against
+                // the new one. Check first: a refused Parse must leave the old statement in place.
+                let replaced = self.statements.get(&name).map_or(0, |s| s.charged);
+                let others = self.held_bytes().saturating_sub(replaced);
+                if others.saturating_add(charged) > self.byte_budget {
+                    return Err(over_byte_budget());
+                }
+                self.store_statement(
                     name,
                     Statement {
                         sql: query,
                         param_types,
                         columns,
+                        charged,
                     },
                 );
                 out.push(Backend::ParseComplete);
@@ -746,7 +803,7 @@ impl<H: QueryHandler> Session<H> {
                 if !self.portals.contains_key(&portal) && self.portals.len() >= MAX_PORTALS {
                     return Err(QueryError::new("54000", "too many portals"));
                 }
-                let charged = portal_base_bytes(&stmt.sql, &params);
+                let charged = portal_base_bytes(&stmt.sql, &params, &stmt.columns);
                 let made = Portal {
                     sql: stmt.sql.clone(),
                     params,
@@ -757,12 +814,12 @@ impl<H: QueryHandler> Session<H> {
                 // Binding over the unnamed portal replaces it, so its bytes do not count against
                 // the new one. Check first: a refused bind must leave the old portal in place.
                 let replaced = self.portals.get(&portal).map_or(0, |p| p.charged);
-                let others = self.portal_bytes.saturating_sub(replaced);
-                if others.saturating_add(charged) > self.portal_budget {
-                    return Err(over_portal_budget());
+                let others = self.held_bytes().saturating_sub(replaced);
+                if others.saturating_add(charged) > self.byte_budget {
+                    return Err(over_byte_budget());
                 }
                 self.remove_portal(&portal);
-                self.portal_bytes += charged;
+                self.portal_bytes = self.portal_bytes.saturating_add(charged);
                 self.portals.insert(portal, made);
                 out.push(Backend::BindComplete);
             }
@@ -783,7 +840,7 @@ impl<H: QueryHandler> Session<H> {
                 out.push(shape(&portal.columns));
             }
             Frontend::Close(Target::Statement(name)) => {
-                self.statements.remove(&name);
+                self.remove_statement(&name);
                 out.push(Backend::CloseComplete);
             }
             Frontend::Close(Target::Portal(name)) => {
@@ -837,8 +894,8 @@ impl<H: QueryHandler> Session<H> {
                 // the session already holds more than its budget. Once it ran, its result is always
                 // kept (it is bounded by the statement memory budget), which makes the budget soft:
                 // retained bytes stay under the budget plus one result.
-                if self.portal_bytes > self.portal_budget {
-                    return Err(over_portal_budget());
+                if self.held_bytes() > self.byte_budget {
+                    return Err(over_byte_budget());
                 }
                 let result = self.run(&sql, &params, cancellation)?;
                 let rows: VecDeque<Row> = if result.columns.is_empty() {
@@ -883,7 +940,7 @@ impl<H: QueryHandler> Session<H> {
         };
         // What stays behind is charged to the session. The first run measures the rows once; later
         // runs subtract what they sent, so no message costs more than the rows it moves.
-        let base = portal_base_bytes(&portal.sql, &portal.params);
+        let base = portal_base_bytes(&portal.sql, &portal.params, &portal.columns);
         let kept = if rows.is_empty() {
             0
         } else if fresh {
@@ -2465,5 +2522,61 @@ mod tests {
             s.on_message(bind("", "small", vec![])).messages,
             vec![Backend::BindComplete]
         );
+    }
+
+    #[test]
+    fn a_client_that_fills_the_budget_gets_53200_and_stays_usable_after_close() {
+        let mut s = wide_session().with_portal_budget(64 * 1024);
+        // Each statement costs about 1 KiB (its text plus a fixed overhead), so the budget holds a
+        // few dozen of them before a Parse is refused.
+        let text = format!("SELECT 1 -- {}", "x".repeat(1000));
+        let mut refused = None;
+        for i in 0..1000 {
+            let out = s.on_message(parse(&format!("s{i}"), &text));
+            if out.messages == vec![Backend::ParseComplete] {
+                continue;
+            }
+            assert_eq!(err_code(&out.messages[0]), "53200");
+            refused = Some(i);
+            break;
+        }
+        let refused = refused.expect("the budget never filled");
+        assert!(refused >= 10, "refused only after {refused} statements");
+        assert!(s.statement_bytes <= 64 * 1024);
+        assert!(!s.statements.contains_key(&format!("s{refused}")));
+        // The refusal discards the rest of the batch until Sync, as any extended-flow error does.
+        s.on_message(Frontend::Sync);
+        // A portal costs the same as the statement it binds, so the full budget refuses it too.
+        let out = s.on_message(bind("p", "s0", vec![]));
+        assert_eq!(err_code(&out.messages[0]), "53200");
+        s.on_message(Frontend::Sync);
+        // Closing a statement gives its bytes back, and new work runs again.
+        let before = s.statement_bytes;
+        s.on_message(Frontend::Close(Target::Statement("s0".into())));
+        assert_eq!(s.statement_bytes, before - text.len() - ENTRY_OVERHEAD);
+        let out = s.on_message(parse("small", "SELECT 1"));
+        assert_eq!(out.messages, vec![Backend::ParseComplete]);
+        let out = s.on_message(bind("p", "small", vec![]));
+        assert_eq!(out.messages, vec![Backend::BindComplete]);
+        let out = s.on_message(exec("p", 0));
+        assert_eq!(
+            out.messages,
+            vec![Backend::CommandComplete("SELECT 1".into())]
+        );
+    }
+
+    #[test]
+    fn parsing_over_the_unnamed_statement_replaces_its_bytes() {
+        let mut s = wide_session();
+        s.on_message(parse("", "SELECT 1 -- a note"));
+        let once = s.statement_bytes;
+        assert!(once > 0);
+        for _ in 0..50 {
+            let out = s.on_message(parse("", "SELECT 1 -- a note"));
+            assert_eq!(out.messages, vec![Backend::ParseComplete]);
+        }
+        assert_eq!(s.statement_bytes, once);
+        s.on_message(Frontend::Close(Target::Statement(String::new())));
+        assert_eq!(s.statement_bytes, 0);
     }
 }
