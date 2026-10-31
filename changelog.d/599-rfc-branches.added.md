@@ -1,0 +1,1 @@
+Draft RFC 0014 and proposed ADR 0032 define copy-on-write branches as fork-point overlays: what a branch read, write, drop and vacuum mean, what each operation costs, and what the log, recovery and the change feed must do. No branch is implemented yet; the byte format, branch permissions and merge are open questions, and main behaviour is unchanged.
