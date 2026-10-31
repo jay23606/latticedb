@@ -1,0 +1,1 @@
+Windows compile check: the `windows-check` workflow runs `cargo check` for `lattice-cli` and `latticed` on a hosted Windows runner on pull requests that touch the Rust crates and on pushes to `main`. It is informational and not a required check. Windows is still unsupported; `docs/releasing.md` (Platform support) lists what is built and checked.

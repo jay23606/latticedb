@@ -1,0 +1,61 @@
+name: windows-check
+# Type-checks the two host crates for the Windows MSVC target on a hosted Windows runner. It proves
+# only that they compile for that target: it builds no binary, runs no test and starts no daemon.
+# Informational: Windows is unsupported for the alpha (docs/releasing.md, "Platform support"), so the
+# job is not a required check and does not block a merge. Tracked in #552.
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/windows-check.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/windows-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-check-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  windows-check:
+    name: windows-check (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    # A compile error here is recorded as information about Windows support, not a merge blocker.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.99.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - name: cargo check lattice-cli and latticed for x86_64-pc-windows-msvc
+        id: compile
+        run: cargo check --locked -p lattice-cli -p latticed --target x86_64-pc-windows-msvc
+      # continue-on-error keeps the job green even when the compile fails, so this step makes the
+      # real outcome visible in the run summary and as a warning annotation.
+      - name: report the Windows compile outcome
+        if: always()
+        # windows-latest defaults to PowerShell for run:, which cannot parse this bash script.
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.compile.outcome }}
+        run: |
+          echo "Windows compile check: ${OUTCOME}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "::warning title=Windows compile check::cargo check for x86_64-pc-windows-msvc did not succeed (outcome: ${OUTCOME}); see #552"
+          fi

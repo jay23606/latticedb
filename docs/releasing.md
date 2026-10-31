@@ -60,6 +60,19 @@ gh attestation verify lattice-0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz --re
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 
+## Platform support
+
+| Platform | Status for the alpha | What checks it |
+|---|---|---|
+| Linux x86_64 and arm64, glibc (Debian 12 and Ubuntu 22.04 or newer) | Released archives | The archives are built on `ubuntu-22.04` and `ubuntu-22.04-arm`; `package.yml` runs them in Debian 12 and Ubuntu 22.04 containers |
+| macOS arm64 | Released archive | The `gate (macos-latest)` job runs `cargo xtask test-portable` on every push to `main` |
+| Windows x86_64, MSVC | Unsupported; use WSL2 or the Linux container image | The `windows-check` workflow runs `cargo check` for `lattice-cli` and `latticed` on `windows-latest` (informational, not a required check; #552) |
+| Intel macOS, musl Linux | Not built | Nothing |
+
+The Windows check proves only that the two crates type-check for the MSVC target. It builds no binary, runs
+no test and starts no daemon, so it is not evidence that Windows works. The installer (`scripts/install.sh`)
+supports no Windows, and no PowerShell installer ships until a Windows build passes its tests.
+
 ## Cutting a release
 
 1. Pick the version. The workspace version in `Cargo.toml` is the single source of truth.
