@@ -1,0 +1,1 @@
+Draft RFC 0013 defines live queries as incremental views: one table, a filter in the supported WHERE forms and a column projection, with the maintenance rule, snapshot-then-tail and the failure semantics. It changes no behaviour; the wire form of a query is still open.
