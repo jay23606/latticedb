@@ -159,4 +159,8 @@ exclude_globs = [
     "**/sync/proofs.rs",
     # Kani proof harnesses: compiled only under `cfg(kani)`, run by the Kani workflow, never by `cargo test`.
     "**/contract/proofs.rs",
+    # The e2e driver (`lattice-e2e/src/lib.rs`) only moves bytes between a real server and the test that
+    # asserts on them; every assertion lives in `tests/harness.rs`, so a mutant there changes how the
+    # test reaches the server, not what it checks. The seeded schedule in `src/schedule.rs` is mutated.
+    "crates/lattice-e2e/src/lib.rs",
 ]

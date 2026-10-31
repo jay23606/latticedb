@@ -22,6 +22,7 @@ members = [
     "crates/lattice-evalkit",
     "crates/lattice-bench",
     "crates/latticed",
+    "crates/lattice-e2e",
     "xtask",
 ]
 

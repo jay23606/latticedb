@@ -1,0 +1,16 @@
+[package]
+name = "lattice-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "End-to-end harness: a real sync gateway and SQL listener on loopback sockets, account fixtures, raw clients and seeded kill schedules."
+
+[dependencies]
+lattice-api = { path = "../lattice-api" }
+lattice-seams = { path = "../lattice-seams" }
+latticed = { path = "../latticed" }
+
+[lints]
+workspace = true

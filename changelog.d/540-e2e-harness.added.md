@@ -1,0 +1,1 @@
+`lattice-e2e` is a test-support crate that starts `latticed` in process on loopback sockets, over a temporary data directory, with bearer-token fixtures for two principals, raw WebSocket and SQL clients, and a seeded connection-kill schedule. It is not published and ships no runtime behaviour.

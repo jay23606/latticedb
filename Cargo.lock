@@ -484,6 +484,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-e2e"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "lattice-api",
+ "lattice-seams",
+ "latticed",
+]
+
+[[package]]
 name = "lattice-engines"
 version = "0.1.0-alpha.1"
 dependencies = [
