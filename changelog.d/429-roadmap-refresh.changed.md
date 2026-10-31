@@ -1,0 +1,1 @@
+The roadmap now describes `main` as it is: the SQL server and durable table definitions, MCP over HTTP on the gateway port, the agent task board, the Docker dev stack and the `v0.1.0-alpha.1` pre-release. It also lists the open issues that remain for Alpha 0.1, Alpha 0.2 and Phase 2, and it still claims no gate has passed.
