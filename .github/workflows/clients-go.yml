@@ -1,0 +1,63 @@
+name: clients-go
+# Tests the Go client against the vectors the Rust side wrote. The Rust side of the same check (the
+# vector file must match the Rust codecs) runs in the `pr` workflow. The toolchain is pinned by
+# setup-go to the go.mod version, and GOTOOLCHAIN=local makes a mismatch fail instead of downloading
+# another toolchain. The client has no dependencies.
+on:
+  pull_request:
+    paths:
+      - 'clients/go/**'
+      - 'conformance/**'
+      - '.github/workflows/clients-go.yml'
+permissions:
+  contents: read
+concurrency:
+  group: clients-go-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  go:
+    name: go
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: clients/go
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: clients/go/go.mod
+      - name: Toolchain
+        env:
+          GOTOOLCHAIN: local
+        run: go version
+      - name: Standard library only
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          modules="$(go list -m all)"
+          if [ "$modules" != "github.com/moncifem/latticedb/clients/go" ]; then
+            echo "the client must have no dependencies, found:"
+            echo "$modules"
+            exit 1
+          fi
+      - name: Format
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed for:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        env:
+          GOTOOLCHAIN: local
+        run: go vet ./...
+      - name: Test
+        env:
+          GOTOOLCHAIN: local
+        run: go test -count=1 -v ./...

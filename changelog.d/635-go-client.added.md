@@ -1,0 +1,1 @@
+Go client codecs in `clients/go`: the sync frames, version negotiation, and the change feed cursor and event, ported from the Python client with the standard library only. Every shared conformance vector decodes and re-encodes byte for byte, and the same bytes fail with the same error. Experimental: the client state machine is not ported yet.
