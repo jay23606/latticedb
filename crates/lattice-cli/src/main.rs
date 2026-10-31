@@ -24,6 +24,8 @@ mod lsl;
 
 mod account;
 
+mod watch;
+
 fn doctor<I: Io>(io: &I, wal: &str) -> (String, bool) {
     let report = match scrub(io, wal) {
         Ok(r) => r,
@@ -382,6 +384,7 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Some("watch") => watch::command(args.get(1..).unwrap_or_default()),
         Some("account") => account_command(args.get(1..).unwrap_or_default()),
         Some("lsl") => lsl_command(args.get(1..).unwrap_or_default()),
         _ => {
@@ -395,6 +398,9 @@ fn main() -> ExitCode {
             );
             eprintln!(
                 "       lattice lsl check FILE | fmt FILE [--write|--check] | compat OLD NEW"
+            );
+            eprintln!(
+                "       lattice watch table/NAME --url ws://HOST:PORT --token-file FILE (--from CURSOR | --from-start)"
             );
             ExitCode::from(2)
         }
