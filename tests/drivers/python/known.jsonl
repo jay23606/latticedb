@@ -1,0 +1,1 @@
+{"step":"ddl_in_implicit_transaction","issue":"#382","latticed":{"step":"ddl_in_implicit_transaction","tags":["ddl","transaction"],"sqlstate":"25001"}}

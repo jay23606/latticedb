@@ -57,3 +57,10 @@ updates:
     groups:
       driver-smoke:
         patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /tests/drivers/python
+    schedule: { interval: weekly }
+    cooldown: { default-days: 7 }
+    groups:
+      driver-smoke:
+        patterns: ["*"]

@@ -1,9 +1,10 @@
 name: driver-smoke
-# Runs the node-postgres (pg) and pgx smoke scripts in tests/drivers (text mode) against the release-built
-# latticed over loopback trust (issue 576). Each driver is installed from its lockfile: package-lock.json
-# for node, go.sum for Go. The expected output is written by hand; a case that latticed does not pass yet
-# is pinned in known.jsonl with its issue, and the job fails when that case changes or starts to match
-# PostgreSQL. This is not the driver matrix (#413), which also covers the binary formats.
+# Runs the node-postgres (pg), pgx and pg8000 smoke scripts in tests/drivers (text mode) against the
+# release-built latticed over loopback trust (issues 576 and 710). Each driver is installed from its lockfile
+# or hash-pinned requirements: package-lock.json for node, go.sum for Go, requirements.txt (--require-hashes)
+# for Python. The expected output is written by hand; a case that latticed does not pass yet is pinned in
+# known.jsonl with its issue, and the job fails when that case changes or starts to match PostgreSQL. This is
+# not the driver matrix (#413), which also covers the binary formats.
 on:
   pull_request:
     paths:
@@ -54,6 +55,12 @@ jobs:
       - name: download the pgx driver pinned in go.sum
         run: go mod download
         working-directory: tests/drivers/go
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: install the pg8000 driver from requirements.txt, hashes checked
+        run: python3 -m pip install --require-hashes --no-deps -r requirements.txt
+        working-directory: tests/drivers/python
       - name: shellcheck
         run: shellcheck -x tests/drivers/smoke.sh
       - name: driver smoke scripts, text mode
@@ -68,6 +75,7 @@ jobs:
             echo
             echo "- node-postgres: \`$(cd tests/drivers/node && node -p 'require("pg/package.json").version')\` on node \`$(node --version)\`"
             echo "- pgx: \`$(cd tests/drivers/go && go list -m -f '{{.Version}}' github.com/jackc/pgx/v5)\` on \`$(go version)\`"
+            echo "- pg8000: \`$(python3 -c 'import importlib.metadata as m; print(m.version("pg8000"))')\` on \`$(python3 --version)\`"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: server logs and driver output
         if: failure()

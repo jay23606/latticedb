@@ -165,6 +165,7 @@ outside the root workspace (each has a nested `[workspace]`), which the root `ca
 | npm | `/clients/typescript` | Exact-pinned development tools |
 | npm | `/tests/drivers/node` | The node-postgres (`pg`) client of the driver smoke script, exact-pinned, grouped |
 | gomod | `/tests/drivers/go` | The pgx client of the Go driver smoke script (`go.mod`, `go.sum`), grouped |
+| pip | `/tests/drivers/python` | The pg8000 client of the Python driver smoke script (`requirements.txt`, hash-pinned, grouped as `driver-smoke`); test-only, see "Python test-only dependencies" below |
 
 The experiment and loom lockfiles stay out of the production graph on purpose; their update pull
 requests are reviewed like any other, but they do not change what ships. The classifier's
@@ -199,3 +200,21 @@ tests use `unittest`. The `clients-python` workflow fails if importing the packa
 standard library. There is no `pyproject.toml`, requirements file or lockfile, so there is nothing for
 Dependabot to track and no pip entry for `/clients/python` in `.github/dependabot.yml`. Adding a package
 means adding it to this policy, pinning it exactly and adding the Dependabot entry in the same pull request.
+
+## Python test-only dependencies (`tests/drivers/python`)
+
+The pg8000 smoke script is the only Python code outside `clients/python` that installs packages. Its
+dependencies are test-only: CI installs them to run the driver smoke job, and no release artifact ships
+them. The rules for them are:
+
+- Installs use `python3 -m pip install --require-hashes --no-deps -r requirements.txt`. Every package and
+  every release file in the file is pinned with its sha256 from the PyPI JSON API, and each version was at
+  least two weeks old when it was pinned.
+- The licence must be permissive: Apache-2.0, MIT, BSD, ISC, or MIT-0 (MIT No Attribution, which has no
+  attribution duty and is therefore at least as permissive as MIT). `deny.toml` covers Rust crates only and
+  is not changed for these.
+- Current pins: pg8000 1.31.5 (BSD-3-Clause); scramp 1.4.17 (MIT-0, required by pg8000, every scramp
+  release since 1.4.5 uses it); asn1crypto 1.5.1 (MIT); python-dateutil 2.9.0.post0 (Apache-2.0 or BSD,
+  dual licensed); six 1.17.0 (MIT). The MIT-0 entry was accepted by the tech lead in pull request #783;
+  it does not cover anything that ships.
+- Dependabot opens weekly pull requests for `/tests/drivers/python`, grouped as `driver-smoke`.
