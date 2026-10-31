@@ -31,3 +31,4 @@
 | [0030](0030-shared-protocol-crate.md) | ADR 0030: A shared protocol crate for the sync wire types | proposed |
 | [0031](0031-bearer-token-authentication.md) | ADR 0031: Bearer-token authentication for the HTTP and WebSocket front doors | accepted |
 | [0032](0032-copy-on-write-branches.md) | ADR 0032: Copy-on-write branches as fork-point overlays | proposed |
+| [0033](0033-feed-cursor-and-board-events.md) | ADR 0033: Chaining the SQL board and the MCP feed | proposed |
