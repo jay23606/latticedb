@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "lattice": {
+      "command": "lattice",
+      "args": [
+        "mcp",
+        "--url",
+        "http://127.0.0.1:7878/mcp",
+        "--token-file",
+        "${LATTICE_TOKEN_FILE}"
+      ]
+    }
+  }
+}

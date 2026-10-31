@@ -11,6 +11,10 @@ harness text is one source, shared by every future pack.
 | `harness.src.md` | source | The harness text. Edit this one. |
 | `harness.generated.md` | generated | The source wrapped in begin and end markers. Do not edit it. |
 | `mcp.example.json` | example | An MCP entry for the HTTP endpoint, with the token read from `LATTICE_TOKEN`. |
+| `mcp.stdio.example.json` | example | An MCP entry that runs `lattice mcp`, a stdio proxy to the endpoint, with the token file read from `LATTICE_TOKEN_FILE`. See the stdio variant below. |
+| `settings.example.json` | example | The hook settings. Merge its `hooks` block into the project's `.claude/settings.json`. |
+| `hooks/session-start.sh` | hook | Prints a bounded digest of open tasks and the board head at session start. |
+| `hooks/prompt-submit.sh` | hook | Prints the board events since the saved cursor on each prompt. |
 
 Regenerate after a source edit, and check for drift:
 
@@ -34,6 +38,29 @@ generated file is stale, and when the text holds an email address, an absolute u
 
 The server side is `latticed --gateway-listen 127.0.0.1:PORT --gateway-tokens FILE`. The endpoint is
 `POST /mcp`, loopback only, with no TLS yet, and it is experimental (see `docs/mcp-v0.md`).
+
+## Stdio variant
+
+Use `mcp.stdio.example.json` when the client starts the server as a child process and speaks MCP over
+standard input and output. The entry runs `lattice mcp`, which sends each message as one `POST /mcp`
+request to the gateway and writes each reply as one line.
+
+1. Put the `lattice` binary on the `PATH` of the process that starts the client.
+2. Write the bearer token to a file that only its owner can read (mode 0600), and export
+   `LATTICE_TOKEN_FILE` with its path. `lattice mcp` refuses `--token`, so the token never goes on a
+   command line.
+3. Copy `mcp.stdio.example.json` to `.mcp.json` at the project root. Replace the port with the one you
+   passed to `--gateway-listen`.
+
+Limits:
+
+- `lattice mcp` accepts only `http://` on a loopback address (`127.0.0.1`, `localhost` or `[::1]`) with
+  the path `/mcp`. It refuses `https://` and remote hosts, because the CLI has no TLS client yet.
+- For a gateway on another host with TLS, the candidate is the HTTP entry in `mcp.example.json`, if the
+  client trusts the gateway's certificate authority. That path is not tested here.
+- The entry has no `type` field. The Claude Code MCP page (https://code.claude.com/docs/en/mcp, read on
+  2026-10-31) says an entry with no `type` is read as a stdio server, and that `${VAR}` references work
+  in `args`. A project-scoped `.mcp.json` server needs approval the first time the client sees it.
 
 ## Status
 
@@ -65,4 +92,8 @@ The server side is `latticed --gateway-listen 127.0.0.1:PORT --gateway-tokens FI
   it). The helper needs the usual `LATTICE_BOARD_URL` or `PG*` variables in the environment that starts
   the client. The cursor lives in `$CLAUDE_PROJECT_DIR/.lattice/board-cursor` (mode 0600,
   directory 0700). Add `.lattice/` to the project's `.gitignore`. The hooks never write to the board.
-- Not done: session presence, the installer, other client packs, and a stdio proxy.
+- Checked: `tools/test_claude_code_examples.py` parses both MCP examples, finds no token literal in them,
+  checks that the stdio example's flags appear in the usage text of `lattice mcp` (read from
+  `crates/lattice-cli/src/mcp_proxy.rs`), and checks that the table above lists every file in this
+  directory. No client has been run with either example.
+- Not done: session presence, the installer, and other client packs.

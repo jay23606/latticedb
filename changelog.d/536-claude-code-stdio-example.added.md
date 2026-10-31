@@ -1,0 +1,1 @@
+The integrations pack gains `mcp.stdio.example.json`, an MCP entry that starts `lattice mcp` for clients that speak MCP over stdio. The README documents the install steps and the loopback-only limit, and a unit check ties the example's flags to the proxy's usage text.
