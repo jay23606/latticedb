@@ -1,0 +1,1 @@
+`lattice-sdk` gains `cursor_store`: the `CursorStore` trait for saving the feed cursor a subscriber has reached, a strict codec for its stored form (24 lowercase hex digits and one optional newline), and an in-memory store for tests. This is the codec and trait only. The owner-only file store (atomic write, mode 0600) follows in the CLI layer.

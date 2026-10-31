@@ -328,6 +328,49 @@ pub const lattice_sdk::contract::VERSION: u64
 pub fn lattice_sdk::contract::append_record_len(&str, lattice_sdk::contract::Kind, &str) -> usize
 pub fn lattice_sdk::contract::decode_line(&[u8]) -> core::result::Result<lattice_sdk::contract::Message, lattice_sdk::contract::ContractError>
 pub fn lattice_sdk::contract::encode_line(&lattice_sdk::contract::Message) -> core::result::Result<alloc::string::String, lattice_sdk::contract::ContractError>
+pub mod lattice_sdk::cursor_store
+pub struct lattice_sdk::cursor_store::MalformedCursor
+impl core::clone::Clone for lattice_sdk::cursor_store::MalformedCursor
+pub fn lattice_sdk::cursor_store::MalformedCursor::clone(&self) -> Self
+impl core::cmp::Eq for lattice_sdk::cursor_store::MalformedCursor
+impl core::cmp::PartialEq for lattice_sdk::cursor_store::MalformedCursor
+pub fn lattice_sdk::cursor_store::MalformedCursor::eq(&self, &Self) -> bool
+impl core::error::Error for lattice_sdk::cursor_store::MalformedCursor
+impl core::fmt::Debug for lattice_sdk::cursor_store::MalformedCursor
+pub fn lattice_sdk::cursor_store::MalformedCursor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for lattice_sdk::cursor_store::MalformedCursor
+pub fn lattice_sdk::cursor_store::MalformedCursor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for lattice_sdk::cursor_store::MalformedCursor
+impl core::marker::StructuralPartialEq for lattice_sdk::cursor_store::MalformedCursor
+pub struct lattice_sdk::cursor_store::MemoryCursorStore
+impl lattice_sdk::cursor_store::MemoryCursorStore
+pub fn lattice_sdk::cursor_store::MemoryCursorStore::bytes(&self) -> core::option::Option<&[u8]>
+pub fn lattice_sdk::cursor_store::MemoryCursorStore::new() -> Self
+pub fn lattice_sdk::cursor_store::MemoryCursorStore::with_bytes(&[u8]) -> Self
+impl core::clone::Clone for lattice_sdk::cursor_store::MemoryCursorStore
+pub fn lattice_sdk::cursor_store::MemoryCursorStore::clone(&self) -> Self
+impl core::cmp::Eq for lattice_sdk::cursor_store::MemoryCursorStore
+impl core::cmp::PartialEq for lattice_sdk::cursor_store::MemoryCursorStore
+pub fn lattice_sdk::cursor_store::MemoryCursorStore::eq(&self, &Self) -> bool
+impl core::default::Default for lattice_sdk::cursor_store::MemoryCursorStore
+pub fn lattice_sdk::cursor_store::MemoryCursorStore::default() -> Self
+impl core::fmt::Debug for lattice_sdk::cursor_store::MemoryCursorStore
+pub fn lattice_sdk::cursor_store::MemoryCursorStore::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for lattice_sdk::cursor_store::MemoryCursorStore
+impl lattice_sdk::cursor_store::CursorStore for lattice_sdk::cursor_store::MemoryCursorStore
+pub type lattice_sdk::cursor_store::MemoryCursorStore::Error = lattice_sdk::cursor_store::MalformedCursor
+pub fn lattice_sdk::cursor_store::MemoryCursorStore::load(&self) -> core::result::Result<core::option::Option<lattice_sdk::mcp::FeedCursor>, lattice_sdk::cursor_store::MalformedCursor>
+pub fn lattice_sdk::cursor_store::MemoryCursorStore::save(&mut self, &lattice_sdk::mcp::FeedCursor) -> core::result::Result<(), lattice_sdk::cursor_store::MalformedCursor>
+pub trait lattice_sdk::cursor_store::CursorStore
+pub type lattice_sdk::cursor_store::CursorStore::Error: core::convert::From<lattice_sdk::cursor_store::MalformedCursor>
+pub fn lattice_sdk::cursor_store::CursorStore::load(&self) -> core::result::Result<core::option::Option<lattice_sdk::mcp::FeedCursor>, Self::Error>
+pub fn lattice_sdk::cursor_store::CursorStore::save(&mut self, &lattice_sdk::mcp::FeedCursor) -> core::result::Result<(), Self::Error>
+impl lattice_sdk::cursor_store::CursorStore for lattice_sdk::cursor_store::MemoryCursorStore
+pub type lattice_sdk::cursor_store::MemoryCursorStore::Error = lattice_sdk::cursor_store::MalformedCursor
+pub fn lattice_sdk::cursor_store::MemoryCursorStore::load(&self) -> core::result::Result<core::option::Option<lattice_sdk::mcp::FeedCursor>, lattice_sdk::cursor_store::MalformedCursor>
+pub fn lattice_sdk::cursor_store::MemoryCursorStore::save(&mut self, &lattice_sdk::mcp::FeedCursor) -> core::result::Result<(), lattice_sdk::cursor_store::MalformedCursor>
+pub fn lattice_sdk::cursor_store::decode_cursor(&[u8]) -> core::result::Result<lattice_sdk::mcp::FeedCursor, lattice_sdk::cursor_store::MalformedCursor>
+pub fn lattice_sdk::cursor_store::encode_cursor(&lattice_sdk::mcp::FeedCursor) -> alloc::string::String
 pub mod lattice_sdk::mcp
 pub mod lattice_sdk::mcp::code
 pub const lattice_sdk::mcp::code::BACKEND_UNAVAILABLE: i64

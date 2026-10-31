@@ -13,3 +13,5 @@ pub mod client;
 pub mod mcp;
 
 pub mod outbox;
+
+pub mod cursor_store;

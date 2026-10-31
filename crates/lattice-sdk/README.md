@@ -14,6 +14,9 @@ Allowed workspace dependencies: lattice-abi, lattice-lsl, lattice-proto.
   `decode_line` refuses unknown fields and versions, duplicate keys, floats, lone surrogates, invalid UTF-8
   and lines over 1 MiB; `encode_line` writes the canonical form; `Framer` splits a byte stream into lines
   with bounded memory.
+- `cursor_store`: the `CursorStore` trait for a saved feed cursor, `encode_cursor` and `decode_cursor` (24 lowercase
+  hex digits and one optional newline; anything else is refused) and an in-memory store. No file I/O here: the
+  owner-only file store belongs to the CLI layer.
 
 ## Conformance suite
 
