@@ -1,0 +1,1 @@
+Dev stack CI: `tests/dev/dev-stack.sh` runs on every change under `dev/`, `tests/dev/` and `docker/`, and on the workflow itself, on pull requests and on pushes to main. It starts the published image with SCRAM over TLS on a free loopback port and checks accounts, grants, restarts and reset end to end.
