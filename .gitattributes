@@ -1,0 +1,2 @@
+# Seed files are raw fuzz inputs: keep their bytes and line endings and do not flag whitespace.
+fuzz/seeds/** -text -whitespace

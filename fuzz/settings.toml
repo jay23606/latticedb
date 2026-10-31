@@ -104,3 +104,11 @@ basis = "the test decodes frames with a 1 MiB payload cap plus a 14-byte header 
 [targets.bearer_verify]
 max_len = 4096
 basis = "the input is a header (only 128 bytes are looked at) and a credential file; 4 KiB holds the header limit, many entries and the over-limit branches (the 256 KiB file cap is reached by unit tests)"
+
+[targets.scram_exchange]
+max_len = 16384
+basis = "a SASL body is at most 8 KiB (MAX_SASL_BODY_LEN, lattice-api pgwire); 16 KiB holds two maximal frames back to back, a third truncated frame and the leading control byte"
+
+[targets.credential_file]
+max_len = 262208
+basis = "MAX_CREDENTIAL_BYTES is 256 KiB (lattice-api auth) plus slack, so the over-limit branch is reachable by the input length itself"

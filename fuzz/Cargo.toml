@@ -175,3 +175,17 @@ path = "fuzz_targets/bearer_verify.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "scram_exchange"
+path = "fuzz_targets/scram_exchange.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "credential_file"
+path = "fuzz_targets/credential_file.rs"
+test = false
+doc = false
+bench = false
