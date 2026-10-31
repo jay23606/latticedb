@@ -1,0 +1,1 @@
+Commit-lint accepts the directory scopes that the repository already uses: `dev`, `integrations`, `tests`, `tests/dev`, `docker`, `scripts`, `clients` and `conformance`. Before, `cargo xtask commit-lint` rejected a commit such as `feat(dev): ...`. Unknown scopes are still rejected.

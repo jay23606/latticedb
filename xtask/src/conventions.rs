@@ -6,9 +6,29 @@ use crate::repo_root;
 const CHANGE_TYPES: [&str; 10] = [
     "feat", "fix", "docs", "chore", "refactor", "test", "perf", "ci", "build", "revert",
 ];
-const EXTRA_SCOPES: [&str; 14] = [
-    "web", "sidecars", "packs", "formats", "tla", "evals", "benches", "fuzz", "backlog", "docs",
-    "tools", "xtask", "deps", "spec",
+const EXTRA_SCOPES: [&str; 22] = [
+    "web",
+    "sidecars",
+    "packs",
+    "formats",
+    "tla",
+    "evals",
+    "benches",
+    "fuzz",
+    "backlog",
+    "docs",
+    "tools",
+    "xtask",
+    "deps",
+    "spec",
+    "dev",
+    "integrations",
+    "tests",
+    "tests/dev",
+    "docker",
+    "scripts",
+    "clients",
+    "conformance",
 ];
 
 /// Problems with a Conventional Commits first line. `scopes` are the allowed scope names.
@@ -161,5 +181,28 @@ mod tests {
             vec![1, 3]
         );
         assert!(untracked_todos("// nothing here").is_empty());
+    }
+
+    #[test]
+    fn directory_scopes_are_accepted() {
+        let mut all = vec!["lattice-core".to_string()];
+        all.extend(EXTRA_SCOPES.iter().map(|s| (*s).to_string()));
+        for dir in [
+            "dev",
+            "integrations",
+            "tests",
+            "tests/dev",
+            "docker",
+            "scripts",
+            "clients",
+            "conformance",
+        ] {
+            let message = format!("feat({dir}): add the dev stack");
+            assert!(
+                commit_problems(&message, &all).is_empty(),
+                "directory scope `{dir}` is rejected"
+            );
+        }
+        assert!(!commit_problems("feat(nonsense): x", &all).is_empty());
     }
 }
