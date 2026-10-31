@@ -164,6 +164,18 @@ class ClassifyRisk(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(g.classify_risk([path]), {area})
 
+    def test_proof_tools_are_verification_evidence(self):
+        for path in [
+            "tools/wal-admission/verify_old_reader.py",
+            "tools/wal-admission/measurement_reader.rs",
+            "tools/wal-admission/test_measurement.py",
+            "tools/cancel-loom/models.rs",
+            "tools/cancel-loom/Cargo.toml",
+            "tools/cancel-loom/deny.toml",
+        ]:
+            with self.subTest(path=path):
+                self.assertEqual(g.classify_risk([path]), {"verification"})
+
     def test_neighbours_of_the_new_gate_paths_stay_unlisted(self):
         for path in [
             "xtask/Cargo.toml", "xtask/src/backlog.rs", "xtask/src/gate.rs", "_typos.toml.bak",
@@ -458,6 +470,8 @@ class CodeownersMatchesClassifier(unittest.TestCase):
         "tools/test_scorecard.py": "tools/test_scorecard.py",
         "tools/slt_reference.py": "tools/slt_reference.py",
         "tools/test_slt_reference.py": "tools/test_slt_reference.py",
+        "tools/wal-admission/**": "tools/wal-admission/verify_old_reader.py",
+        "tools/cancel-loom/**": "tools/cancel-loom/models.rs",
         "docs/threat-model.md": "docs/threat-model.md",
         "docs/security-test-plan.md": "docs/security-test-plan.md",
         "docs/review-policy.md": "docs/review-policy.md",

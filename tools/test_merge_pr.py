@@ -102,10 +102,17 @@ class MergerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.merges(calls))
 
-    def test_label_added_between_the_two_snapshots_is_not_assumed_and_removal_refuses(self):
+    def test_label_removed_between_the_two_snapshots_refuses_the_merge(self):
         unlabelled = clean(); unlabelled['labels'] = []
         result, calls = self.invoke({'views': [clean(), unlabelled]}, '1')
         self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.merges(calls))
+
+    def test_label_added_between_the_two_snapshots_is_not_assumed(self):
+        unlabelled = clean(); unlabelled['labels'] = []
+        result, calls = self.invoke({'views': [unlabelled, clean()]}, '1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('no reviewed label', result.stdout + result.stderr)
         self.assertFalse(self.merges(calls))
 
     def test_allow_unreviewed_switches_only_the_label_rule_off(self):

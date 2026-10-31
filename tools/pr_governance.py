@@ -108,6 +108,9 @@ RISK_RULES = (
             "tools/test_scorecard.py",
             "tools/slt_reference.py",
             "tools/test_slt_reference.py",
+            # WAL-admission evidence (a frozen pre-change reader against new bytes) and the Loom model of the cancel registry.
+            "tools/wal-admission/**",
+            "tools/cancel-loom/**",
         ),
     ),
     ("layers", ("layers.toml",)),

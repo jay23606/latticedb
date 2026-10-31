@@ -47,6 +47,9 @@
 /tools/test_scorecard.py @moncifem
 /tools/slt_reference.py @moncifem
 /tools/test_slt_reference.py @moncifem
+# WAL-admission and Loom evidence: verification tools that decide what a green check means.
+/tools/wal-admission/ @moncifem
+/tools/cancel-loom/ @moncifem
 /tools/allow-banned.toml @moncifem
 /tools/quarantine.toml @moncifem
 /layers.toml @moncifem

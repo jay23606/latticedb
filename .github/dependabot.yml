@@ -16,6 +16,9 @@ updates:
     directory: /experiments/sql-planner
     schedule: { interval: weekly }
     cooldown: { default-days: 7 }
+    groups:
+      sql-planner-engine:
+        patterns: ["datafusion*", "sqlparser*"]
   - package-ecosystem: cargo
     directory: /experiments/sql-planner/bridge-baseline
     schedule: { interval: weekly }
@@ -39,6 +42,9 @@ updates:
     directory: /tools
     schedule: { interval: weekly }
     cooldown: { default-days: 7 }
+    groups:
+      sql-planner-pins:
+        patterns: ["psycopg*", "typing-extensions"]
   - package-ecosystem: npm
     directory: /clients/typescript
     schedule: { interval: weekly }
