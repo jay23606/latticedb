@@ -1,4 +1,31 @@
 pub mod lattice_sdk
+pub mod lattice_sdk::backoff
+pub struct lattice_sdk::backoff::Backoff
+impl lattice_sdk::backoff::Backoff
+pub fn lattice_sdk::backoff::Backoff::new(u64, u64) -> core::result::Result<Self, lattice_sdk::backoff::InvalidBackoff>
+pub fn lattice_sdk::backoff::Backoff::next_delay(&mut self, u64) -> u64
+pub fn lattice_sdk::backoff::Backoff::reset(&mut self)
+impl core::clone::Clone for lattice_sdk::backoff::Backoff
+pub fn lattice_sdk::backoff::Backoff::clone(&self) -> Self
+impl core::cmp::Eq for lattice_sdk::backoff::Backoff
+impl core::cmp::PartialEq for lattice_sdk::backoff::Backoff
+pub fn lattice_sdk::backoff::Backoff::eq(&self, &Self) -> bool
+impl core::fmt::Debug for lattice_sdk::backoff::Backoff
+pub fn lattice_sdk::backoff::Backoff::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for lattice_sdk::backoff::Backoff
+pub struct lattice_sdk::backoff::InvalidBackoff
+impl core::clone::Clone for lattice_sdk::backoff::InvalidBackoff
+pub fn lattice_sdk::backoff::InvalidBackoff::clone(&self) -> Self
+impl core::cmp::Eq for lattice_sdk::backoff::InvalidBackoff
+impl core::cmp::PartialEq for lattice_sdk::backoff::InvalidBackoff
+pub fn lattice_sdk::backoff::InvalidBackoff::eq(&self, &Self) -> bool
+impl core::error::Error for lattice_sdk::backoff::InvalidBackoff
+impl core::fmt::Debug for lattice_sdk::backoff::InvalidBackoff
+pub fn lattice_sdk::backoff::InvalidBackoff::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for lattice_sdk::backoff::InvalidBackoff
+pub fn lattice_sdk::backoff::InvalidBackoff::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for lattice_sdk::backoff::InvalidBackoff
+impl core::marker::StructuralPartialEq for lattice_sdk::backoff::InvalidBackoff
 pub mod lattice_sdk::client
 pub use lattice_sdk::client::Event
 pub use lattice_sdk::client::Frame
