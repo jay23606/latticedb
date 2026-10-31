@@ -60,8 +60,13 @@ Recovery never repairs this by itself.
    acknowledged data that the storage layer lost.
 3. Run `lattice doctor` / scrub on the result before restarting.
 
-A `lattice` command that does this safely is tracked in issue 475 (cli: log repair command for refused
-recovery).
+`lattice log repair` (crates/lattice-cli, issue 475) covers part of this procedure and none of step 2 for
+this shape. Without `--apply` it reports the damage and changes nothing; it exits 1 when the log holds
+damage it cannot fix. With `--apply` it copies the newest segment to `<segment>.repair-backup`, verifies
+the copy byte for byte, and truncates only a torn tail of the last segment: the bytes recovery itself
+discards. It refuses interior damage and the wrong-LSN frame named by the refusal above, so the
+truncation in step 2 stays a manual decision. A newest segment whose header is shorter than 16 bytes is
+rewritten when a server next opens the log; the command refuses it and says to start the server instead.
 
 ### Known ambiguity (fail safe)
 
@@ -82,8 +87,9 @@ fsynced, so these shapes only ever damage bytes that were never acknowledged. Re
 for each, pinned by the `non-prefix` simulator profile and the tests in `crash_shape_tests.rs`. The
 torn-tail and torn-creation rows follow from the rules above. The two refusals, and the operator
 procedure for the header case, document **current implementation behaviour that was chosen**, not
-something the rules above force: refusing is the fail-safe the tech lead confirmed keeping, and
-automatic repair is open (issue 475):
+something the rules above force: refusing is the fail-safe the tech lead confirmed keeping. Automatic
+repair is limited to the torn tail of the newest segment (`lattice log repair`, issue 475, see the
+operator procedure above); the other shapes below stay refused and manual:
 
 | Shape | What the newest segment holds | Recovery |
 |---|---|---|

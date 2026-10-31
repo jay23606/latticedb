@@ -6,6 +6,7 @@
 //! `lattice ledger show [--dir DIR]` lists the runs recorded in a results ledger.
 //! `lattice account init|add|list|remove|token ...` provisions the credential files `latticed` reads.
 //! `lattice lsl check FILE`, `lsl fmt FILE [--write|--check]` and `lsl compat OLD NEW` work on schemas.
+//! `lattice log repair [--dir DATA_DIR] [--wal NAME] [--apply]` reports log damage; it truncates only a torn tail.
 #![forbid(unsafe_code)]
 #![allow(
     clippy::disallowed_methods,
@@ -27,6 +28,8 @@ mod account;
 mod watch;
 
 mod mcp_proxy;
+
+mod log_repair;
 
 fn doctor<I: Io>(io: &I, wal: &str) -> (String, bool) {
     let report = match scrub(io, wal) {
@@ -388,6 +391,7 @@ fn main() -> ExitCode {
         }
         Some("watch") => watch::command(args.get(1..).unwrap_or_default()),
         Some("mcp") => mcp_proxy::command(args.get(1..).unwrap_or_default()),
+        Some("log") => log_repair::command(args.get(1..).unwrap_or_default()),
         Some("account") => account_command(args.get(1..).unwrap_or_default()),
         Some("lsl") => lsl_command(args.get(1..).unwrap_or_default()),
         _ => {
@@ -406,6 +410,7 @@ fn main() -> ExitCode {
                 "       lattice watch table/NAME --url ws://HOST:PORT --token-file FILE (--from CURSOR | --from-start)"
             );
             eprintln!("       lattice mcp --url http://127.0.0.1:PORT/mcp --token-file FILE");
+            eprintln!("       lattice log repair [--dir DATA_DIR] [--wal NAME] [--apply]");
             ExitCode::from(2)
         }
     }

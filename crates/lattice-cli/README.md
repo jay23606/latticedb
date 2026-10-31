@@ -48,3 +48,17 @@ each reply as one line on standard output; diagnostics go to standard error. The
 a loopback address with a port and the path `/mcp` (the CLI has no TLS client yet). The token is read from
 an owner-only file, or from the first line of standard input with `-`, and a token on the command line is
 refused. A message over 1 MiB is refused with a JSON-RPC error. `lattice mcp --help` lists the flags.
+
+`lattice log repair [--dir DATA_DIR] [--wal NAME] [--apply]` reports damage in the log NAME inside
+DATA_DIR (defaults `.` and `wal`). Without `--apply` it changes nothing: it prints the scan and, for a
+torn tail, the exact segment, offset and byte count that `--apply` would remove, and why recovery
+discards those bytes. With `--apply` it copies the newest segment to `<segment>.repair-backup` with an
+exclusive create, reads the copy back and requires it to match byte for byte, truncates only that torn
+tail, rescans, and opens the log with the server's recovery. An existing backup, or a link at its path,
+is never overwritten. The command holds the log's `LOCK` for the whole run, so a running writer makes
+it refuse. It never follows a symbolic link on the `--wal` path or in the log directory, and it never
+prints record payloads. Exit status: 0 for a healthy, repairable or repaired log; 1 for damage it
+cannot fix or a refused step; 2 for bad arguments. It refuses interior damage, a checksum-valid record
+with the wrong LSN (formats/wal-v1.md, issue 441), a missing segment, and a newest segment whose header
+is shorter than 16 bytes; for that last case it says to start the server, which rewrites the header.
+Not done: repairing the refusals above. `lattice log repair --help` lists the flags.
