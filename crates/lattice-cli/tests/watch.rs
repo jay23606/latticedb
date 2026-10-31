@@ -1,5 +1,6 @@
-//! `lattice watch` through the real binary. Every check here happens before a socket is opened, so
-//! the tests need no gateway.
+//! `lattice watch` through the real binary. The checks that come before a connection need no
+//! gateway. The tests that get as far as connecting point at a loopback port that nothing listens
+//! on, so the watch fails to connect, retries a bounded number of times and gives up.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -11,6 +12,11 @@
 
 use std::path::Path;
 use std::process::{Command, Output};
+
+/// A loopback port with no listener: connecting to it is refused at once.
+const NOTHING_LISTENS: &str = "ws://127.0.0.1:1";
+/// A saved cursor in the form `--cursor-file` reads: 24 lowercase hex digits and a newline.
+const CURSOR: &str = "000000000000010200000001";
 
 fn lattice(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_lattice"))
@@ -27,11 +33,12 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// A token file in a fresh directory of its own, with the given Unix mode.
-fn token_file(name: &str, contents: &str, mode: u32) -> String {
-    let dir = std::env::temp_dir().join(format!("lattice-watch-{name}-{}", std::process::id()));
+/// A file named `file` in a fresh directory of its own, with the given contents and Unix mode.
+/// Returns the path as text.
+fn private_file(dir_name: &str, file: &str, contents: &str, mode: u32) -> String {
+    let dir = std::env::temp_dir().join(format!("lattice-watch-{dir_name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("token");
+    let path = dir.join(file);
     let _ = std::fs::remove_file(&path);
     std::fs::write(&path, contents).unwrap();
     #[cfg(unix)]
@@ -44,13 +51,18 @@ fn token_file(name: &str, contents: &str, mode: u32) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// A token file in a fresh directory of its own, with the given Unix mode.
+fn token_file(name: &str, contents: &str, mode: u32) -> String {
+    private_file(name, "token", contents, mode)
+}
+
 /// Valid arguments for a watch that needs the token file at `token`.
 fn watch_with_token(token: &str) -> Output {
     lattice(&[
         "watch",
         "table/notes",
         "--url",
-        "ws://127.0.0.1:7000",
+        NOTHING_LISTENS,
         "--token-file",
         token,
         "--from-start",
@@ -68,6 +80,7 @@ fn help_lists_the_exact_flags() {
         "--token-file",
         "--from CURSOR",
         "--from-start",
+        "--cursor-file FILE",
     ] {
         assert!(usage.contains(flag), "{flag} missing from:\n{usage}");
     }
@@ -123,7 +136,7 @@ fn watch_refuses_userinfo_uppercase_scheme_and_lookalike_hosts() {
             "--from-start",
         ]);
         assert_eq!(code(&o), 2, "{url}");
-        assert!(!text(&o.stderr).contains("not in this build"), "{url}");
+        assert!(!text(&o.stderr).contains("giving up"), "{url}");
     }
 }
 
@@ -149,15 +162,16 @@ fn watch_refuses_a_token_on_the_command_line() {
 }
 
 #[test]
-fn watch_with_valid_arguments_stops_at_the_missing_transport() {
+fn watch_with_valid_arguments_gives_up_when_no_gateway_listens() {
     let token = token_file("valid", "tok\n", 0o600);
     let o = watch_with_token(&token);
     assert_eq!(code(&o), 1, "{}", text(&o.stderr));
+    let err = text(&o.stderr);
     assert!(
-        text(&o.stderr).contains("not in this build yet"),
-        "{}",
-        text(&o.stderr)
+        err.contains("giving up after 3 failed connections"),
+        "{err}"
     );
+    assert!(err.contains("cannot connect to 127.0.0.1:1"), "{err}");
 }
 
 #[test]
@@ -191,11 +205,7 @@ fn a_token_file_with_owner_only_mode_is_accepted() {
     let token = token_file("mode-0600", "tok\n", 0o600);
     let o = watch_with_token(&token);
     assert_eq!(code(&o), 1, "{}", text(&o.stderr));
-    assert!(
-        text(&o.stderr).contains("not in this build yet"),
-        "{}",
-        text(&o.stderr)
-    );
+    assert!(text(&o.stderr).contains("giving up"), "{}", text(&o.stderr));
 }
 
 #[cfg(unix)]
@@ -208,8 +218,133 @@ fn a_symlinked_token_file_is_refused() {
     let o = watch_with_token(&link.to_string_lossy());
     assert_eq!(code(&o), 1, "{}", text(&o.stderr));
     assert!(
-        !text(&o.stderr).contains("not in this build yet"),
+        !text(&o.stderr).contains("giving up"),
         "{}",
         text(&o.stderr)
     );
+}
+
+#[test]
+fn a_cursor_file_and_a_start_flag_are_refused_together() {
+    let token = token_file("cursor-both", "tok\n", 0o600);
+    let o = lattice(&[
+        "watch",
+        "table/notes",
+        "--url",
+        NOTHING_LISTENS,
+        "--token-file",
+        &token,
+        "--cursor-file",
+        "/nonexistent/cursor",
+        "--from-start",
+    ]);
+    assert_eq!(code(&o), 2, "{}", text(&o.stderr));
+    assert!(text(&o.stderr).contains("only one"), "{}", text(&o.stderr));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_cursor_file_readable_by_others_is_refused_before_any_connection() {
+    let token = token_file("cursor-mode", "tok\n", 0o600);
+    let cursor = private_file("cursor-mode", "cursor", &format!("{CURSOR}\n"), 0o644);
+    let o = lattice(&[
+        "watch",
+        "table/notes",
+        "--url",
+        NOTHING_LISTENS,
+        "--token-file",
+        &token,
+        "--cursor-file",
+        &cursor,
+    ]);
+    assert_eq!(code(&o), 1, "{}", text(&o.stderr));
+    let err = text(&o.stderr);
+    assert!(err.contains(&cursor), "{err}");
+    assert!(err.contains("0600"), "{err}");
+    assert!(!err.contains("giving up"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_corrupt_cursor_file_is_refused_without_echoing_its_contents() {
+    let token = token_file("cursor-corrupt", "tok\n", 0o600);
+    let cursor = private_file("cursor-corrupt", "cursor", "not-a-cursor\n", 0o600);
+    let o = lattice(&[
+        "watch",
+        "table/notes",
+        "--url",
+        NOTHING_LISTENS,
+        "--token-file",
+        &token,
+        "--cursor-file",
+        &cursor,
+    ]);
+    assert_eq!(code(&o), 1, "{}", text(&o.stderr));
+    let err = text(&o.stderr);
+    assert!(err.contains("does not hold a saved cursor"), "{err}");
+    assert!(err.contains(&cursor), "{err}");
+    assert!(!err.contains("not-a-cursor"), "{err}");
+    assert!(!err.contains("giving up"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_saved_cursor_is_read_and_the_watch_then_tries_to_connect() {
+    let token = token_file("cursor-valid", "tok\n", 0o600);
+    let cursor = private_file("cursor-valid", "cursor", &format!("{CURSOR}\n"), 0o600);
+    let o = lattice(&[
+        "watch",
+        "table/notes",
+        "--url",
+        NOTHING_LISTENS,
+        "--token-file",
+        &token,
+        "--cursor-file",
+        &cursor,
+    ]);
+    assert_eq!(code(&o), 1, "{}", text(&o.stderr));
+    assert!(text(&o.stderr).contains("giving up"), "{}", text(&o.stderr));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_missing_cursor_file_starts_from_the_beginning_and_is_not_an_error() {
+    let token = token_file("cursor-missing", "tok\n", 0o600);
+    let cursor = private_file("cursor-missing", "cursor", "", 0o600);
+    std::fs::remove_file(&cursor).unwrap();
+    let o = lattice(&[
+        "watch",
+        "table/notes",
+        "--url",
+        NOTHING_LISTENS,
+        "--token-file",
+        &token,
+        "--cursor-file",
+        &cursor,
+    ]);
+    assert_eq!(code(&o), 1, "{}", text(&o.stderr));
+    let err = text(&o.stderr);
+    assert!(err.contains("giving up"), "{err}");
+    assert!(!err.contains("does not hold"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_cursor_file_in_a_missing_directory_is_refused_before_any_connection() {
+    let token = token_file("cursor-no-dir", "tok\n", 0o600);
+    let o = lattice(&[
+        "watch",
+        "table/notes",
+        "--url",
+        NOTHING_LISTENS,
+        "--token-file",
+        &token,
+        "--cursor-file",
+        "/nonexistent-lattice-cursor-dir/cursor",
+    ]);
+    assert_eq!(code(&o), 1, "{}", text(&o.stderr));
+    let err = text(&o.stderr);
+    assert!(err.contains("the directory does not exist"), "{err}");
+    assert!(!err.contains("giving up"), "{err}");
+    assert!(!err.contains("cannot connect"), "{err}");
 }

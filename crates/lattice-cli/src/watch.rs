@@ -1,17 +1,31 @@
 //! `lattice watch table/NAME`: prints the live changes of one table from the sync gateway.
 //!
-//! This part holds what does not need a socket: argument parsing, the loopback-only and token
-//! rules, the event line format, and the driver that prints each event before it acknowledges it.
-//! The driver is generic over [`Connection`] and [`Output`], so the order rule is tested without a
-//! network. The socket transport is not in this part, so a valid invocation stops at its first
-//! write with a message that says so.
+//! The order for each event is fixed: its line is printed, then it is acknowledged, then the cursor
+//! is saved (with `--cursor-file`). A crash between two steps re-prints an event on the next start
+//! and never skips one. A dropped connection is retried from the last saved cursor. Connections that
+//! deliver nothing count as failures, and after a few failures in a row the watch stops with an error.
+//! A refusal that a new connection cannot fix (a bad token, a policy close) stops it at once.
+//!
+//! The driver is generic over [`Dialer`], [`Connection`], [`Output`] and [`CursorStore`], so the
+//! order rule and the resume rule are tested with scripted doubles. The socket transport at the end
+//! of this file is the only part that touches the network.
 
+mod cursor_file;
+
+use cursor_file::{CursorFileError, FileCursorStore};
+use lattice_api::sync;
+use lattice_api::websocket::{self, Opcode};
 use lattice_core::feed::{ChangeEvent, ChangeOp, Cursor};
-use lattice_sdk::client::{Action, ClientConfig, Frame, SyncClient};
+use lattice_sdk::client::{Action, ClientConfig, CloseReason, Frame, SyncClient};
+use lattice_sdk::cursor_store::{CursorStore, MemoryCursorStore};
+use lattice_sdk::mcp::FeedCursor;
+use lattice_seams::{OsRng, Rng};
+use std::fmt;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// The largest token file or standard input read, in bytes.
@@ -20,24 +34,41 @@ const MAX_TOKEN_BYTES: u64 = 4096;
 const AGENT: &str = "lattice-watch";
 /// The prefix of a table's sync scope.
 const SCOPE_PREFIX: &str = "table/";
-/// Why a valid invocation cannot connect yet.
-const NO_TRANSPORT: &str =
-    "the socket transport for `lattice watch` is not in this build yet (issue #583)";
+/// The sync endpoint of the gateway (formats/sync-protocol-v1.md). A path in `--url` is ignored.
+const SYNC_PATH: &str = "/sync";
+/// Consecutive failed connections after which the watch gives up.
+const MAX_FAILED_CONNECTIONS: u32 = 3;
+/// The first wait between two connection attempts. Each further failure doubles it.
+const RETRY_PAUSE: Duration = Duration::from_secs(1);
+/// The longest wait between two connection attempts.
+const RETRY_CAP: Duration = Duration::from_secs(8);
+/// The WebSocket close code for a policy violation: the gateway refused the connection itself.
+const POLICY_CLOSE: u16 = 1008;
+/// How long a connect or the upgrade may take.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// One logical tick of the sync client. An idle socket wakes up this often, which drives the pings.
+const TICK: Duration = Duration::from_secs(1);
 const TOKEN_ON_COMMAND_LINE: &str = "a token is not accepted on the command line; write it to a file and pass --token-file FILE (or --token-file - for standard input)";
 const CURSOR_HINT: &str =
     "--from takes a cursor of 24 lowercase hex digits, as printed at the start of each line";
 
 const USAGE: &str = "\
-usage: lattice watch table/NAME --url ws://HOST:PORT --token-file FILE (--from CURSOR | --from-start)
+usage: lattice watch table/NAME --url ws://HOST:PORT --token-file FILE (--from CURSOR | --from-start | --cursor-file FILE)
 
-  --url URL          a ws:// URL on a loopback address (127.0.0.1, localhost or [::1]); no TLS yet
-  --token-file FILE  the bearer token, read from FILE, or from standard input with -
-  --from CURSOR      resume after CURSOR: 24 lowercase hex digits, as printed at the start of a line
-  --from-start       deliver every event the table holds
-  -h, --help         print this text
+  --url URL            a ws:// URL on a loopback address (127.0.0.1, localhost or [::1]); no TLS yet
+  --token-file FILE    the bearer token, read from FILE, or from standard input with -
+  --from CURSOR        resume after CURSOR: 24 lowercase hex digits, as printed at the start of a line
+  --from-start         deliver every event the table holds
+  --cursor-file FILE   resume after the cursor saved in FILE, and save the cursor after each
+                       acknowledged event; FILE must be owner-only (mode 0600) in a directory that
+                       exists and that group and others cannot write to; a second watch on the same
+                       FILE is refused; a missing FILE starts from the beginning of the table
+  -h, --help           print this text
 
 Each event prints one line: CURSOR AUTHOR TABLE KEY OPERATION
-The token is never accepted on the command line.
+The token is never accepted on the command line. A dropped connection is retried from the last
+saved cursor, with a wait that doubles from one second. Three connections in a row that deliver
+nothing stop the watch, and a refused token or a policy close stops it at once.
 ";
 
 /// Where the bearer token comes from.
@@ -49,14 +80,25 @@ enum TokenSource {
     Stdin,
 }
 
+/// Where the watch starts.
+#[derive(Debug, PartialEq, Eq)]
+enum Start {
+    /// `--from-start`: every event the table holds.
+    Origin,
+    /// `--from CURSOR`: the events after this cursor.
+    Cursor(Vec<u8>),
+    /// `--cursor-file FILE`: after the cursor saved in FILE, which is saved again as events are
+    /// acknowledged.
+    File(String),
+}
+
 /// A checked `watch` invocation.
 #[derive(Debug, PartialEq, Eq)]
 struct Options {
     table: String,
     url: String,
     token: TokenSource,
-    /// Empty to deliver every event the table holds, otherwise the cursor to resume after.
-    from: Vec<u8>,
+    start: Start,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -65,17 +107,50 @@ enum Parsed {
     Run(Options),
 }
 
-/// The byte stream of one watch: frames out and frames in. `None` from `recv` means the peer closed
-/// the stream.
-trait Connection {
-    fn send(&mut self, frame: &Frame) -> Result<(), String>;
-    fn recv(&mut self) -> Result<Option<Frame>, String>;
+/// What one read from a connection produced.
+#[derive(Debug, PartialEq, Eq)]
+enum Received {
+    /// A decoded sync message.
+    Frame(Frame),
+    /// Nothing arrived within one tick.
+    Idle,
+    /// The peer closed the connection, with the close code when it sent one.
+    Closed(Option<u16>),
 }
 
-/// Where event lines go. A line is flushed before `line` returns, so an acknowledgement written
-/// afterwards can never be ahead of the text it covers.
+/// One connection: frames out and frames in.
+trait Connection {
+    fn send(&mut self, frame: &Frame) -> Result<(), String>;
+    fn recv(&mut self) -> Result<Received, String>;
+}
+
+/// Opens a connection to the gateway. Each call is one attempt; a refusal that a new attempt cannot
+/// change comes back as [`Stop::Fatal`].
+trait Dialer {
+    type Conn: Connection;
+    fn dial(&mut self) -> Result<Self::Conn, Stop>;
+}
+
+/// Where event lines go and where notes for the operator go. A line is flushed before `line`
+/// returns, so an acknowledgement written afterwards can never be ahead of the text it covers.
 trait Output {
     fn line(&mut self, text: &str) -> Result<(), String>;
+    fn note(&mut self, text: &str);
+}
+
+/// Why a connection or the whole watch ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Stop {
+    /// The operator asked the watch to stop. Not an error.
+    Interrupted,
+    /// The connection failed or ended. A new connection may succeed.
+    Dropped(String),
+    /// Nothing a new connection would change: a refusal, a protocol error or a local failure.
+    Fatal(String),
+}
+
+fn fatal<E: fmt::Display>(error: E) -> Stop {
+    Stop::Fatal(error.to_string())
 }
 
 fn set_once<T>(slot: &mut Option<T>, flag: &str, new: T) -> Result<(), String> {
@@ -151,22 +226,29 @@ fn split_host_port(authority: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// Whether `host` names a loopback address. `localhost` is accepted by name here. A future socket
-/// transport must connect to the loopback address this check accepted (127.0.0.1 or ::1), and must
-/// not resolve the name again: a second lookup could return a remote address.
-fn is_loopback(host: &str) -> bool {
+/// The loopback address a host names: `localhost` is 127.0.0.1, and a literal must be a loopback
+/// address. The name is never resolved again, because a second lookup could return a remote address.
+fn loopback_ip(host: &str) -> Option<IpAddr> {
     if host == "localhost" {
-        return true;
+        return Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
     if let Some(v6) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
-        return v6.parse::<Ipv6Addr>().is_ok_and(|a| a.is_loopback());
+        return v6
+            .parse::<Ipv6Addr>()
+            .ok()
+            .filter(Ipv6Addr::is_loopback)
+            .map(IpAddr::V6);
     }
-    host.parse::<Ipv4Addr>().is_ok_and(|a| a.is_loopback())
+    host.parse::<Ipv4Addr>()
+        .ok()
+        .filter(Ipv4Addr::is_loopback)
+        .map(IpAddr::V4)
 }
 
 /// Only a `ws://` URL on a loopback address with an explicit port. There is no TLS on the client
-/// yet, so a remote gateway is refused rather than reached in clear text.
-fn check_url(url: &str) -> Result<(), String> {
+/// yet, so a remote gateway is refused rather than reached in clear text. Returns the address to
+/// connect to.
+fn check_url(url: &str) -> Result<SocketAddr, String> {
     if url.starts_with("wss://") {
         return Err("wss:// (TLS) is not supported yet; use ws:// on a loopback address".into());
     }
@@ -186,12 +268,12 @@ fn check_url(url: &str) -> Result<(), String> {
     if port == 0 {
         return Err("the port must not be 0".into());
     }
-    if !is_loopback(host) {
-        return Err(format!(
+    let ip = loopback_ip(host).ok_or_else(|| {
+        format!(
             "refusing `{host}`: watch connects only to a loopback address (127.0.0.1, localhost or [::1]) because it has no TLS yet"
-        ));
-    }
-    Ok(())
+        )
+    })?;
+    Ok(SocketAddr::new(ip, port))
 }
 
 /// Reads the whole argument list. Pure: nothing is opened or read here.
@@ -201,6 +283,7 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
     let mut token = None;
     let mut from = None;
     let mut from_start = false;
+    let mut cursor_file = None;
     let mut help = false;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -223,6 +306,11 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
                 }
                 from_start = true;
             }
+            "--cursor-file" => set_once(
+                &mut cursor_file,
+                "--cursor-file",
+                value(&mut rest, "--cursor-file")?.to_owned(),
+            )?,
             "--token" => return Err(TOKEN_ON_COMMAND_LINE.into()),
             other if other.starts_with("--token=") => return Err(TOKEN_ON_COMMAND_LINE.into()),
             other if other.starts_with('-') => return Err(format!("unknown option {other}")),
@@ -241,11 +329,14 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
     let url = url.ok_or("missing --url ws://HOST:PORT")?;
     check_url(&url)?;
     let token = token.ok_or("missing --token-file FILE")?;
-    let from = match (from, from_start) {
-        (Some(cursor), false) => cursor,
-        (None, true) => Vec::new(),
-        (None, false) => return Err("give --from CURSOR or --from-start".into()),
-        (Some(_), true) => return Err("--from and --from-start cannot both be given".into()),
+    let start = match (from, from_start, cursor_file) {
+        (Some(cursor), false, None) => Start::Cursor(cursor),
+        (None, true, None) => Start::Origin,
+        (None, false, Some(path)) => Start::File(path),
+        (None, false, None) => {
+            return Err("give one of --from CURSOR, --from-start or --cursor-file FILE".into());
+        }
+        _ => return Err("give only one of --from, --from-start and --cursor-file".into()),
     };
     let token = if token == "-" {
         TokenSource::Stdin
@@ -256,7 +347,7 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
         table,
         url,
         token,
-        from,
+        start,
     }))
 }
 
@@ -336,78 +427,193 @@ fn decode_delivery(cursor: &[u8], data: &[u8]) -> Result<ChangeEvent, String> {
 }
 
 /// One sync client over one connection. Every action runs before the next one starts, so an
-/// acknowledgement is only written after its event's line has been printed.
-struct Pump<'a, C: Connection, O: Output> {
-    client: &'a mut SyncClient,
+/// acknowledgement is only written after its event's line has been printed, and a cursor is only
+/// saved after its acknowledgement has been written.
+struct Pump<'a, C, O, S> {
+    client: SyncClient,
     table: &'a str,
-    from: &'a [u8],
+    /// The cursor the next subscription starts after. Moves forward only after a save.
+    resume: &'a mut Vec<u8>,
     conn: &'a mut C,
     out: &'a mut O,
+    store: &'a mut S,
+    /// Set once an event of this connection has been printed, acknowledged and saved.
+    delivered: bool,
 }
 
-impl<C: Connection, O: Output> Pump<'_, C, O> {
-    fn perform(&mut self, actions: Vec<Action>) -> Result<(), String> {
+impl<C: Connection, O: Output, S: CursorStore> Pump<'_, C, O, S>
+where
+    S::Error: fmt::Display,
+{
+    fn perform(&mut self, actions: Vec<Action>) -> Result<(), Stop> {
         for action in actions {
             match action {
-                Action::Send(frame) => self.conn.send(&frame)?,
+                Action::Send(frame) => self.conn.send(&frame).map_err(Stop::Dropped)?,
                 Action::Ready { .. } => {
                     let scope = format!("{SCOPE_PREFIX}{}", self.table);
                     let (_, subscribe) = self
                         .client
-                        .subscribe(&scope, self.from)
-                        .map_err(|e| e.to_string())?;
+                        .subscribe(&scope, self.resume.as_slice())
+                        .map_err(fatal)?;
                     self.perform(subscribe)?;
                 }
                 Action::Deliver { sub, cursor, data } => {
-                    let event = decode_delivery(&cursor, &data)?;
-                    self.out.line(&format_event(self.table, &event))?;
-                    let acks = self.client.ack(sub, &cursor).map_err(|e| e.to_string())?;
+                    let event = decode_delivery(&cursor, &data).map_err(Stop::Fatal)?;
+                    self.out
+                        .line(&format_event(self.table, &event))
+                        .map_err(Stop::Fatal)?;
+                    let acks = self.client.ack(sub, &cursor).map_err(fatal)?;
                     self.perform(acks)?;
+                    self.save(&cursor)?;
+                    self.delivered = true;
                 }
                 Action::SubscriptionFailed { code, message, .. } => {
-                    return Err(format!(
+                    return Err(Stop::Fatal(format!(
                         "the server refused the subscription ({code:?}): {message:?}"
-                    ));
+                    )));
                 }
                 Action::Close(reason) => {
-                    return Err(format!("the connection closed: {reason:?}"));
+                    let timed_out = matches!(
+                        reason,
+                        CloseReason::PingTimeout | CloseReason::HandshakeTimeout
+                    );
+                    let text = format!("the connection closed: {reason:?}");
+                    return Err(if timed_out {
+                        Stop::Dropped(text)
+                    } else {
+                        Stop::Fatal(text)
+                    });
                 }
             }
         }
         Ok(())
     }
-}
 
-/// Runs one watch over `conn`. It returns only with an error: a watch ends when it is interrupted
-/// or when the connection fails. The reconnect loop is not in this part.
-fn run<C: Connection, O: Output>(
-    table: &str,
-    from: &[u8],
-    conn: &mut C,
-    out: &mut O,
-) -> Result<(), String> {
-    let mut client = SyncClient::new(ClientConfig::new(AGENT)).map_err(|e| e.to_string())?;
-    let mut pump = Pump {
-        client: &mut client,
-        table,
-        from,
-        conn,
-        out,
-    };
-    let mut now: u64 = 0;
-    let hello = pump.client.connect(now).map_err(|e| e.to_string())?;
-    pump.perform(hello)?;
-    loop {
-        let Some(frame) = pump.conn.recv()? else {
-            return Err("the server closed the connection".into());
+    /// Saves the cursor of an acknowledged event. A failed save stops the watch: continuing would
+    /// let a later cursor be saved past an event that was never recorded.
+    fn save(&mut self, cursor: &[u8]) -> Result<(), Stop> {
+        let saved: FeedCursor = cursor
+            .try_into()
+            .map_err(|_| Stop::Fatal("an event cursor is not 12 bytes".into()))?;
+        self.store
+            .save(&saved)
+            .map_err(|e| Stop::Fatal(format!("cannot save the cursor: {e}")))?;
+        *self.resume = cursor.to_vec();
+        Ok(())
+    }
+
+    /// Runs the connection until it stops. `interrupted` is asked before each read.
+    fn run(&mut self, interrupted: &mut dyn FnMut() -> bool) -> Stop {
+        let hello = match self.client.connect(0) {
+            Ok(actions) => actions,
+            Err(e) => return fatal(e),
         };
-        now = now.saturating_add(1);
-        let actions = pump.client.handle(frame, now).map_err(|e| e.to_string())?;
-        pump.perform(actions)?;
+        if let Err(stop) = self.perform(hello) {
+            return stop;
+        }
+        let mut now: u64 = 0;
+        loop {
+            if interrupted() {
+                return Stop::Interrupted;
+            }
+            let received = match self.conn.recv() {
+                Ok(received) => received,
+                Err(e) => return Stop::Dropped(e),
+            };
+            now = now.saturating_add(1);
+            let actions = match received {
+                Received::Frame(frame) => match self.client.handle(frame, now) {
+                    Ok(actions) => actions,
+                    Err(e) => return fatal(e),
+                },
+                Received::Idle => self.client.tick(now),
+                Received::Closed(Some(POLICY_CLOSE)) => {
+                    return Stop::Fatal(
+                        "the gateway closed the connection with code 1008 (policy); a new connection would be refused the same way".into(),
+                    );
+                }
+                Received::Closed(_) => {
+                    return Stop::Dropped("the server closed the connection".into());
+                }
+            };
+            if let Err(stop) = self.perform(actions) {
+                return stop;
+            }
+        }
     }
 }
 
-/// Event lines on standard output, flushed one by one.
+/// The wait before the next connection after `failed` failures in a row: the first wait is
+/// `RETRY_PAUSE`, each further failure doubles it, and the wait never exceeds `RETRY_CAP`.
+fn retry_delay(failed: u32) -> Duration {
+    let doublings = failed.saturating_sub(1);
+    let factor = 1u32.checked_shl(doublings).unwrap_or(u32::MAX);
+    RETRY_PAUSE.saturating_mul(factor).min(RETRY_CAP)
+}
+
+/// Runs the watch until it is interrupted or gives up. A dropped connection is retried from the last
+/// saved cursor, after a wait that doubles with each failure. A connection that delivers no event
+/// counts as a failure; one that delivers an event starts the count again. Fatal refusals stop the
+/// watch at once.
+fn watch<D, O, S>(
+    table: &str,
+    start: Vec<u8>,
+    dialer: &mut D,
+    out: &mut O,
+    store: &mut S,
+    interrupted: &mut dyn FnMut() -> bool,
+    pause: &mut dyn FnMut(Duration),
+) -> Result<(), String>
+where
+    D: Dialer,
+    O: Output,
+    S: CursorStore,
+    S::Error: fmt::Display,
+{
+    let mut resume = start;
+    let mut failed: u32 = 0;
+    loop {
+        if interrupted() {
+            return Ok(());
+        }
+        let (stop, delivered) = match dialer.dial() {
+            Ok(mut conn) => {
+                let mut pump = Pump {
+                    client: SyncClient::new(ClientConfig::new(AGENT)).map_err(|e| e.to_string())?,
+                    table,
+                    resume: &mut resume,
+                    conn: &mut conn,
+                    out: &mut *out,
+                    store: &mut *store,
+                    delivered: false,
+                };
+                let stop = pump.run(interrupted);
+                (stop, pump.delivered)
+            }
+            Err(stop) => (stop, false),
+        };
+        match stop {
+            Stop::Interrupted => return Ok(()),
+            Stop::Fatal(e) => return Err(e),
+            Stop::Dropped(e) => {
+                if delivered {
+                    failed = 0;
+                }
+                failed = failed.saturating_add(1);
+                if failed >= MAX_FAILED_CONNECTIONS {
+                    return Err(format!(
+                        "giving up after {failed} failed connections in a row: {e}"
+                    ));
+                }
+                let delay = retry_delay(failed);
+                out.note(&format!("connection lost ({e}); retrying in {delay:?}"));
+                pause(delay);
+            }
+        }
+    }
+}
+
+/// Event lines on standard output, flushed one by one. Notes go to standard error.
 struct Printer;
 
 impl Output for Printer {
@@ -416,39 +622,265 @@ impl Output for Printer {
         writeln!(stdout, "{text}").map_err(|e| e.to_string())?;
         stdout.flush().map_err(|e| e.to_string())
     }
-}
 
-/// The connection this part can offer: none. Its first write fails with the reason.
-struct Unconnected {
-    url: String,
-}
-
-impl Connection for Unconnected {
-    fn send(&mut self, _frame: &Frame) -> Result<(), String> {
-        Err(self.refusal())
-    }
-
-    fn recv(&mut self) -> Result<Option<Frame>, String> {
-        Err(self.refusal())
+    fn note(&mut self, text: &str) {
+        eprintln!("lattice watch: {text}");
     }
 }
 
-impl Unconnected {
-    fn refusal(&self) -> String {
-        format!("cannot open {}: {NO_TRANSPORT}", self.url)
+/// What a refused upgrade means. A 401 or 403 is the gateway refusing the token, which a new
+/// connection will not change, so it stops the watch. Any other status is retried. The status is the
+/// gateway's own text, so it is shown quoted, with control characters escaped.
+fn refused_upgrade(status: &str) -> Stop {
+    match status {
+        "401" | "403" => Stop::Fatal(format!(
+            "the gateway refused the token (status {status:?}); fix the token file and start again"
+        )),
+        other => Stop::Dropped(format!(
+            "the gateway refused the upgrade with status {other:?}"
+        )),
+    }
+}
+
+/// Opens a loopback socket to the gateway and performs the WebSocket upgrade on `/sync`.
+struct TcpDialer {
+    address: SocketAddr,
+    token: Zeroizing<String>,
+}
+
+impl Dialer for TcpDialer {
+    type Conn = Socket;
+
+    fn dial(&mut self) -> Result<Socket, Stop> {
+        let mut stream = TcpStream::connect_timeout(&self.address, CONNECT_TIMEOUT)
+            .map_err(|e| Stop::Dropped(format!("cannot connect to {}: {e}", self.address)))?;
+        stream
+            .set_read_timeout(Some(CONNECT_TIMEOUT))
+            .map_err(|e| Stop::Dropped(format!("cannot set the handshake timeout: {e}")))?;
+        let mut rng = OsRng;
+        let mut nonce = Vec::with_capacity(16);
+        nonce.extend_from_slice(&rng.next_u64().to_be_bytes());
+        nonce.extend_from_slice(&rng.next_u64().to_be_bytes());
+        let key = base64(&nonce);
+        let request = format!(
+            "GET {SYNC_PATH} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Protocol: lattice.sync.v1\r\nAuthorization: Bearer {}\r\n\r\n",
+            self.address,
+            self.token.as_str(),
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|e| Stop::Dropped(format!("cannot send the upgrade request: {e}")))?;
+        let head = read_head(&mut stream).map_err(Stop::Dropped)?;
+        let status = head.split_whitespace().nth(1).unwrap_or("none");
+        if status != "101" {
+            return Err(refused_upgrade(status));
+        }
+        let expected = websocket::accept_key(&key);
+        if header_value(&head, "sec-websocket-accept") != Some(expected.as_str()) {
+            return Err(Stop::Dropped(
+                "the gateway's Sec-WebSocket-Accept does not match the request".into(),
+            ));
+        }
+        stream
+            .set_read_timeout(Some(TICK))
+            .map_err(|e| Stop::Dropped(format!("cannot set the read timeout: {e}")))?;
+        Ok(Socket {
+            stream,
+            buf: Vec::new(),
+            rng,
+        })
+    }
+}
+
+/// Reads the response head one byte at a time, so no frame bytes that follow it are consumed.
+fn read_head(stream: &mut TcpStream) -> Result<String, String> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() >= websocket::DEFAULT_MAX_HEAD {
+            return Err("the gateway's response head is too large".into());
+        }
+        stream
+            .read_exact(&mut byte)
+            .map_err(|e| format!("the gateway closed the connection during the upgrade: {e}"))?;
+        head.extend_from_slice(&byte);
+    }
+    String::from_utf8(head).map_err(|_| "the gateway's response head is not text".into())
+}
+
+/// The value of a header in a response head, matched without regard to case.
+fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().skip(1).find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+/// Standard base64 with padding (RFC 4648), for the `Sec-WebSocket-Key` nonce.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk.first().copied().unwrap_or(0);
+        let b1 = chunk.get(1).copied();
+        let b2 = chunk.get(2).copied();
+        let n =
+            (u32::from(b0) << 16) | (u32::from(b1.unwrap_or(0)) << 8) | u32::from(b2.unwrap_or(0));
+        let symbol = |shift: u32| -> char {
+            let index = ((n >> shift) & 63) as usize;
+            ALPHABET.get(index).map_or('=', |&c| char::from(c))
+        };
+        out.push(symbol(18));
+        out.push(symbol(12));
+        out.push(if b1.is_some() { symbol(6) } else { '=' });
+        out.push(if b2.is_some() { symbol(0) } else { '=' });
+    }
+    out
+}
+
+/// One WebSocket connection to the gateway. Client frames are masked with a fresh random key.
+struct Socket {
+    stream: TcpStream,
+    buf: Vec<u8>,
+    rng: OsRng,
+}
+
+impl Socket {
+    fn write(&mut self, opcode: Opcode, payload: &[u8]) -> Result<(), String> {
+        let mut out = Vec::new();
+        let [a, b, c, d, ..] = self.rng.next_u64().to_be_bytes();
+        websocket::encode_client_frame(true, opcode, payload, [a, b, c, d], &mut out)
+            .map_err(|e| format!("{e:?}"))?;
+        self.stream
+            .write_all(&out)
+            .map_err(|e| format!("cannot write to the gateway: {e}"))
+    }
+}
+
+impl Connection for Socket {
+    fn send(&mut self, frame: &Frame) -> Result<(), String> {
+        let mut bytes = Vec::new();
+        sync::encode(frame, &mut bytes).map_err(|e| format!("{e:?}"))?;
+        self.write(Opcode::Binary, &bytes)
+    }
+
+    fn recv(&mut self) -> Result<Received, String> {
+        loop {
+            let decoded =
+                websocket::decode_server_frame(&self.buf, websocket::DEFAULT_MAX_FRAME_PAYLOAD)
+                    .map_err(|e| e.to_string())?;
+            if let Some((frame, used)) = decoded {
+                self.buf.drain(..used);
+                match frame.opcode {
+                    Opcode::Binary if frame.fin => {
+                        let (message, n) = sync::decode(&frame.payload)
+                            .map_err(|e| format!("{e:?}"))?
+                            .ok_or("an incomplete sync message")?;
+                        if n != frame.payload.len() {
+                            return Err("bytes after a sync message".into());
+                        }
+                        return Ok(Received::Frame(message));
+                    }
+                    Opcode::Ping => self.write(Opcode::Pong, &frame.payload)?,
+                    Opcode::Pong => {}
+                    Opcode::Close => {
+                        let code = frame
+                            .payload
+                            .get(..2)
+                            .and_then(|c| <[u8; 2]>::try_from(c).ok())
+                            .map(u16::from_be_bytes);
+                        return Ok(Received::Closed(code));
+                    }
+                    _ => return Err("the gateway sent a frame this client does not accept".into()),
+                }
+                continue;
+            }
+            let mut chunk = [0u8; 4096];
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return Ok(Received::Closed(None)),
+                Ok(n) => self
+                    .buf
+                    .extend_from_slice(chunk.get(..n).unwrap_or_default()),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    return Ok(Received::Idle);
+                }
+                Err(e) => return Err(format!("cannot read from the gateway: {e}")),
+            }
+        }
     }
 }
 
 fn start(opts: Options) -> Result<(), String> {
-    let stdin = std::io::stdin();
-    let mut lock = stdin.lock();
-    // Read and checked now, so a later transport takes the token without a second read.
-    let _token = read_token(&opts.token, &mut lock)?;
-    let mut conn = Unconnected { url: opts.url };
-    run(&opts.table, &opts.from, &mut conn, &mut Printer)
+    let address = check_url(&opts.url)?;
+    let token = {
+        let stdin = std::io::stdin();
+        let mut lock = stdin.lock();
+        read_token(&opts.token, &mut lock)?
+    };
+    latticed::stop::install_stop_signal_handlers()
+        .map_err(|e| format!("cannot install the stop signal handlers: {e}"))?;
+    let mut dialer = TcpDialer { address, token };
+    let mut out = Printer;
+    let mut interrupted = || latticed::stop::stop_signals_received() > 0;
+    let mut pause = |delay: Duration| std::thread::sleep(delay);
+    let table = opts.table.as_str();
+    match opts.start {
+        Start::Origin => watch(
+            table,
+            Vec::new(),
+            &mut dialer,
+            &mut out,
+            &mut MemoryCursorStore::new(),
+            &mut interrupted,
+            &mut pause,
+        ),
+        Start::Cursor(from) => watch(
+            table,
+            from,
+            &mut dialer,
+            &mut out,
+            &mut MemoryCursorStore::new(),
+            &mut interrupted,
+            &mut pause,
+        ),
+        Start::File(path) => {
+            let mut store = FileCursorStore::open(Path::new(&path)).map_err(|e| e.to_string())?;
+            // Held until the watch returns: a second watch on this file is refused now, before it
+            // could print or save anything.
+            let _lock = store.lock().map_err(|e| e.to_string())?;
+            let from = match store.load() {
+                Ok(saved) => saved.map(|cursor| cursor.to_vec()).unwrap_or_default(),
+                Err(CursorFileError::Malformed(_)) => {
+                    return Err(format!(
+                        "{path}: it does not hold a saved cursor (24 lowercase hex digits and an optional newline); move it aside to start again"
+                    ));
+                }
+                Err(e) => return Err(e.to_string()),
+            };
+            watch(
+                table,
+                from,
+                &mut dialer,
+                &mut out,
+                &mut store,
+                &mut interrupted,
+                &mut pause,
+            )
+        }
+    }
 }
 
-/// `lattice watch ...`: exit 0 for help, 2 for a bad invocation, 1 when the watch cannot run.
+/// `lattice watch ...`: exit 0 for help and for a stop that was asked for, 2 for a bad invocation,
+/// 1 when the watch cannot run or gives up.
 pub(crate) fn command(args: &[String]) -> ExitCode {
     match parse(args) {
         Ok(Parsed::Help) => {
@@ -480,6 +912,7 @@ pub(crate) fn command(args: &[String]) -> ExitCode {
 mod tests {
     use super::*;
     use lattice_sdk::client::{Event, SUPPORTED_MAX_VERSION, SUPPORTED_MIN_VERSION};
+    use lattice_sdk::cursor_store::MalformedCursor;
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -494,11 +927,17 @@ mod tests {
             .collect()
     }
 
-    /// The upsert of key "k" to "vv" at index `index` of a change set of three events, LSN 258.
-    /// The bytes are the worked example of `formats/change-feed-v1.md`, with the index changed.
+    /// A stored cursor of 12 bytes from its 24 hex digits.
+    fn cursor_of(text: &str) -> FeedCursor {
+        hex_bytes(text).try_into().unwrap()
+    }
+
+    /// The upsert of key "k" to "vv" at index `index` of a change set of four events, LSN 258. The
+    /// index must be below the set size, so the set size is four to cover indices 1 to 3. The bytes
+    /// are the worked example of `formats/change-feed-v1.md`, with the index and the set size changed.
     fn upsert_event(index: &str) -> String {
         format!(
-            "01 0000000000000102 {index} 03000000 {} 0500000000000000 06000000 07000000 {} 00 02000000 0100 6b 01 02000000 7676",
+            "01 0000000000000102 {index} 04000000 {} 0500000000000000 06000000 07000000 {} 00 02000000 0100 6b 01 02000000 7676",
             "a0".repeat(16),
             "00000000000000000000000000000009"
         )
@@ -509,25 +948,78 @@ mod tests {
 
     const CURSOR_1: &str = "000000000000010200000001";
     const CURSOR_2: &str = "000000000000010200000002";
+    const CURSOR_3: &str = "000000000000010200000003";
     const LINE_1: &str =
         "000000000000010200000001 00000000000000000000000000000009 notes \"k\" upsert";
     const LINE_2: &str =
         "000000000000010200000002 00000000000000000000000000000009 notes \"k\" upsert";
+    const LINE_3: &str =
+        "000000000000010200000003 00000000000000000000000000000009 notes \"k\" upsert";
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    fn event_frame(sub: u32, events: Vec<(&str, &str)>) -> Received {
+        Received::Frame(Frame::Events {
+            sub,
+            events: events
+                .into_iter()
+                .map(|(cursor, index)| Event {
+                    cursor: hex_bytes(cursor),
+                    data: hex_bytes(&upsert_event(index)),
+                })
+                .collect(),
+        })
+    }
+
+    fn hello() -> Frame {
+        Frame::Hello {
+            min_version: SUPPORTED_MIN_VERSION,
+            max_version: SUPPORTED_MAX_VERSION,
+            agent: AGENT.into(),
+        }
+    }
+
+    fn welcome() -> Received {
+        Received::Frame(Frame::Welcome {
+            version: SUPPORTED_MAX_VERSION,
+            max_payload: 1 << 20,
+            server: "test".into(),
+        })
+    }
+
+    fn subscribe(cursor: &str) -> Frame {
+        Frame::Subscribe {
+            sub: 1,
+            scope: "table/notes".into(),
+            cursor: if cursor.is_empty() {
+                Vec::new()
+            } else {
+                hex_bytes(cursor)
+            },
+        }
+    }
+
+    fn ack(cursor: &str) -> Frame {
+        Frame::Ack {
+            sub: 1,
+            cursor: hex_bytes(cursor),
+        }
     }
 
     #[derive(Debug, PartialEq)]
     enum Step {
         Sent(Frame),
         Printed(String),
+        Saved(FeedCursor),
     }
 
     type Log = Rc<RefCell<Vec<Step>>>;
 
+    /// One scripted connection: what it reads, and where its writes are logged.
     struct Script {
-        incoming: VecDeque<Frame>,
+        incoming: VecDeque<Received>,
         log: Log,
     }
 
@@ -537,8 +1029,28 @@ mod tests {
             Ok(())
         }
 
-        fn recv(&mut self) -> Result<Option<Frame>, String> {
-            Ok(self.incoming.pop_front())
+        fn recv(&mut self) -> Result<Received, String> {
+            Ok(self.incoming.pop_front().unwrap_or(Received::Closed(None)))
+        }
+    }
+
+    /// Hands out the scripted connections in order. When none is left, a dial fails.
+    struct Dialing {
+        connections: VecDeque<Vec<Received>>,
+        log: Log,
+    }
+
+    impl Dialer for Dialing {
+        type Conn = Script;
+
+        fn dial(&mut self) -> Result<Script, Stop> {
+            let Some(incoming) = self.connections.pop_front() else {
+                return Err(Stop::Dropped("no more scripted connections".into()));
+            };
+            Ok(Script {
+                incoming: incoming.into(),
+                log: Rc::clone(&self.log),
+            })
         }
     }
 
@@ -551,128 +1063,457 @@ mod tests {
             self.log.borrow_mut().push(Step::Printed(text.to_owned()));
             Ok(())
         }
+
+        fn note(&mut self, _text: &str) {}
     }
 
-    fn hello() -> Frame {
-        Frame::Hello {
-            min_version: SUPPORTED_MIN_VERSION,
-            max_version: SUPPORTED_MAX_VERSION,
-            agent: AGENT.into(),
+    #[derive(Debug)]
+    struct Refused;
+
+    impl From<MalformedCursor> for Refused {
+        fn from(_: MalformedCursor) -> Self {
+            Refused
         }
     }
 
-    fn welcome() -> Frame {
-        Frame::Welcome {
-            version: SUPPORTED_MAX_VERSION,
-            max_payload: 1 << 20,
-            server: "test".into(),
+    impl fmt::Display for Refused {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("the disk is full")
         }
     }
 
-    /// Runs one watch over the frames in `incoming`. Returns every step in order and the error
-    /// that ended the run.
-    fn watch_over(incoming: Vec<Frame>, from: &[u8]) -> (Vec<Step>, String) {
+    /// A store that logs each save, or refuses every save.
+    struct Saves {
+        log: Log,
+        refuse: bool,
+    }
+
+    impl CursorStore for Saves {
+        type Error = Refused;
+
+        fn load(&self) -> Result<Option<FeedCursor>, Refused> {
+            Ok(None)
+        }
+
+        fn save(&mut self, cursor: &FeedCursor) -> Result<(), Refused> {
+            if self.refuse {
+                return Err(Refused);
+            }
+            self.log.borrow_mut().push(Step::Saved(*cursor));
+            Ok(())
+        }
+    }
+
+    /// Runs one watch over scripted connections and returns every step in order with the result.
+    fn watch_over(
+        connections: Vec<Vec<Received>>,
+        start: &[u8],
+        refuse_saves: bool,
+    ) -> (Vec<Step>, Result<(), String>) {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
-        let mut conn = Script {
-            incoming: incoming.into(),
+        let mut dialer = Dialing {
+            connections: connections.into(),
             log: Rc::clone(&log),
         };
         let mut out = Recorder {
             log: Rc::clone(&log),
         };
-        let err = run("notes", from, &mut conn, &mut out).unwrap_err();
+        let mut store = Saves {
+            log: Rc::clone(&log),
+            refuse: refuse_saves,
+        };
+        let result = watch(
+            "notes",
+            start.to_vec(),
+            &mut dialer,
+            &mut out,
+            &mut store,
+            &mut || false,
+            &mut |_: Duration| {},
+        );
         let steps = std::mem::take(&mut *log.borrow_mut());
-        (steps, err)
+        (steps, result)
     }
 
     #[test]
-    fn watch_never_acks_before_the_line_is_printed() {
-        let c1 = hex_bytes(CURSOR_1);
-        let c2 = hex_bytes(CURSOR_2);
+    fn each_event_is_printed_then_acknowledged_then_saved() {
         let incoming = vec![
             welcome(),
-            Frame::Events {
-                sub: 1,
-                events: vec![Event {
-                    cursor: c1.clone(),
-                    data: hex_bytes(&upsert_event("00000001")),
-                }],
-            },
-            Frame::Events {
-                sub: 1,
-                events: vec![Event {
-                    cursor: c2.clone(),
-                    data: hex_bytes(&upsert_event("00000002")),
-                }],
-            },
+            event_frame(1, vec![(CURSOR_1, "00000001")]),
+            event_frame(1, vec![(CURSOR_2, "00000002")]),
         ];
-        let (steps, err) = watch_over(incoming, &[]);
-        assert!(err.contains("closed"), "{err}");
-        // An acknowledgement sent before its line would appear before the Printed step it covers
-        // and fail this exact sequence.
+        let (steps, result) = watch_over(vec![incoming], &[], false);
+        let err = result.unwrap_err();
+        assert!(err.contains("giving up"), "{err}");
+        // An acknowledgement sent before its line, or a save before its acknowledgement, would
+        // change this exact order.
         assert_eq!(
             steps,
             vec![
                 Step::Sent(hello()),
-                Step::Sent(Frame::Subscribe {
-                    sub: 1,
-                    scope: "table/notes".into(),
-                    cursor: Vec::new(),
-                }),
+                Step::Sent(subscribe("")),
                 Step::Printed(LINE_1.into()),
-                Step::Sent(Frame::Ack { sub: 1, cursor: c1 }),
+                Step::Sent(ack(CURSOR_1)),
+                Step::Saved(cursor_of(CURSOR_1)),
                 Step::Printed(LINE_2.into()),
-                Step::Sent(Frame::Ack { sub: 1, cursor: c2 }),
+                Step::Sent(ack(CURSOR_2)),
+                Step::Saved(cursor_of(CURSOR_2)),
             ]
+        );
+    }
+
+    #[test]
+    fn a_failed_save_stops_the_watch_after_the_acknowledgement_and_before_the_next_event() {
+        let incoming = vec![
+            welcome(),
+            event_frame(1, vec![(CURSOR_1, "00000001"), (CURSOR_2, "00000002")]),
+        ];
+        let (steps, result) = watch_over(vec![incoming], &[], true);
+        let err = result.unwrap_err();
+        assert!(err.contains("cannot save the cursor"), "{err}");
+        assert_eq!(
+            steps,
+            vec![
+                Step::Sent(hello()),
+                Step::Sent(subscribe("")),
+                Step::Printed(LINE_1.into()),
+                Step::Sent(ack(CURSOR_1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_restart_resumes_after_the_saved_cursor_with_no_duplicate_and_no_gap() {
+        // The first connection delivers events 1 and 2, then drops. The second one resumes after
+        // event 2 and replays it: the replay is dropped, so event 3 is the only new line.
+        let first = vec![
+            welcome(),
+            event_frame(1, vec![(CURSOR_1, "00000001"), (CURSOR_2, "00000002")]),
+        ];
+        let second = vec![
+            welcome(),
+            event_frame(1, vec![(CURSOR_2, "00000002"), (CURSOR_3, "00000003")]),
+        ];
+        let (steps, result) = watch_over(vec![first, second], &[], false);
+        let err = result.unwrap_err();
+        assert!(err.contains("giving up"), "{err}");
+        assert_eq!(
+            steps,
+            vec![
+                Step::Sent(hello()),
+                Step::Sent(subscribe("")),
+                Step::Printed(LINE_1.into()),
+                Step::Sent(ack(CURSOR_1)),
+                Step::Saved(cursor_of(CURSOR_1)),
+                Step::Printed(LINE_2.into()),
+                Step::Sent(ack(CURSOR_2)),
+                Step::Saved(cursor_of(CURSOR_2)),
+                Step::Sent(hello()),
+                Step::Sent(subscribe(CURSOR_2)),
+                Step::Printed(LINE_3.into()),
+                Step::Sent(ack(CURSOR_3)),
+                Step::Saved(cursor_of(CURSOR_3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_process_starts_from_the_cursor_it_was_given() {
+        let (steps, result) = watch_over(
+            vec![vec![
+                welcome(),
+                event_frame(1, vec![(CURSOR_2, "00000002"), (CURSOR_3, "00000003")]),
+            ]],
+            &hex_bytes(CURSOR_2),
+            false,
+        );
+        let err = result.unwrap_err();
+        assert!(err.contains("giving up"), "{err}");
+        assert_eq!(
+            steps,
+            vec![
+                Step::Sent(hello()),
+                Step::Sent(subscribe(CURSOR_2)),
+                Step::Printed(LINE_3.into()),
+                Step::Sent(ack(CURSOR_3)),
+                Step::Saved(cursor_of(CURSOR_3)),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_interrupted_watch_stops_without_connecting_and_is_not_an_error() {
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let mut dialer = Dialing {
+            connections: vec![vec![welcome()]].into(),
+            log: Rc::clone(&log),
+        };
+        let mut out = Recorder {
+            log: Rc::clone(&log),
+        };
+        let mut store = Saves {
+            log: Rc::clone(&log),
+            refuse: false,
+        };
+        let result = watch(
+            "notes",
+            Vec::new(),
+            &mut dialer,
+            &mut out,
+            &mut store,
+            &mut || true,
+            &mut |_: Duration| {},
+        );
+        assert_eq!(result, Ok(()));
+        assert!(log.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_idle_socket_sends_a_ping_once_the_client_has_waited_long_enough() {
+        let mut incoming = vec![welcome()];
+        incoming.extend(std::iter::repeat_with(|| Received::Idle).take(40));
+        let (steps, result) = watch_over(vec![incoming], &[], false);
+        let err = result.unwrap_err();
+        assert!(err.contains("giving up"), "{err}");
+        assert!(
+            steps
+                .iter()
+                .any(|s| matches!(s, Step::Sent(Frame::Ping { .. }))),
+            "{steps:?}"
         );
     }
 
     #[test]
     fn a_delivery_whose_cursor_differs_from_its_event_is_refused_before_anything_is_printed() {
-        let incoming = vec![
-            welcome(),
-            Frame::Events {
-                sub: 1,
-                events: vec![Event {
-                    cursor: hex_bytes(CURSOR_2),
-                    data: hex_bytes(&upsert_event("00000001")),
-                }],
-            },
-        ];
-        let (steps, err) = watch_over(incoming, &[]);
-        assert!(err.contains("does not carry the cursor"), "{err}");
-        assert_eq!(
-            steps,
-            vec![
-                Step::Sent(hello()),
-                Step::Sent(Frame::Subscribe {
-                    sub: 1,
-                    scope: "table/notes".into(),
-                    cursor: Vec::new(),
-                }),
-            ]
-        );
+        let incoming = vec![welcome(), event_frame(1, vec![(CURSOR_2, "00000001")])];
+        let (steps, result) = watch_over(vec![incoming], &[], false);
+        assert!(result.unwrap_err().contains("does not carry the cursor"));
+        assert_eq!(steps, vec![Step::Sent(hello()), Step::Sent(subscribe(""))]);
     }
 
     #[test]
     fn an_undecodable_event_ends_the_watch_without_a_line_or_an_ack() {
         let incoming = vec![
             welcome(),
-            Frame::Events {
+            Received::Frame(Frame::Events {
                 sub: 1,
                 events: vec![Event {
                     cursor: hex_bytes(CURSOR_1),
                     data: vec![9, 9, 9],
                 }],
-            },
+            }),
         ];
-        let (steps, err) = watch_over(incoming, &[]);
-        assert!(err.contains("undecodable event"), "{err}");
+        let (steps, result) = watch_over(vec![incoming], &[], false);
+        assert!(result.unwrap_err().contains("undecodable event"));
+        assert!(steps.iter().all(|s| !matches!(
+            s,
+            Step::Printed(_) | Step::Sent(Frame::Ack { .. }) | Step::Saved(_)
+        )));
+    }
+
+    #[test]
+    fn a_connection_that_is_never_dialed_gives_up_after_bounded_tries() {
+        // Nothing is scripted: every dial fails, so the watch stops after the bounded tries.
+        let (steps, result) = watch_over(Vec::new(), &[], false);
+        let err = result.unwrap_err();
         assert!(
-            steps
-                .iter()
-                .all(|s| !matches!(s, Step::Printed(_) | Step::Sent(Frame::Ack { .. })))
+            err.contains("giving up after 3 failed connections"),
+            "{err}"
         );
+        assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn a_connect_then_drop_without_an_event_is_bounded_and_waits_longer_each_time() {
+        let cycle = || vec![welcome(), Received::Closed(None)];
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let mut dialer = Dialing {
+            connections: vec![cycle(), cycle(), cycle(), cycle()].into(),
+            log: Rc::clone(&log),
+        };
+        let mut out = Recorder {
+            log: Rc::clone(&log),
+        };
+        let mut store = Saves {
+            log: Rc::clone(&log),
+            refuse: false,
+        };
+        let mut pauses: Vec<Duration> = Vec::new();
+        let result = {
+            let mut pause = |delay: Duration| pauses.push(delay);
+            watch(
+                "notes",
+                Vec::new(),
+                &mut dialer,
+                &mut out,
+                &mut store,
+                &mut || false,
+                &mut pause,
+            )
+        };
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("giving up after 3 failed connections"),
+            "{err}"
+        );
+        // Three connections were made, each handshaken and subscribed, and none delivered.
+        assert_eq!(pauses, vec![RETRY_PAUSE, RETRY_PAUSE * 2]);
+        let steps = std::mem::take(&mut *log.borrow_mut());
+        let handshake = || vec![Step::Sent(hello()), Step::Sent(subscribe(""))];
+        let mut expected = handshake();
+        expected.extend(handshake());
+        expected.extend(handshake());
+        assert_eq!(steps, expected);
+    }
+
+    #[test]
+    fn a_policy_close_is_fatal_and_no_further_connection_is_made() {
+        let refused = vec![welcome(), Received::Closed(Some(POLICY_CLOSE))];
+        let (steps, result) = watch_over(vec![refused, vec![welcome()]], &[], false);
+        let err = result.unwrap_err();
+        assert!(err.contains("1008"), "{err}");
+        assert!(!err.contains("giving up"), "{err}");
+        assert_eq!(steps, vec![Step::Sent(hello()), Step::Sent(subscribe(""))]);
+    }
+
+    #[test]
+    fn a_refused_token_is_fatal_and_other_statuses_are_retried_with_the_status_escaped() {
+        assert!(matches!(refused_upgrade("401"), Stop::Fatal(_)));
+        assert!(matches!(refused_upgrade("403"), Stop::Fatal(_)));
+        assert!(matches!(refused_upgrade("503"), Stop::Dropped(_)));
+        match refused_upgrade("50\x1b\n") {
+            Stop::Dropped(text) => {
+                assert!(!text.contains('\x1b'), "{text:?}");
+                assert!(text.contains("\\n"), "{text:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_retry_wait_doubles_from_one_second_and_stops_at_the_cap() {
+        assert_eq!(retry_delay(1), Duration::from_secs(1));
+        assert_eq!(retry_delay(2), Duration::from_secs(2));
+        assert_eq!(retry_delay(3), Duration::from_secs(4));
+        assert_eq!(retry_delay(9), RETRY_CAP);
+        assert_eq!(retry_delay(u32::MAX), RETRY_CAP);
+    }
+
+    /// A real file store that fails after `allowed` saves. To the watch this is a crash between an
+    /// acknowledgement and its save.
+    struct CrashAfter {
+        inner: FileCursorStore,
+        allowed: u32,
+    }
+
+    impl CursorStore for CrashAfter {
+        type Error = CursorFileError;
+
+        fn load(&self) -> Result<Option<FeedCursor>, CursorFileError> {
+            self.inner.load()
+        }
+
+        fn save(&mut self, cursor: &FeedCursor) -> Result<(), CursorFileError> {
+            if self.allowed == 0 {
+                return Err(CursorFileError::Io(
+                    "simulated crash before the save".into(),
+                ));
+            }
+            self.allowed -= 1;
+            self.inner.save(cursor)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_crash_between_an_ack_and_its_save_reprints_on_restart_and_never_skips() {
+        let dir = std::env::temp_dir().join(format!("lattice-watch-crash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cursor");
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+
+        // First run: event 1 is printed, acknowledged and saved; the save of event 2 never happens.
+        let mut dialer = Dialing {
+            connections: vec![vec![
+                welcome(),
+                event_frame(1, vec![(CURSOR_1, "00000001"), (CURSOR_2, "00000002")]),
+            ]]
+            .into(),
+            log: Rc::clone(&log),
+        };
+        let mut out = Recorder {
+            log: Rc::clone(&log),
+        };
+        let mut store = CrashAfter {
+            inner: FileCursorStore::open(&path).unwrap(),
+            allowed: 1,
+        };
+        let first = watch(
+            "notes",
+            Vec::new(),
+            &mut dialer,
+            &mut out,
+            &mut store,
+            &mut || false,
+            &mut |_: Duration| {},
+        );
+        assert!(first.unwrap_err().contains("simulated crash"));
+
+        // Restart: the file holds event 1, so the watch resumes after it and the server replays
+        // event 2 before event 3.
+        let saved = FileCursorStore::open(&path).unwrap().load().unwrap();
+        assert_eq!(saved, Some(cursor_of(CURSOR_1)));
+        let mut dialer = Dialing {
+            connections: vec![vec![
+                welcome(),
+                event_frame(1, vec![(CURSOR_2, "00000002"), (CURSOR_3, "00000003")]),
+            ]]
+            .into(),
+            log: Rc::clone(&log),
+        };
+        let mut out = Recorder {
+            log: Rc::clone(&log),
+        };
+        let mut store = CrashAfter {
+            inner: FileCursorStore::open(&path).unwrap(),
+            allowed: u32::MAX,
+        };
+        let resume = saved.map(|c| c.to_vec()).unwrap_or_default();
+        let second = watch(
+            "notes",
+            resume,
+            &mut dialer,
+            &mut out,
+            &mut store,
+            &mut || false,
+            &mut |_: Duration| {},
+        );
+        let err = second.unwrap_err();
+        assert!(err.contains("giving up"), "{err}");
+
+        let printed: Vec<String> = log
+            .borrow()
+            .iter()
+            .filter_map(|step| match step {
+                Step::Printed(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            printed,
+            vec![
+                LINE_1.to_owned(),
+                LINE_2.to_owned(),
+                LINE_2.to_owned(),
+                LINE_3.to_owned(),
+            ]
+        );
+        assert_eq!(
+            FileCursorStore::open(&path).unwrap().load().unwrap(),
+            Some(cursor_of(CURSOR_3))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -749,6 +1590,18 @@ mod tests {
     }
 
     #[test]
+    fn localhost_connects_to_the_ipv4_loopback_address_it_was_checked_as() {
+        assert_eq!(
+            check_url("ws://localhost:7000").unwrap(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7000)
+        );
+        assert_eq!(
+            check_url("ws://[::1]:7000").unwrap(),
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 7000)
+        );
+    }
+
+    #[test]
     fn the_token_is_one_trimmed_line_of_printable_ascii() {
         let token = |bytes: &[u8]| {
             let mut input = bytes;
@@ -769,6 +1622,26 @@ mod tests {
     }
 
     #[test]
+    fn base64_is_the_standard_alphabet_with_padding() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"ab"), "YWI=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foob"), "Zm9vYg==");
+        // The RFC 6455 sample nonce: a 16-byte key, 24 characters.
+        assert_eq!(base64(b"the sample nonce"), "dGhlIHNhbXBsZSBub25jZQ==");
+        assert_eq!(base64(&[0u8; 16]).len(), 24);
+    }
+
+    #[test]
+    fn the_accept_key_is_the_rfc_6455_sample() {
+        assert_eq!(
+            websocket::accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
+    }
+
+    #[test]
     fn a_valid_invocation_reads_its_arguments_and_names_the_stdin_token() {
         let parsed = parse(&args(&[
             "table/notes",
@@ -785,7 +1658,7 @@ mod tests {
                 table: "notes".into(),
                 url: "ws://127.0.0.1:7000".into(),
                 token: TokenSource::Stdin,
-                from: Vec::new(),
+                start: Start::Origin,
             })
         );
         let parsed = parse(&args(&[
@@ -804,7 +1677,26 @@ mod tests {
                 table: "notes".into(),
                 url: "ws://localhost:7000".into(),
                 token: TokenSource::File("/tmp/token".into()),
-                from: hex_bytes(CURSOR_1),
+                start: Start::Cursor(hex_bytes(CURSOR_1)),
+            })
+        );
+        let parsed = parse(&args(&[
+            "table/notes",
+            "--token-file",
+            "/tmp/token",
+            "--cursor-file",
+            "/tmp/cursor",
+            "--url",
+            "ws://127.0.0.1:7000",
+        ]))
+        .unwrap();
+        assert_eq!(
+            parsed,
+            Parsed::Run(Options {
+                table: "notes".into(),
+                url: "ws://127.0.0.1:7000".into(),
+                token: TokenSource::File("/tmp/token".into()),
+                start: Start::File("/tmp/cursor".into()),
             })
         );
     }
@@ -826,7 +1718,7 @@ mod tests {
     }
 
     #[test]
-    fn the_start_position_is_exactly_one_of_from_and_from_start() {
+    fn the_start_position_is_exactly_one_of_from_from_start_and_cursor_file() {
         let base = [
             "table/notes",
             "--url",
@@ -836,10 +1728,18 @@ mod tests {
         ];
         let neither = parse(&args(&base)).unwrap_err();
         assert!(neither.contains("--from-start"), "{neither}");
-        let mut both = base.to_vec();
-        both.extend(["--from-start", "--from", CURSOR_1]);
-        let err = parse(&args(&both)).unwrap_err();
-        assert!(err.contains("cannot both"), "{err}");
+        assert!(neither.contains("--cursor-file"), "{neither}");
+        let mut two = base.to_vec();
+        two.extend(["--from-start", "--from", CURSOR_1]);
+        let err = parse(&args(&two)).unwrap_err();
+        assert!(err.contains("only one"), "{err}");
+        let mut file_and_start = base.to_vec();
+        file_and_start.extend(["--cursor-file", "/tmp/c", "--from-start"]);
+        assert!(
+            parse(&args(&file_and_start))
+                .unwrap_err()
+                .contains("only one")
+        );
     }
 
     #[test]
