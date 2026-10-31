@@ -546,7 +546,7 @@ impl core::marker::StructuralPartialEq for lattice_sdk::mcp::Request
 pub struct lattice_sdk::mcp::RpcError
 pub lattice_sdk::mcp::RpcError::code: i64
 pub lattice_sdk::mcp::RpcError::data: core::option::Option<alloc::string::String>
-pub lattice_sdk::mcp::RpcError::message: &'static str
+pub lattice_sdk::mcp::RpcError::message: alloc::borrow::Cow<'static, str>
 impl core::clone::Clone for lattice_sdk::mcp::RpcError
 pub fn lattice_sdk::mcp::RpcError::clone(&self) -> Self
 impl core::cmp::Eq for lattice_sdk::mcp::RpcError
@@ -594,6 +594,7 @@ pub const lattice_sdk::mcp::OUTPUT_OMITTED: &str
 pub const lattice_sdk::mcp::PROTOCOL_VERSION: &str
 pub trait lattice_sdk::mcp::ToolBackend
 pub fn lattice_sdk::mcp::ToolBackend::call(&mut self, &lattice_sdk::mcp::Caller, &lattice_sdk::mcp::ToolCall) -> core::result::Result<lattice_sdk::mcp::ToolOutput, lattice_sdk::mcp::BackendError>
+pub fn lattice_sdk::mcp::ToolBackend::served_scope(&self) -> core::option::Option<&str>
 pub fn lattice_sdk::mcp::cursor_from_hex(&str) -> core::option::Option<lattice_sdk::mcp::FeedCursor>
 pub fn lattice_sdk::mcp::cursor_to_hex(&lattice_sdk::mcp::FeedCursor) -> alloc::string::String
 pub fn lattice_sdk::mcp::decode(&[u8]) -> core::result::Result<lattice_sdk::mcp::Incoming, lattice_sdk::mcp::Failure>

@@ -33,6 +33,7 @@
 //! [`crate::contract`] (which has no negative numbers, no fractions and a depth of six): JSON-RPC
 //! needs the general grammar, bounded.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 /// The protocol revision this module targets.
@@ -466,8 +467,9 @@ impl Id {
 pub struct RpcError {
     /// Numeric code, see [`code`].
     pub code: i64,
-    /// Fixed text. Never contains caller-supplied or stored data.
-    pub message: &'static str,
+    /// Fixed text, or for a scope refusal the text naming the served scope. Never contains
+    /// caller-supplied data or anything from the store.
+    pub message: Cow<'static, str>,
     /// Raw JSON for the `data` member, built only from static names.
     pub data: Option<String>,
 }
@@ -476,7 +478,7 @@ impl RpcError {
     fn new(code: i64, message: &'static str) -> Self {
         Self {
             code,
-            message,
+            message: Cow::Borrowed(message),
             data: None,
         }
     }
@@ -487,8 +489,25 @@ impl RpcError {
         data.push('}');
         Self {
             code: code::INVALID_PARAMS,
-            message,
+            message: Cow::Borrowed(message),
             data: Some(data),
+        }
+    }
+
+    /// A scope refusal. It names the one scope the backend serves, so the model can correct its
+    /// `scope` argument. With no served scope it is the plain fixed text. Nothing else is named:
+    /// not the grants, and not the scope the caller asked for.
+    fn scope_denied(served: Option<&str>) -> Self {
+        let message = match served {
+            Some(served) => Cow::Owned(format!(
+                "scope denied; this server serves scope \"{served}\""
+            )),
+            None => Cow::Borrowed("scope denied"),
+        };
+        Self {
+            code: code::SCOPE_DENIED,
+            message,
+            data: None,
         }
     }
 }
@@ -603,7 +622,7 @@ pub fn encode_error(id: Option<&Id>, e: &RpcError) -> String {
         None => out.push_str("null"),
     }
     let _ = write!(out, ",\"error\":{{\"code\":{},\"message\":", e.code);
-    put_str(&mut out, e.message);
+    put_str(&mut out, &e.message);
     if let Some(d) = &e.data {
         out.push_str(",\"data\":");
         out.push_str(d);
@@ -663,7 +682,7 @@ const SCOPE: Prop = Prop {
         fmt: Fmt::Scope,
     },
     required: true,
-    desc: "Scope path such as workspace/project; must be covered by one of your grants.",
+    desc: "The served workspace scope, normally `default`. Another scope is refused with 40302 that names it; a sub-scope of it is the tool error not_found.",
 };
 const TABLE: Prop = Prop {
     name: "table",
@@ -728,7 +747,7 @@ const AFTER: Prop = Prop {
         fmt: Fmt::Cursor,
     },
     required: false,
-    desc: "Resume after this cursor: 24 lowercase hex digits from the last result's next_cursor; omit to start from the origin.",
+    desc: "Optional. The next_cursor of a previous reply: 24 lowercase hex digits. Omit it to start from the origin.",
 };
 const WAIT_MS: Prop = Prop {
     name: "wait_ms",
@@ -764,7 +783,9 @@ impl Tool {
         match self {
             Tool::Read => "Read one row or a page of rows from a table in a scope you may read.",
             Tool::Write => "Write one row to a table in a scope you may write.",
-            Tool::Subscribe => "Subscribe to changes of a table in a scope you may read.",
+            Tool::Subscribe => {
+                "Subscribe to changes of a table in a scope you may read. The optional after is the next_cursor of a previous reply (24 lowercase hex digits); omit it to start from the origin."
+            }
         }
     }
 
@@ -1189,6 +1210,13 @@ pub trait ToolBackend {
     /// # Errors
     /// A [`BackendError`].
     fn call(&mut self, caller: &Caller, call: &ToolCall) -> Result<ToolOutput, BackendError>;
+
+    /// The one scope this backend serves, when it serves one. A refused scope is answered with
+    /// a message that names it (`scope denied; this server serves scope "default"`). `None`, the
+    /// default, keeps the plain `scope denied`.
+    fn served_scope(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Which era a connection speaks. The only per-connection state of the server.
@@ -1386,13 +1414,13 @@ impl<B: ToolBackend> Server<B> {
                 return Err(RpcError::new(code::TOOL_NOT_GRANTED, "tool not granted"));
             }
             Err(Denial::ScopeDenied) => {
-                return Err(RpcError::new(code::SCOPE_DENIED, "scope denied"));
+                return Err(RpcError::scope_denied(self.backend.served_scope()));
             }
         }
         let (text, is_error) = match self.backend.call(caller, &call) {
             Ok(o) => (o.text, o.is_error),
             Err(BackendError::PolicyDenied) => {
-                return Err(RpcError::new(code::SCOPE_DENIED, "scope denied"));
+                return Err(RpcError::scope_denied(self.backend.served_scope()));
             }
             Err(BackendError::Unavailable) => {
                 return Err(RpcError::new(
@@ -1443,7 +1471,7 @@ fn check_meta(mode: Mode, params: Option<&Json>) -> Result<(), RpcError> {
         (Some(other), _) => {
             return Err(RpcError {
                 code: code::UNSUPPORTED_PROTOCOL_VERSION,
-                message: "unsupported protocol version",
+                message: Cow::Borrowed("unsupported protocol version"),
                 data: Some(supported_versions_data(
                     mode,
                     match other {
@@ -1473,9 +1501,14 @@ mod tests {
         reply: Option<Result<ToolOutput, BackendError>>,
         applied: u32,
         oversize: bool,
+        served: Option<String>,
     }
 
     impl ToolBackend for Mock {
+        fn served_scope(&self) -> Option<&str> {
+            self.served.as_deref()
+        }
+
         fn call(&mut self, caller: &Caller, call: &ToolCall) -> Result<ToolOutput, BackendError> {
             self.calls.push((caller.id.clone(), call.clone()));
             if matches!(call, ToolCall::Write { .. }) {
@@ -1592,10 +1625,10 @@ mod tests {
         let (out, _) = run(&c, r#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#);
         let expected = concat!(
             r#"{"jsonrpc":"2.0","id":4,"result":{"resultType":"complete","tools":[{"name":"lattice_subscribe","#,
-            r#""description":"Subscribe to changes of a table in a scope you may read.","inputSchema":{"type":"object","#,
-            r#""properties":{"scope":{"type":"string","minLength":1,"maxLength":128,"description":"Scope path such as workspace/project; must be covered by one of your grants."},"#,
+            r#""description":"Subscribe to changes of a table in a scope you may read. The optional after is the next_cursor of a previous reply (24 lowercase hex digits); omit it to start from the origin.","inputSchema":{"type":"object","#,
+            r#""properties":{"scope":{"type":"string","minLength":1,"maxLength":128,"description":"The served workspace scope, normally `default`. Another scope is refused with 40302 that names it; a sub-scope of it is the tool error not_found."},"#,
             r#""table":{"type":"string","minLength":1,"maxLength":64,"description":"Table name: ASCII letters, digits and underscore."},"#,
-            r#""after":{"type":"string","minLength":24,"maxLength":24,"description":"Resume after this cursor: 24 lowercase hex digits from the last result's next_cursor; omit to start from the origin."},"#,
+            r#""after":{"type":"string","minLength":24,"maxLength":24,"description":"Optional. The next_cursor of a previous reply: 24 lowercase hex digits. Omit it to start from the origin."},"#,
             r#""wait_ms":{"type":"integer","minimum":0,"maximum":30000,"description":"Longest time in milliseconds to wait for a new event when there is none (default 0: answer now)."}},"#,
             r#""required":["scope","table"],"additionalProperties":false}}]}}"#
         );
@@ -2102,6 +2135,44 @@ mod tests {
         assert_eq!(
             out,
             r#"{"jsonrpc":"2.0","id":7,"error":{"code":40302,"message":"scope denied"}}"#
+        );
+    }
+
+    #[test]
+    fn scope_denial_names_the_served_scope_and_nothing_else() {
+        // The server serves `default`; the caller holds a grant on it and asks for another scope.
+        let c = caller(&[(Tool::Read, "default")]);
+        let mut s = legacy(Mock {
+            served: Some("default".to_owned()),
+            ..Mock::default()
+        });
+        let msg = call_msg(
+            "lattice_read",
+            r#"{"scope":"secret/vault","table":"payroll"}"#,
+        );
+        let out = s.handle(&c, msg.as_bytes()).expect("response");
+        assert_eq!(
+            out,
+            r##"{"jsonrpc":"2.0","id":7,"error":{"code":40302,"message":"scope denied; this server serves scope \"default\""}}"##
+        );
+        assert!(!out.contains("secret") && !out.contains("vault"), "{out}");
+        assert!(s.backend().calls.is_empty(), "backend reached on denial");
+    }
+
+    #[test]
+    fn backend_policy_refusal_names_the_served_scope() {
+        let mut s = legacy(Mock {
+            served: Some("default".to_owned()),
+            reply: Some(Err(BackendError::PolicyDenied)),
+            ..Mock::default()
+        });
+        let msg = call_msg("lattice_read", r#"{"scope":"default","table":"t"}"#);
+        let out = s.handle(&all("default"), msg.as_bytes()).expect("response");
+        assert!(
+            out.contains(
+                r##""code":40302,"message":"scope denied; this server serves scope \"default\"""##
+            ),
+            "{out}"
         );
     }
 

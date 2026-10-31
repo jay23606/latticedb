@@ -64,16 +64,18 @@ revisions is `-32022` on every request.
 
 ## Tools
 
-All inputs are objects with `additionalProperties: false`.
+All inputs are objects with `additionalProperties: false`. The descriptions in `tools/list` say which `scope` to
+send (the served workspace) and what `after` is (the `next_cursor` of a previous reply, omitted for the origin).
 
 | Tool | Required | Optional |
 |---|---|---|
 | `lattice_read` | `scope`, `table` | `key` (omit for a page), `limit` 1..1000 |
 | `lattice_write` | `scope`, `table`, `key`, `value` (up to 64 KiB) | `expected_version` |
-| `lattice_subscribe` | `scope`, `table` | `after` (feed cursor: 24 lowercase hex digits, the origin when omitted), `wait_ms` 0..30000 (default 0) |
+| `lattice_subscribe` | `scope`, `table` | `after` (optional: the `next_cursor` of a previous reply, 24 lowercase hex digits; omitted, it starts from the origin), `wait_ms` 0..30000 (default 0) |
 
 `scope` is a path of `/`-separated segments of `[A-Za-z0-9_-]` (no `.`, no empty segment, at most 128
-characters); `table` is `[A-Za-z0-9_]` up to 64 characters. `minLength` and `maxLength` count
+characters). On the HTTP endpoint it must be the served workspace, normally `default`; its schema description
+says so. `table` is `[A-Za-z0-9_]` up to 64 characters. `minLength` and `maxLength` count
 characters, as JSON Schema does (the 256 KiB message bound limits the bytes). `key` may contain no
 control characters; `value` may contain none except tab, line feed and carriage return. Integer
 arguments follow JSON Schema 2020-12: `10`, `10.0` and `1e1` are all the integer 10; `1.5` is a
@@ -101,8 +103,15 @@ covers `a/b` and `a/b/c`, not `a/bc`; `*` covers every scope). Order of checks i
 4. a grant covers the target scope, else `40302 scope denied`;
 5. only then the backend is called.
 
-Refusal messages are fixed strings. They never contain caller-supplied names or values or anything
-from the store. A backend `PolicyDenied` is also `40302`, `Unavailable` is `50001`, and a version
+A scope refusal names the one scope the server serves, so the model can correct its `scope` argument:
+`{"code":40302,"message":"scope denied; this server serves scope \"default\""}`. The served scope is the
+backend's `ToolBackend::served_scope`; a backend that serves none keeps the plain `scope denied`. Nothing else
+is named: not the grants, not the scope asked for. A backend `PolicyDenied` gets the same message. A sub-scope of the
+served workspace (`default/x`) is covered by the grant, so it reaches the backend and answers the tool error
+`not_found`, not `40302`.
+
+Refusal messages are fixed strings, apart from that served scope name. They never contain caller-supplied
+names or values or anything from the store. `Unavailable` is `50001`, and a version
 `Conflict` is a tool execution error (`isError: true`), which the specification reserves for failures
 the model can correct. Application codes sit outside `-32768..-32000`, as the specification advises.
 
@@ -125,8 +134,10 @@ backend lives in `latticed`, and `lattice-api` gained `PrincipalSql` (SQL for on
   (subscribing is reading), `lattice_write` when it holds the write bit on at least one; `allow-all` gets
   all three, `deny-all` nothing. Which tables is the executor's decision on every statement (interim table
   grants, issue #522): a table the principal holds no bit on is invisible.
-- **Scope.** The `scope` argument must be the workspace the backend serves; `table` must be `[a-z0-9_]`
-  up to 64 characters. `sync_scope` maps the pair to the sync scope `table/<name>` and refuses what it
+- **Scope.** The `scope` argument must be the workspace the backend serves (`default` by default). A scope
+  outside the workspace's grants is `40302 scope denied; this server serves scope "<workspace>"`, refused before
+  the backend runs. A sub-scope of the workspace (`<workspace>/x`) passes the grant check and answers `not_found`,
+  because the sync scope is the workspace itself. `table` must be `[a-z0-9_]` up to 64 characters. `sync_scope` maps the pair to the sync scope `table/<name>` and refuses what it
   cannot express (another scope, or a name the catalog cannot hold), one pair per scope.
 - **Rows.** A table is addressable when it has `key text PRIMARY KEY`, `value text` and
   `version bigint NOT NULL` (other columns are returned by `lattice_read`). The version is 1 on
@@ -147,7 +158,9 @@ backend lives in `latticed`, and `lattice-api` gained `PrincipalSql` (SQL for on
 - **Errors.** Tool errors have fixed text: `{"error":"not_found"}` (no such table, a table the
   principal may not see, an inexpressible table name or sub-scope, or no such row: one answer for all),
   `permission_denied` (the table is visible but not writable), `table_shape` (not a key/value table)
-  and `rejected` (the table refused the value). A stopped executor or an exceeded statement ceiling is
+  and `rejected` (the table refused the value).
+  `table_shape` carries the shape a table needs, as a fixed `hint` member:
+  `{"error":"table_shape","hint":"a key/value table is needed: key text PRIMARY KEY, value text, version bigint NOT NULL"}`. A stopped executor or an exceeded statement ceiling is
   `50001`. No error holds caller-supplied or stored text.
 
 ## Subscribe
@@ -159,8 +172,9 @@ principal, so it sees exactly the events a PostgreSQL reader of the same account
 
 - **Cursor.** The 12-byte feed cursor (commit LSN as a big-endian `u64`, then the index in its change set
   as a big-endian `u32`), written as 24 lowercase hex digits. Only that spelling is accepted; upper case
-  or another length is `-32602`. Omitting `after` starts from the origin (24 zeros). Events come back
-  strictly after the cursor, in cursor order.
+  or another length is `-32602`. `after` is optional: pass the `next_cursor` of the previous reply to
+  continue; omitting it starts from the origin (24 zeros). Events come back strictly after the cursor, in
+  cursor order.
 - **Wait.** `wait_ms` is at most 30 000 and defaults to 0, which answers at once. When no readable event
   exists, the call waits on the host's commit notifier for at most `wait_ms`, then answers with no events
   at the cursor it was given. Every wake re-reads the feed; a wake that finds nothing this principal can
@@ -284,7 +298,9 @@ backend: `McpBackend` refuses a call whose `Caller` is not the one derived from 
 `40302`), so that defect alone does not widen access; the witness is what detects it.
 
 The tool `scope` must be the gateway's MCP workspace, `default` (the default of `GatewayConfig::mcp_workspace`;
-the CLI does not set it yet). The `Accept` header is not checked: every answer is JSON.
+the CLI does not set it yet). A scope outside the workspace is `40302 scope denied; this server serves scope "default"`,
+so a client that sent the wrong one learns which to send, and nothing about its grants. A sub-scope such as
+`default/x` is the tool error `not_found`. The `Accept` header is not checked: every answer is JSON.
 
 Not here: stdio, Streamable HTTP streams (SSE, GET, sessions and resumption), TLS, and the per-principal limit
 on long polls (issue #529). A `lattice_subscribe` call with `wait_ms` holds its connection thread for up to
@@ -324,6 +340,11 @@ write order, the wait bound and wake-up, shutdown cancelling a waiting call, two
 commits that do not move the cursor, a delete, the event and byte bounds with resumption, a cursor ahead of
 the head answered as caught up (identically for two principals, with and without hidden commits, and equal
 to the reply at the head apart from the echoed cursor), and refusal of a malformed cursor.
+
+The refusal texts are pinned by tests: a scope refusal names the served scope and nothing else, with and
+without a backend that serves one (`scope_denial_names_the_served_scope_and_nothing_else` and
+`backend_policy_refusal_names_the_served_scope` in `lattice-sdk`). In `latticed`, `a_scope_the_server_does_not_serve_names_the_served_scope`
+also checks that a sub-scope answers `not_found`, and `reads_return_one_row_a_page_in_key_order_or_not_found` checks the `table_shape` hint.
 
 Unit and property tests live beside the code (`cargo test -p lattice-sdk mcp`): byte vectors per
 message, a schema table, a grant table, a `_meta` table, a dual-era connection test, a mock backend that

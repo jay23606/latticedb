@@ -63,8 +63,12 @@
 //! (no such table, a table the principal may not see, or no such row), `permission_denied` (the table
 //! is visible but not writable), `table_shape` (the table is not a key/value table) and `rejected`
 //! (the table refused the value). A version mismatch is [`BackendError::Conflict`]. Everything else
-//! (a stopped executor, a statement ceiling) is [`BackendError::Unavailable`]. No error text holds
-//! caller-supplied or stored text.
+//! (a stopped executor, a statement ceiling) is [`BackendError::Unavailable`]. `table_shape` also
+//! carries a `hint` member with the shape a table needs. No error text holds caller-supplied or
+//! stored text. A scope outside the workspace's grants is refused by the SDK before the backend runs,
+//! with a `40302` message that names the served workspace ([`ToolBackend::served_scope`]). A sub-scope
+//! of the workspace (`<workspace>/x`) passes that check, because the grant covers it, and the backend
+//! answers `not_found`.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -339,12 +343,23 @@ fn tool_error(code: &str) -> ToolOutput {
     ToolOutput::tool_error(format!("{{\"error\":\"{code}\"}}"))
 }
 
+/// What a `table_shape` answer tells the model the table must look like. Fixed text, with no quote
+/// or backslash, so it goes into the JSON as it is.
+const SHAPE_HINT: &str =
+    "a key/value table is needed: key text PRIMARY KEY, value text, version bigint NOT NULL";
+
+fn shape_error() -> ToolOutput {
+    ToolOutput::tool_error(format!(
+        "{{\"error\":\"table_shape\",\"hint\":\"{SHAPE_HINT}\"}}"
+    ))
+}
+
 fn finish(result: Result<ToolOutput, Failure>) -> Result<ToolOutput, BackendError> {
     match result {
         Ok(o) => Ok(o),
         Err(Failure::NotFound) => Ok(tool_error("not_found")),
         Err(Failure::Denied) => Ok(tool_error("permission_denied")),
-        Err(Failure::Shape) => Ok(tool_error("table_shape")),
+        Err(Failure::Shape) => Ok(shape_error()),
         Err(Failure::Rejected) => Ok(tool_error("rejected")),
         Err(Failure::TooOld) => Ok(tool_error("cursor_too_old")),
         Err(Failure::BadCursor) => Ok(tool_error("invalid_cursor")),
@@ -552,6 +567,10 @@ fn read_output(out: &QueryOutput) -> Option<ToolOutput> {
 }
 
 impl ToolBackend for McpBackend {
+    fn served_scope(&self) -> Option<&str> {
+        Some(&self.workspace)
+    }
+
     fn call(&mut self, caller: &Caller, call: &ToolCall) -> Result<ToolOutput, BackendError> {
         // The identity is the bound principal. A caller that is not the one derived from it was
         // built from something else, and is refused rather than believed.

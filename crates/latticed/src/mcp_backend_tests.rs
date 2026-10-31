@@ -711,15 +711,11 @@ fn reads_return_one_row_a_page_in_key_order_or_not_found() {
         text.ends_with("\"truncated\":false,\"untrusted\":{\"rows\":[]}}"),
         "{text}"
     );
-    // A table that is not key/value shaped says so, to a principal that can see it.
-    assert!(is_tool_error(
-        &admin.read("plain", None),
-        "{\"error\":\"table_shape\"}"
-    ));
-    assert!(is_tool_error(
-        &admin.write("plain", "k", "v", None),
-        "{\"error\":\"table_shape\"}"
-    ));
+    // A table that is not key/value shaped says so, and says what shape it needs, to a principal
+    // that can see it.
+    let hint = r#"{"error":"table_shape","hint":"a key/value table is needed: key text PRIMARY KEY, value text, version bigint NOT NULL"}"#;
+    assert!(is_tool_error(&admin.read("plain", None), hint));
+    assert!(is_tool_error(&admin.write("plain", "k", "v", None), hint));
 }
 
 /// A read of a row whose text tries to speak for the server.
@@ -1314,4 +1310,50 @@ fn a_planted_inclusive_subscribe_cursor_is_caught() {
         let again = alice.subscribe(&first.next, 0);
         first.events.len() == 1 && again.events.is_empty()
     });
+}
+
+// ---- self-explaining refusals -----------------------------------------------------------------
+
+#[test]
+fn a_scope_the_server_does_not_serve_names_the_served_scope() {
+    let rig = setup();
+    let mut alice = rig.conn("alice");
+    // Alice holds grants on the served workspace. Asking for another scope is refused before the
+    // backend runs; the message names the one scope served, and nothing about her grants or the
+    // scope she asked for.
+    let out = alice.call("lattice_read", &read_args("elsewhere", "kv", None));
+    assert_eq!(error_code(&out), 40302, "{out}");
+    assert!(
+        out.contains(r#""message":"scope denied; this server serves scope \"team\"""#),
+        "{out}"
+    );
+    assert!(!out.contains("elsewhere") && !out.contains("kv"), "{out}");
+    // The same refusal for subscribe, the read-side tool.
+    let out = alice.call(
+        "lattice_subscribe",
+        &format!("{{\"scope\":\"elsewhere\",\"table\":\"kv\",\"after\":\"{ORIGIN}\"}}"),
+    );
+    assert!(
+        out.contains(r#""message":"scope denied; this server serves scope \"team\"""#),
+        "{out}"
+    );
+    // A sub-scope of the served workspace is covered by alice's grant, so it reaches the backend,
+    // which answers not_found (the sync scope is the workspace itself), not 40302.
+    let sub = alice.call("lattice_read", &read_args("team/sub", "kv", None));
+    assert!(is_tool_error(&sub, "{\"error\":\"not_found\"}"), "{sub}");
+}
+
+#[test]
+fn a_foreign_caller_is_refused_with_the_served_scope_too() {
+    let rig = setup();
+    // A caller holding admin's grants, sent on alice's connection: the backend refuses it as a
+    // policy denial, and that refusal names the served scope as well.
+    let forged = rig.backend("admin").caller().clone();
+    let mut alice = rig.conn("alice");
+    let out = alice.call_as(&forged, "lattice_read", &read_args(WS, "kv", None));
+    assert_eq!(error_code(&out), 40302, "{out}");
+    assert!(
+        out.contains(r#""message":"scope denied; this server serves scope \"team\"""#),
+        "{out}"
+    );
 }
