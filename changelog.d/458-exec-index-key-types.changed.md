@@ -1,0 +1,1 @@
+Index scans are now checked against PostgreSQL for each key type the planner narrows on: smallint, bigint, text, bytea, date, timestamptz, uuid and boolean. A NUMERIC key is refused by CREATE TABLE, and a NUMERIC column never narrows a scan; both are pinned by tests. The executor itself is unchanged.
