@@ -1,0 +1,1 @@
+The threat model now describes the sync gateway, MCP over HTTP, bearer-token credentials, the agent board, the dev stack and the install script as they are on `main`, and restates the gap rows they change.
