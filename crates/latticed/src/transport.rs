@@ -144,6 +144,16 @@ impl Transport {
     /// reads) and is bounded by an absolute `CLOSE_TIMEOUT`, so a peer that drains one byte per
     /// interval cannot hold the worker. The socket is always shut down afterwards.
     pub(super) fn shutdown(&mut self) -> io::Result<()> {
+        self.send_close_notify();
+        self.raw().socket.shutdown(Shutdown::Both)
+    }
+    /// Half-closes the connection for writing, after the same best-effort `close_notify` as
+    /// `shutdown`, so the caller can still read until the peer ends its side.
+    pub(super) fn half_close(&mut self) -> io::Result<()> {
+        self.send_close_notify();
+        self.raw().socket.shutdown(Shutdown::Write)
+    }
+    fn send_close_notify(&mut self) {
         if let Self::Tls(stream) = self {
             // The startup budget may be what ended the connection; the close has its own cap.
             stream.sock.startup_deadline = None;
@@ -155,7 +165,6 @@ impl Transport {
                 }
             }
         }
-        self.raw().socket.shutdown(Shutdown::Both)
     }
     /// Upgrades a plaintext transport to TLS in place. On failure the transport stays plaintext
     /// (over a duplicate handle of the same socket), so the caller can still close it.

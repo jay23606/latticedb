@@ -10,7 +10,7 @@
 use lattice_api::auth::{Accounts, DecoySecret, MAX_CREDENTIAL_BYTES};
 use lattice_api::exec_host::{Grant, HostLimits, MAX_POLICY_BYTES, PolicyFileError, PolicyTable};
 use latticed::stop::{self, DEFAULT_STOP_TIMEOUT, ForcedBy, StopCause, StopOutcome};
-use latticed::ws::{GatewayAuth, GatewayConfig};
+use latticed::ws::{GatewayAuth, GatewayConfig, check_gateway_exposure};
 use latticed::{
     Authentication, ServerConfig, ServerHandle, SqlConfig, SqlServer, TlsConfig,
     require_private_file,
@@ -53,7 +53,7 @@ fn run() -> Result<Exit, String> {
         }
         if option == "--help" || option == "-h" {
             println!(
-                "latticed [--listen IP:PORT] [--max-connections N] [--read-timeout-ms N] [--write-timeout-ms N] [--idle-timeout-ms N] [--response-timeout-ms N]\nLoopback development trust by default. Without --data-dir only SELECT 1 is answered. SQL: --data-dir DIR serves SQL from a durable data directory (statement ceiling --statement-timeout-max-ms N, default 30000; budget --statement-memory-bytes N, default 67108864; staged writes of one transaction --transaction-bytes N, default 268435456). Row policy is explicit: with development-trust pass --development-policy allow-all|deny-all; with scram-tls pass --account-policies FILE (one 'account<TAB>allow-all|deny-all' per line; unlisted accounts are denied). Committed rows, tables and their column definitions survive a restart. A data directory written before table definitions existed refuses its first CREATE TABLE until --allow-format-upgrade on (older builds cannot open the directory afterwards and there is no downgrade: take a verified backup first); a new directory needs nothing. SCRAM requires --auth scram-tls --tls-cert FILE --tls-key FILE --scram-verifiers FILE --scram-decoy-secret FILE. Sync gateway (WebSocket, protocol lattice.sync.v1, path /sync, requires --data-dir; loopback only until TLS exists on it): --gateway-listen IP:PORT enables it; --gateway-tokens FILE makes it require 'Authorization: Bearer' tokens from a credential file (mode 0600), re-read within 5 seconds of a change and on SIGHUP (a file that does not load keeps the tokens in use; after 10 minutes of failed loads no token works; SCRAM verifiers and policies are read at start only), otherwise it serves the loopback development principal and only with development-trust; --gateway-max-connections N (default 32) and --gateway-handshake-timeout-ms N (default 5000) bound it. Optional --startup-timeout-ms N bounds startup/TLS/authentication. SIGTERM and SIGINT stop it cleanly; a second signal, or --stop-timeout-ms N (default 30000) elapsing, abandons a stop that does not finish. Stdin control is --stdin-control on|off (default on): with on, the line 'shutdown' on stdin stops the server and so does end-of-file, so run it with stdin held open; under a supervisor or container pass --stdin-control off, which never reads stdin. Exit status: 0 clean stop, 1 failure, 2 forced stop. Without --idle-timeout-ms the read timeout also disconnects idle sessions. The TLS key and decoy secret files must not be accessible to group or others (mode 0600)."
+                "latticed [--listen IP:PORT] [--max-connections N] [--read-timeout-ms N] [--write-timeout-ms N] [--idle-timeout-ms N] [--response-timeout-ms N]\nLoopback development trust by default. Without --data-dir only SELECT 1 is answered. SQL: --data-dir DIR serves SQL from a durable data directory (statement ceiling --statement-timeout-max-ms N, default 30000; budget --statement-memory-bytes N, default 67108864; staged writes of one transaction --transaction-bytes N, default 268435456). Row policy is explicit: with development-trust pass --development-policy allow-all|deny-all; with scram-tls pass --account-policies FILE (one 'account<TAB>allow-all|deny-all' per line; unlisted accounts are denied). Committed rows, tables and their column definitions survive a restart. A data directory written before table definitions existed refuses its first CREATE TABLE until --allow-format-upgrade on (older builds cannot open the directory afterwards and there is no downgrade: take a verified backup first); a new directory needs nothing. SCRAM requires --auth scram-tls --tls-cert FILE --tls-key FILE --scram-verifiers FILE --scram-decoy-secret FILE. Sync gateway (WebSocket, protocol lattice.sync.v1, path /sync, and POST /mcp on the same port; requires --data-dir): --gateway-listen IP:PORT enables it; --gateway-tokens FILE makes it require 'Authorization: Bearer' tokens from a credential file (mode 0600), re-read within 5 seconds of a change and on SIGHUP (a file that does not load keeps the tokens in use; after 10 minutes of failed loads no token works; SCRAM verifiers and policies are read at start only), otherwise it serves the loopback development principal and only with development-trust; --tls-cert FILE and --tls-key FILE (the same files and key rules as scram-tls) serve the gateway over TLS. A non-loopback --gateway-listen needs both TLS files and --gateway-tokens, or it refuses to start; plaintext is for loopback development only (only 127.0.0.0/8 and ::1 are loopback; an IPv4-mapped address such as [::ffff:127.0.0.1] needs TLS and tokens). The gateway and the PostgreSQL listener share one certificate, so clients must trust a certificate whose name is valid for both ports. With development-trust the TLS files are accepted only with --gateway-listen, and then apply to the gateway alone (the PostgreSQL listener stays loopback trust in plaintext). POST /mcp answers only to the bound address or to localhost on the bound port; a DNS name or public address gets 403 until a configurable allowed-host list exists (#774). /sync checks only that Host is present and well formed, and refuses any browser Origin. --gateway-max-connections N (default 32) and --gateway-handshake-timeout-ms N (default 5000) bound it, and the handshake timeout covers the TLS handshake. Optional --startup-timeout-ms N bounds startup/TLS/authentication. SIGTERM and SIGINT stop it cleanly; a second signal, or --stop-timeout-ms N (default 30000) elapsing, abandons a stop that does not finish. Stdin control is --stdin-control on|off (default on): with on, the line 'shutdown' on stdin stops the server and so does end-of-file, so run it with stdin held open; under a supervisor or container pass --stdin-control off, which never reads stdin. Exit status: 0 clean stop, 1 failure, 2 forced stop. Without --idle-timeout-ms the read timeout also disconnects idle sessions. The TLS key and decoy secret files must not be accessible to group or others (mode 0600)."
             );
             return Ok(Exit::Clean);
         }
@@ -198,6 +198,23 @@ fn run() -> Result<Exit, String> {
             }
         };
     }
+    // The certificate and key serve PostgreSQL in scram-tls mode and the sync gateway in both modes.
+    // In development-trust they are accepted only for the gateway, which is what keeps the PostgreSQL
+    // listener's rules unchanged. The files are read inside each mode's arm, after that arm's own
+    // checks, so the existing error order holds.
+    let tls_given = certificates.is_some() || private_key.is_some();
+    if tls_given && auth_mode == "development-trust" && !gateway_listen {
+        return Err("TLS/credential options require --auth scram-tls".into());
+    }
+    if gateway_listen {
+        check_gateway_exposure(
+            gateway.address,
+            certificates.is_some() && private_key.is_some(),
+            gateway_tokens.is_some(),
+        )
+        .map_err(|why| format!("--gateway-listen {why}"))?;
+    }
+    let mut gateway_tls: Option<TlsConfig> = None;
     if data_dir.is_none() && (development_policy.is_some() || account_policies.is_some()) {
         return Err("--development-policy and --account-policies require --data-dir".into());
     }
@@ -212,12 +229,11 @@ fn run() -> Result<Exit, String> {
                         .into(),
                 );
             }
-            if certificates.is_some()
-                || private_key.is_some()
-                || credentials.is_some()
-                || decoy_secret.is_some()
-            {
+            if credentials.is_some() || decoy_secret.is_some() {
                 return Err("TLS/credential options require --auth scram-tls".into());
+            }
+            if gateway_listen {
+                gateway_tls = load_tls(certificates.as_deref(), private_key.as_deref())?;
             }
         }
         "scram-tls" => {
@@ -233,9 +249,9 @@ fn run() -> Result<Exit, String> {
             let secret = bounded_secret_file(decoy_path, 32)?;
             let secret = DecoySecret::from_bytes(&secret)
                 .map_err(|_| "decoy secret must contain exactly 32 binary bytes")?;
-            let cert = bounded_file(certificates.as_deref().ok_or("--tls-cert required")?, 65536)?;
-            let key =
-                bounded_secret_file(private_key.as_deref().ok_or("--tls-key required")?, 16384)?;
+            let tls = load_tls(certificates.as_deref(), private_key.as_deref())?
+                .ok_or("--tls-cert required")?;
+            gateway_tls = Some(tls.clone());
             let verifiers = bounded_file(
                 credentials.as_deref().ok_or("--scram-verifiers required")?,
                 MAX_CREDENTIAL_BYTES,
@@ -244,14 +260,15 @@ fn run() -> Result<Exit, String> {
                 std::str::from_utf8(&verifiers).map_err(|_| "invalid credential file encoding")?;
             let accounts =
                 Accounts::parse(text, secret).map_err(|_| "invalid credential configuration")?;
-            let tls = TlsConfig::from_pem(&cert, &key)
-                .map_err(|_| "invalid TLS certificate/key configuration")?;
             config.authentication = Authentication::ScramTls {
                 accounts: Arc::new(accounts),
                 tls,
             };
         }
         _ => return Err("--auth must be development-trust or scram-tls".into()),
+    }
+    if gateway_listen {
+        gateway.tls = gateway_tls;
     }
     let mode = auth_mode;
     let server = match data_dir {
@@ -369,6 +386,25 @@ fn require_regular(path: &str) -> Result<(), String> {
             "{path}: configured security path is not a regular file"
         ))
     }
+}
+
+/// Reads the certificate and key once, with the same bounds and key-file rules as the PostgreSQL
+/// listener. Both must be given together.
+fn load_tls(
+    certificates: Option<&str>,
+    private_key: Option<&str>,
+) -> Result<Option<TlsConfig>, String> {
+    let (cert_path, key_path) = match (certificates, private_key) {
+        (None, None) => return Ok(None),
+        (Some(cert), Some(key)) => (cert, key),
+        (Some(_), None) => return Err("--tls-key required".into()),
+        (None, Some(_)) => return Err("--tls-cert required".into()),
+    };
+    let cert = bounded_file(cert_path, 65536)?;
+    let key = bounded_secret_file(key_path, 16384)?;
+    TlsConfig::from_pem(&cert, &key)
+        .map(Some)
+        .map_err(|_| "invalid TLS certificate/key configuration".into())
 }
 
 enum Running {

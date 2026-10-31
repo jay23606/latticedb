@@ -228,7 +228,7 @@ principal, so it sees exactly the events a PostgreSQL reader of the same account
 
 `POST /mcp` on the sync gateway port (`latticed --data-dir DIR --gateway-listen 127.0.0.1:PORT
 --gateway-tokens FILE`; issue #527, part 1, with the browser and DNS-rebinding defences of issue #580). The
-gateway is loopback only and has no TLS yet (issue #578), so a non-loopback address is refused at start.
+gateway serves plaintext on loopback only. A non-loopback address needs `--tls-cert` and `--tls-key` as well as `--gateway-tokens`, and is refused at start otherwise (issue #578).
 Tokens come from the credential file given to `--gateway-tokens` (the same file the WebSocket gateway reads, re-read
 within 5 seconds of a change). The development gateway (`development-trust`, without `--gateway-tokens`) has no
 credential store, so `POST /mcp` answers `401` to every request there. Those refusals are not counted against
@@ -240,13 +240,17 @@ together so that no release has the endpoint without them. Not in it: the long-p
 `lattice_subscribe` call with `wait_ms` holds a connection for up to 30 seconds and counts only against the
 gateway's connection limit.
 
-Plaintext. The bearer token travels in the `Authorization` header unencrypted over loopback until TLS on the
-gateway port exists (issue #578). The listener refuses any non-loopback address, so the token does not leave
-the host; do not forward the port or put it behind a proxy.
+Plaintext and TLS. On loopback the bearer token may travel in the `Authorization` header unencrypted, which is
+for development only. With `--tls-cert` and `--tls-key` the same port serves TLS (the handshake runs under the
+handshake timeout), and clients must verify the certificate. A non-loopback address is accepted only with TLS and
+tokens; use a TLS-terminating proxy only if it keeps that protection.
 
 A request is one MCP JSON-RPC message in the body. Its headers must be:
 
-- `Host`: this listener's address (`127.0.0.1:PORT`) or `localhost:PORT`, exactly once. Anything else is `403`.
+- `Host`: this listener's address (`127.0.0.1:PORT`) or `localhost:PORT`, exactly once. Anything else is `403`. On a
+  non-loopback bind (`0.0.0.0:PORT`, `[::]:PORT`) a DNS name or public address therefore gets `403` as well: the
+  endpoint answers only to the bound address or localhost. A configurable allowed-host list is future work, tracked in
+  #774. The `Host` check is the DNS-rebinding defence and is not widened to make that work.
 - `Authorization: Bearer <token>`: the same verification, failure count and rate limit as the WebSocket
   upgrade. A missing, malformed, unknown or revoked token gets the same `401` bytes. Too many failures from
   one address get `429`.
@@ -302,7 +306,7 @@ the CLI does not set it yet). A scope outside the workspace is `40302 scope deni
 so a client that sent the wrong one learns which to send, and nothing about its grants. A sub-scope such as
 `default/x` is the tool error `not_found`. The `Accept` header is not checked: every answer is JSON.
 
-Not here: stdio, Streamable HTTP streams (SSE, GET, sessions and resumption), TLS, and the per-principal limit
+Not here: stdio, Streamable HTTP streams (SSE, GET, sessions and resumption), and the per-principal limit
 on long polls (issue #529). A `lattice_subscribe` call with `wait_ms` holds its connection thread for up to
 30 seconds; the connection counts against the gateway's connection limit, not a per-principal budget.
 

@@ -419,17 +419,24 @@ reason, never a token; a file that has not loaded for 10 minutes refuses every t
 
 ## Sync gateway (WebSocket)
 
-Experimental, loopback only, pre-alpha. `latticed --data-dir DIR --development-policy allow-all --gateway-listen 127.0.0.1:5433`
+Experimental, pre-alpha. `latticed --data-dir DIR --development-policy allow-all --gateway-listen 127.0.0.1:5433`
 serves the [sync protocol](../../formats/sync-protocol-v1.md) (rows only, read only) at `ws://ADDR/sync` with the
 subprotocol `lattice.sync.v1`; each sync frame is one binary message, text is closed with 1003. The banner of the
 server names the gateway address.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--gateway-listen IP:PORT` | off | Enables the gateway. Needs `--data-dir`. A non-loopback address is refused: there is no TLS on this port yet (#578). |
+| `--gateway-listen IP:PORT` | off | Enables the gateway. Needs `--data-dir`. Plaintext only on a loopback address. A non-loopback address needs `--tls-cert`, `--tls-key` and `--gateway-tokens`, or latticed refuses to start (#578). |
+| `--tls-cert FILE`, `--tls-key FILE` | none | With `--gateway-listen`, serve the gateway port over TLS. These are the same files and key rules (mode 0600, bounded reads) as the PostgreSQL listener in `scram-tls`, and one certificate serves both. With `--auth development-trust` they are accepted only together with `--gateway-listen` and apply to the gateway alone; the PostgreSQL listener stays loopback trust in plaintext. In `scram-tls` the gateway always uses them. The handshake runs under `--gateway-handshake-timeout-ms` and holds a handshake place, so a stalled handshake is cut and frees its place. Plaintext clients get no HTTP reply on that port. |
 | `--gateway-tokens FILE` | none | Require `Authorization: Bearer lat_...` from this credential file (mode 0600), re-read within 5 seconds of a change and on SIGHUP (SIGHUP is caught only when this flag is set). A file that does not load keeps the tokens in use. SCRAM verifiers and policies are not re-read. The connection is the token's account and its table grants (`--account-policies`, which this flag also allows with `--auth development-trust`). Without it the gateway serves the loopback development principal and only with `--auth development-trust`. |
 | `--gateway-max-connections N` | 32 | Connections at once, including upgrades in progress (at most 8 of those). The next one gets `503`. |
 | `--gateway-handshake-timeout-ms N` | 5000 | One absolute budget from accept to the `101` response. |
+
+Host and Origin. `/sync` checks that `Host` is present and well formed, but not its value, and refuses any browser
+`Origin` with `403` (the default policy). `POST /mcp` answers only to the bound address or to `localhost` on the bound
+port: a `Host` naming a DNS name, or a public address on a non-loopback bind, gets `403`, and any `Origin` gets `403`.
+A configurable allowed-host list is future work, tracked in #774; the `Host` check is the DNS-rebinding defence and is
+not widened for it.
 
 The token goes in the `Authorization` header only: a request target with a query string gets `400`, two
 `Authorization` headers get `401`, and a missing, malformed, unknown, revoked or expired token all get the same
@@ -438,7 +445,7 @@ the connection is. Reads wake on the executor's commit notifier and go through t
 the rest of the server; a fallback read every second means a lost wake costs latency only. The connection thread
 looks at the wake between socket reads of up to 20 ms, so a wake adds up to that. A client that stops reading is
 disconnected at the write budget; resume by subscribing again with the last acknowledged cursor. Not done here:
-TLS, an idle deadline (#578), byte budgets per principal (#529) and the security event log (#530). Token reload,
+an idle deadline (#578), byte budgets per principal (#529) and the security event log (#530). Token reload,
 revocation of live connections and expiry are done (#577): a revoked or expired token's connection is closed with
 1008 after the change is read, and a token that expires is closed at its expiry (within the 5 second revalidation).
 Rotation is the credential file's rule: two active tokens per account, the older ending at most seven days after the

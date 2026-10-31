@@ -16,7 +16,7 @@ Requirements and exit criteria are in [the Phase 3 specification](../spec/03-syn
 
 ## Implemented slices
 
-Merged. One server piece is connected: `latticed --gateway-listen` serves the sync protocol over WebSocket (experimental: loopback only, no TLS, read only, rows only). The rest of this list is not connected to a listener (the evidence paragraphs below give the measurements and
+Merged. One server piece is connected: `latticed --gateway-listen` serves the sync protocol over WebSocket (experimental: plaintext only on loopback; a non-loopback address needs TLS and bearer tokens since issue #578; read only, rows only). The rest of this list is not connected to a listener (the evidence paragraphs below give the measurements and
 what was not run):
 
 - Typed change-feed event model with a stable cursor, and the experimental change-feed and sync frame

@@ -55,8 +55,18 @@ trickles the request head would otherwise hold a connection open) and bound the 
 in that phase. The default frame cap equals the message cap, so a maximal sync frame is accepted as one
 unfragmented message.
 
-The first slice was only the codec. The second (issue #524, part 1) adds a loopback listener in `latticed` with bearer-token authentication at the upgrade and real-socket tests; there is still no TLS on it (so a non-loopback address is refused, #578), so issue #242 stays open. Per-frame and per-message bounds are
+The first slice was only the codec. The second (issue #524, part 1) adds a loopback listener in `latticed` with bearer-token authentication at the upgrade and real-socket tests; TLS on it is configured with the PostgreSQL listener's certificate and key (#578), and a non-loopback address needs TLS and tokens, so issue #242 stays open for the rest of its scope. Per-frame and per-message bounds are
 in the codec; connection counts, aggregate memory and queue bounds remain host policy. WebSocket runs on
 TCP, so a lost packet stalls every subscription on that connection; clients that need isolation open
 more than one connection. The permessage-deflate extension is not negotiated, which avoids compression
 side channels on authenticated data and keeps frame sizes predictable.
+
+## Implementation status
+
+Gateway TLS (issue #578) is implemented. `--tls-cert` and `--tls-key` serve the gateway port over TLS, with
+the same certificate and key as the PostgreSQL listener, so clients must trust a name valid for both ports. A
+non-loopback `--gateway-listen` needs TLS and `--gateway-tokens`; otherwise latticed refuses to start. Plaintext
+is for loopback development only. Loopback is `127.0.0.0/8` and `::1` (as in the PostgreSQL listener); an IPv4-mapped address such as `[::ffff:127.0.0.1]` needs TLS and tokens. `POST /mcp` answers
+only to its bound address or to localhost on the bound port, so a DNS name or public address gets `403` until
+the configurable allowed-host list of #774 exists. `/sync` checks that `Host` is present and well formed, and
+refuses any browser `Origin`. Idle deadlines and the rest of #578 are still open.

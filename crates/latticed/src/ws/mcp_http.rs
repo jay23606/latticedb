@@ -37,10 +37,11 @@ use super::{
     unix_secs, write_all_by,
 };
 use crate::mcp_backend::McpBackend;
+use crate::transport::Transport;
 use lattice_core::bugs::{self, Bug};
 use lattice_sdk::mcp::{Caller, Json, Server, parse_json};
 use std::io::Read;
-use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -249,7 +250,7 @@ fn named_principal(body: &[u8]) -> Option<String> {
 /// Answers one `POST /mcp`. `buf` holds the bytes read so far, which start with the request line.
 /// Returns when the response is written; the connection is then closed by its owner.
 pub(super) fn answer(
-    socket: &mut TcpStream,
+    socket: &mut Transport,
     buf: Vec<u8>,
     deadline: Instant,
     address: IpAddr,
@@ -447,7 +448,7 @@ pub(super) fn answer(
 
 /// Reads until the head ends. Returns the head without its blank line and the bytes that followed it.
 fn read_head(
-    socket: &mut TcpStream,
+    socket: &mut Transport,
     mut buf: Vec<u8>,
     deadline: Instant,
     shared: &Shared,
@@ -487,7 +488,7 @@ fn read_head(
         if left.is_zero() {
             return None;
         }
-        socket.set_read_timeout(Some(cfg.slice.min(left))).ok()?;
+        socket.set_deadline(Instant::now() + cfg.slice.min(left));
         match socket.read(&mut chunk) {
             Ok(0) => return None,
             Ok(n) => buf.extend_from_slice(chunk.get(..n)?),
@@ -505,7 +506,7 @@ fn read_head(
 
 /// Reads the body: exactly `declared` bytes, of which `body` already holds the first ones.
 fn read_body(
-    socket: &mut TcpStream,
+    socket: &mut Transport,
     mut body: Vec<u8>,
     declared: usize,
     deadline: Instant,
@@ -521,9 +522,7 @@ fn read_body(
         if left.is_zero() {
             return None;
         }
-        socket
-            .set_read_timeout(Some(shared.cfg.slice.min(left)))
-            .ok()?;
+        socket.set_deadline(Instant::now() + shared.cfg.slice.min(left));
         let room = (declared - body.len()).min(chunk.len());
         let window = chunk.get_mut(..room)?;
         match socket.read(window) {
@@ -542,11 +541,11 @@ fn read_body(
     Some(body)
 }
 
-fn refuse(socket: &mut TcpStream, cfg: &GatewayConfig, status: u16, phrase: &str, message: &str) {
+fn refuse(socket: &mut Transport, cfg: &GatewayConfig, status: u16, phrase: &str, message: &str) {
     send(socket, cfg, status, phrase, TEXT, message.as_bytes());
 }
 
-fn unauthorized(socket: &mut TcpStream, cfg: &GatewayConfig) {
+fn unauthorized(socket: &mut Transport, cfg: &GatewayConfig) {
     send(
         socket,
         cfg,
@@ -559,7 +558,7 @@ fn unauthorized(socket: &mut TcpStream, cfg: &GatewayConfig) {
 
 /// Writes one response and closes. No CORS header is ever part of it.
 fn send(
-    socket: &mut TcpStream,
+    socket: &mut Transport,
     cfg: &GatewayConfig,
     status: u16,
     phrase: &str,
@@ -573,18 +572,19 @@ fn send(
     let mut out = head.into_bytes();
     out.extend_from_slice(body);
     let deadline = Instant::now() + cfg.response_timeout;
-    let _ = write_all_by(socket, &out, cfg.write_timeout, deadline);
+    let _ = write_all_by(socket, &out, deadline);
     linger(socket, cfg);
 }
 
-/// Half-closes, then reads what the client still sends for a short grace, so a response is not
-/// destroyed by a reset when the request was refused before its body was read.
-fn linger(socket: &mut TcpStream, cfg: &GatewayConfig) {
-    let _ = socket.shutdown(Shutdown::Write);
+/// Half-closes (a TLS session sends `close_notify` first), then reads what the client still sends for
+/// a short grace, so a response is not destroyed by a reset when the request was refused before its
+/// body was read.
+fn linger(socket: &mut Transport, cfg: &GatewayConfig) {
+    let _ = socket.half_close();
     let until = Instant::now() + CLOSE_GRACE;
     let mut sink = [0u8; 512];
-    let _ = socket.set_read_timeout(Some(cfg.slice));
     while Instant::now() < until {
+        socket.set_deadline(Instant::now() + cfg.slice);
         match socket.read(&mut sink) {
             Ok(0) => return,
             Ok(_) => {}

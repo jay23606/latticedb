@@ -55,8 +55,10 @@
 //!
 //! # Not here
 //!
-//! TLS on the gateway port (so a non-loopback address is refused at start), idle deadlines, a byte
-//! budget per principal, the security event log and the same-port protocol sniff are #578, #529, #530.
+//! Idle deadlines, a byte budget per principal, the security event log and the same-port protocol
+//! sniff are #578, #529, #530. TLS is `GatewayConfig::tls` (issue #578): when it is set, every
+//! connection completes the handshake first, under the handshake deadline, and a non-loopback
+//! address is refused unless it is set and bearer tokens are used.
 //!
 //! # The MCP endpoint
 //!
@@ -70,6 +72,7 @@ mod mcp_http;
 
 use crate::mcp_backend::McpBackend;
 use crate::tokens::{CredentialWatch, Reload};
+use crate::transport::{TlsConfig, Transport};
 use lattice_api::bearer::{CredentialStore, FailureLimiter, verify_bearer};
 use lattice_api::principal::Principal;
 use lattice_api::subscribe::{CloseReason, EventSource, HostConfig, Output, SubscriptionHost};
@@ -172,8 +175,13 @@ pub enum GatewayAuth {
 /// Settings of the gateway listener.
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
-    /// Address to bind. Only loopback is accepted until TLS exists on this port (issue #578).
+    /// Address to bind. A non-loopback address needs both [`GatewayConfig::tls`] and bearer tokens
+    /// (issue #578); plaintext is accepted on loopback only.
     pub address: SocketAddr,
+    /// Server certificate and key for the gateway port (issue #578). When set, every connection
+    /// completes a TLS handshake (within `handshake_timeout`) before the upgrade. The same
+    /// [`TlsConfig`] the PostgreSQL listener uses.
+    pub tls: Option<TlsConfig>,
     /// Connections admitted at once, including those still upgrading, `1..=1024`.
     pub max_connections: usize,
     /// Connections that have not finished the upgrade, `1..=max_connections`.
@@ -225,6 +233,7 @@ impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
             address: SocketAddr::from(([127, 0, 0, 1], 5433)),
+            tls: None,
             max_connections: 32,
             max_handshakes: 8,
             handshake_timeout: Duration::from_secs(5),
@@ -252,11 +261,11 @@ impl GatewayConfig {
     fn validate(&self) -> io::Result<()> {
         let bad = |why: &'static str| Err(io::Error::new(io::ErrorKind::InvalidInput, why));
         let usable = |d: Duration| !d.is_zero() && Instant::now().checked_add(d).is_some();
-        if !self.address.ip().is_loopback() {
-            return bad(
-                "the sync gateway serves plaintext and needs a loopback address until TLS is added (issue #578)",
-            );
-        }
+        // Plaintext is for loopback development only (ADR 0027, issue #578); the same check serves the
+        // command line, so the library and the binary refuse the same settings.
+        let tokens = !matches!(self.auth, GatewayAuth::LocalDevelopment);
+        check_gateway_exposure(self.address, self.tls.is_some(), tokens)
+            .map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
         if self.max_connections == 0 || self.max_connections > 1024 {
             return bad("gateway connections must be 1..=1024");
         }
@@ -309,6 +318,29 @@ fn host_config(cfg: &GatewayConfig) -> HostConfig {
     host.batch_events = cfg.batch_events;
     host.max_frames_per_pump = cfg.max_frames_per_pump;
     host
+}
+
+/// Refuses a gateway address that would serve connections without TLS or without bearer tokens
+/// (ADR 0027, issue #578). Only a loopback address may serve plaintext or the development principal.
+/// Loopback is classified like the PostgreSQL listener does, with `IpAddr::is_loopback`: `127.0.0.0/8`
+/// and `::1` only. An IPv4-mapped address such as `[::ffff:127.0.0.1]` is not loopback here.
+/// Anywhere else the gateway needs both `tls` (a certificate and key were given) and `tokens` (bearer
+/// tokens are used). The error names what is missing, so the command line can report it too.
+pub fn check_gateway_exposure(address: SocketAddr, tls: bool, tokens: bool) -> Result<(), String> {
+    if address.ip().is_loopback() || (tls && tokens) {
+        return Ok(());
+    }
+    let mut missing = Vec::new();
+    if !tls {
+        missing.push("--tls-cert FILE and --tls-key FILE");
+    }
+    if !tokens {
+        missing.push("--gateway-tokens FILE");
+    }
+    Err(format!(
+        "{address} is not a loopback address: a sync gateway there needs TLS and bearer tokens; missing {}",
+        missing.join(" and ")
+    ))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -839,31 +871,17 @@ fn refuse(socket: &TcpStream, status: u16, phrase: &str, body: &str) {
 // One connection
 // ---------------------------------------------------------------------------------------------
 
-/// Writes all of `bytes` or fails: each write call and the whole buffer are bounded.
-fn write_all_by(
-    socket: &mut TcpStream,
-    mut bytes: &[u8],
-    per_write: Duration,
-    deadline: Instant,
-) -> io::Result<()> {
-    while !bytes.is_empty() {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(io::ErrorKind::TimedOut.into());
-        }
-        socket.set_write_timeout(Some(per_write.min(left)))?;
-        match socket.write(bytes) {
-            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
-            Ok(n) => bytes = bytes.get(n..).unwrap_or_default(),
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
+/// Writes all of `bytes` and flushes it (a TLS session buffers plaintext until it is flushed), all
+/// within one absolute `deadline`. Every write call is bounded by the transport's write timeout.
+fn write_all_by(socket: &mut Transport, bytes: &[u8], deadline: Instant) -> io::Result<()> {
+    socket.set_response_deadline(Some(deadline));
+    let result = socket.write_all(bytes).and_then(|()| socket.flush());
+    socket.set_response_deadline(None);
+    result
 }
 
 fn serve<S: EventSource>(
-    mut socket: TcpStream,
+    socket: TcpStream,
     address: IpAddr,
     mut slot: Slot,
     shared: &Shared,
@@ -875,9 +893,18 @@ fn serve<S: EventSource>(
         return;
     }
     let _ = socket.set_nodelay(true);
-    let Some((identity, leftover)) = upgrade(&mut socket, address, shared, &mut slot) else {
+    // One absolute budget covers the TLS handshake, the request head and the token check. A stalled
+    // handshake is cut here, and the place it held is released when this function returns.
+    let Some(deadline) = Instant::now().checked_add(shared.cfg.handshake_timeout) else {
         return;
     };
+    let mut socket = Transport::new(socket, deadline, shared.cfg.write_timeout);
+    let Some((identity, leftover)) = upgrade(&mut socket, deadline, address, shared, &mut slot)
+    else {
+        let _ = socket.shutdown();
+        return;
+    };
+    socket.authenticated();
     slot.upgraded();
     let now_s = shared.epoch.elapsed().as_secs();
     let cfg = host_config(&shared.cfg);
@@ -886,6 +913,7 @@ fn serve<S: EventSource>(
         Identity::Account(principal, _) => SubscriptionHost::new(cfg, now_s, principal.clone()),
     };
     let Ok(host) = host else {
+        let _ = socket.shutdown();
         return;
     };
     let ws = Connection::new(
@@ -902,7 +930,7 @@ fn serve<S: EventSource>(
         Identity::Development => None,
         Identity::Account(_, header) => Some(header),
     };
-    Live {
+    let mut live = Live {
         socket,
         ws,
         host,
@@ -916,24 +944,30 @@ fn serve<S: EventSource>(
         last_check: Instant::now(),
         checked_generation: None,
         deadline: None,
-    }
-    .run();
+    };
+    live.run();
+    // Every exit that can still write sends `close_notify` on a TLS session first (a no-op when
+    // `finish` already did), then shuts the socket down.
+    let _ = live.socket.shutdown();
 }
 
 /// Reads the request, answers refusals, and on success writes the `101`. `None` means the socket
-/// was dropped (a refusal was already written when there was one to write).
+/// was dropped (a refusal was already written when there was one to write). With TLS configured the
+/// handshake runs first, under the same `deadline`; a plaintext client fails it and gets nothing.
 fn upgrade(
-    socket: &mut TcpStream,
+    socket: &mut Transport,
+    deadline: Instant,
     address: IpAddr,
     shared: &Shared,
     slot: &mut Slot,
 ) -> Option<(Identity, Vec<u8>)> {
     let cfg = &shared.cfg;
-    let deadline = Instant::now().checked_add(cfg.handshake_timeout)?;
-    let reply = |socket: &mut TcpStream, bytes: &[u8]| {
+    if let Some(tls) = &cfg.tls {
+        socket.upgrade_in_place(tls).ok()?;
+    }
+    let reply = |socket: &mut Transport, bytes: &[u8]| {
         let until = Instant::now() + Duration::from_millis(500);
-        let _ = write_all_by(socket, bytes, Duration::from_millis(250), until);
-        let _ = socket.shutdown(Shutdown::Both);
+        let _ = write_all_by(socket, bytes, until);
     };
     let codec = UpgradeConfig {
         max_head: cfg.max_head,
@@ -979,10 +1013,9 @@ fn upgrade(
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             // A slow request head is cut off without a reply: it may not be a client at all.
-            let _ = socket.shutdown(Shutdown::Both);
             return None;
         }
-        socket.set_read_timeout(Some(cfg.slice.min(left))).ok()?;
+        socket.set_deadline(Instant::now() + cfg.slice.min(left));
         match socket.read(&mut chunk) {
             Ok(0) => return None,
             Ok(n) => buf.extend_from_slice(chunk.get(..n)?),
@@ -1046,9 +1079,8 @@ fn upgrade(
     } else {
         Identity::Development
     };
-    let left = deadline.saturating_duration_since(Instant::now());
     let response = found.response();
-    if write_all_by(socket, &response, cfg.write_timeout, Instant::now() + left).is_err() {
+    if write_all_by(socket, &response, deadline).is_err() {
         return None;
     }
     let leftover = buf.get(used..).unwrap_or_default().to_vec();
@@ -1061,7 +1093,7 @@ enum Flow {
 }
 
 struct Live<'a, S: EventSource> {
-    socket: TcpStream,
+    socket: Transport,
     ws: Connection,
     host: SubscriptionHost,
     source: S,
@@ -1089,7 +1121,7 @@ impl<S: EventSource> Live<'_, S> {
         let deadline = self
             .deadline
             .unwrap_or_else(|| Instant::now() + cfg.response_timeout);
-        let result = write_all_by(&mut self.socket, &self.out, cfg.write_timeout, deadline);
+        let result = write_all_by(&mut self.socket, &self.out, deadline);
         self.out.clear();
         result
     }
@@ -1112,11 +1144,12 @@ impl<S: EventSource> Live<'_, S> {
         if self.flush().is_err() {
             return;
         }
-        let _ = self.socket.shutdown(Shutdown::Write);
+        let _ = self.socket.half_close();
         let until = Instant::now() + CLOSE_GRACE;
         let mut sink = [0u8; 512];
-        let _ = self.socket.set_read_timeout(Some(self.shared.cfg.slice));
         while Instant::now() < until {
+            self.socket
+                .set_deadline(Instant::now() + self.shared.cfg.slice);
             match self.socket.read(&mut sink) {
                 Ok(0) => return,
                 Ok(_) => {}
@@ -1156,7 +1189,7 @@ impl<S: EventSource> Live<'_, S> {
         }
     }
 
-    fn run(mut self) {
+    fn run(&mut self) {
         let shared = self.shared;
         let cfg = &shared.cfg;
         loop {
@@ -1206,13 +1239,8 @@ impl<S: EventSource> Live<'_, S> {
         }
         let mut chunk = [0u8; 2048];
         let room = (cap - self.inbuf.len()).min(chunk.len());
-        if self
-            .socket
-            .set_read_timeout(Some(self.shared.cfg.slice))
-            .is_err()
-        {
-            return Flow::End;
-        }
+        self.socket
+            .set_deadline(Instant::now() + self.shared.cfg.slice);
         let Some(window) = chunk.get_mut(..room) else {
             return Flow::End;
         };
@@ -1554,6 +1582,41 @@ mod tests {
         let still = still_valid(header.as_bytes(), &alice, &store, 10);
         bugs::clear();
         assert!(still, "the planted bug must keep a revoked connection");
+    }
+
+    fn test_tls() -> TlsConfig {
+        let generated = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        TlsConfig::from_pem(
+            generated.cert.pem().as_bytes(),
+            generated.signing_key.serialize_pem().as_bytes(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn gateway_plaintext_on_loopback_only() {
+        let (store, _) = store_with("alice");
+        let config = |address: [u8; 4], tls: bool, bearer: bool| GatewayConfig {
+            address: SocketAddr::from((address, 0)),
+            tls: tls.then(test_tls),
+            auth: if bearer {
+                GatewayAuth::Bearer(store.clone())
+            } else {
+                GatewayAuth::LocalDevelopment
+            },
+            ..GatewayConfig::default()
+        };
+        // Plaintext development on loopback, with or without tokens, and TLS on loopback too.
+        assert!(config([127, 0, 0, 1], false, false).validate().is_ok());
+        assert!(config([127, 0, 0, 1], false, true).validate().is_ok());
+        assert!(config([127, 0, 0, 1], true, false).validate().is_ok());
+        // Anywhere else plaintext is refused, and so is TLS without tokens.
+        let refused = config([0, 0, 0, 0], false, true).validate();
+        assert!(refused.unwrap_err().to_string().contains("TLS"));
+        let no_tokens = config([0, 0, 0, 0], true, false).validate();
+        assert!(no_tokens.unwrap_err().to_string().contains("bearer tokens"));
+        assert!(config([0, 0, 0, 0], true, true).validate().is_ok());
+        assert!(config([10, 1, 2, 3], false, false).validate().is_err());
     }
 
     #[test]
